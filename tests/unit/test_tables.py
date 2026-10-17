@@ -71,7 +71,7 @@ class TestBareColumns:
         )
         assert lines == [
             "  VMAF 10% |  50%",
-            "  ---------|-----",
+            "  ---------+-----",
             "      43.0 | 45.0  ◀ ✔",
         ]
 
@@ -114,10 +114,10 @@ class TestTruncation:
 
 
 class TestPipePreservingRules:
-    """Rule rows mirror in-cell divider positions."""
+    """Rule rows mark in-cell divider crossings."""
 
     def test_piped_column_rules_at_the_cell_offsets(self) -> None:
-        """Sub-column cells and their header produce a rule with ``|`` at the
+        """Sub-column cells and their header produce a rule with ``+`` at the
         same offsets — the sub-column effect."""
         lines = format_table(
             [Column("VMAF 10% |  50%", align="right", min_width=15)],
@@ -125,7 +125,7 @@ class TestPipePreservingRules:
         )
         assert lines == [
             "  VMAF 10% |  50%",
-            "  ---------|-----",
+            "  ---------+-----",
             "      43.0 | 45.0",
             "      -0.7 | -1.2",
         ]
@@ -136,7 +136,7 @@ class TestPipePreservingRules:
         lines = format_table([Column("A | B", align="right")], [["43.0"]])
         assert lines == [
             "  A | B",
-            "  --|--",
+            "  --+--",
             "   43.0",
         ]
 
@@ -166,12 +166,12 @@ class TestProperties:
         rows=st.lists(st.lists(_cell_text, min_size=1, max_size=4), max_size=5),
     )
     def test_rule_uses_only_rule_characters(self, headers: list[str], rows: list[list[str]]) -> None:
-        """The rule row contains only dashes, pipes, and gap/blank space."""
+        """The rule row contains only dashes, crossings, and gap/blank space."""
         n = len(headers)
         rows = [row[:n] + [""] * (n - len(row)) for row in rows]
         columns = [Column(h, align="right") for h in headers]
         rule = format_table(columns, rows)[1]
-        assert set(rule) <= {"-", "|", " "}
+        assert set(rule) <= {"-", "+", " "}
 
     @given(
         header=_cell_text,

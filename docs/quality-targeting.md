@@ -231,7 +231,7 @@ codec such as AV1 fails at startup naming the nearest aligned values).
   strategies (bigger **and** no better on any measured metric) are pruned;
   every **survivor** is fully encoded — no auto-pick, no composite score.
   The smallest survivor becomes the measurement **anchor**: its min-across-
-  test-chunks metrics form a synthetic ruler against which the other
+  test-chunks metrics form a synthetic target set against which the other
   survivors are shown as size and metric deltas in the optimization table.
   Single-strategy runs and `--no-optimize` skip this machinery entirely.
 - **Cleanup is blocked.** A fixed run with `--cleanup` (level INTERMEDIATE or
@@ -257,7 +257,7 @@ pyqenc auto movie.mkv -q 20 -y    # new value: only the crf-20 encodes run;
 ```
 
 Configuration targets do not drive any decision or verdict in a fixed run —
-encoding presentation judges winners against the anchor's synthetic ruler
+encoding presentation judges winners against the anchor's synthetic targets
 (the anchor's min-across-test-chunk p10 and median values per metric;
 compared runs) or shows absolute values (uncompared runs), and the merged
 phase suppresses the config-target missed-targets warning.

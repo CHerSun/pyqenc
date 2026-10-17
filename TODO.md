@@ -1407,7 +1407,75 @@ apply to telemetry; §117 stub), and `app_config.py`'s three opens are a
 
 ---
 
-## Last known = 128
+## 129. Revise terminology
+
+Quality targets vs quality vs quality range. Measurements, sidecars, anchor (including synthetic targets), intermediate results (also with sidecars).
+Looks like our terminology is muddy now. Need a more concise and distinct one.
+
+So:
+
+- collect terminilogy from both code and docs.
+- Revise (with explicit approval) and define
+- Apply
+
+Note (2026-10-17): the comparison tables' rendered output already dropped
+"ruler" (now `anchor:` / `targets:` lines) — code identifiers still carry it
+(`Ruler`, `RULER_GLYPH`, `ComparisonTable.ruler`, the `ruler` param names).
+
+---
+
+## 130. Review dependencies
+
+There are quite heavy dependencies, a total of almost 250 MB! Need a review, if we really need them or if they can be replaced by a more lightweight alternatives:
+
+  112.0 MiB ████      ▏/cv2
+   41.0 MiB █▌        ▏/pandas
+   26.4 MiB ▉         ▏/matplotlib
+   22.0 MiB ▊         ▏/numpy
+   20.2 MiB ▋         ▏/numpy.libs
+   14.6 MiB ▌         ▏/PIL
+   11.3 MiB ▍         ▏/fontTools
+
+---
+
+## 131. YAML round-trip drops U+0085 (NEL)
+
+**Status:** needs thinking (found 2026-10-17; pre-existing on main —
+Hypothesis drew the falsifier and cached it in `.hypothesis/examples`,
+so it now fails deterministically)
+
+`test_yaml_utils.py::test_properties_round_trip_preserves_arbitrary_text`
+fails on the single character `\x85` (NEL): a model field holding it
+dumps+loads back as `' '`. PyYAML treats NEL as a YAML 1.1 line break,
+so a scalar consisting of exactly NEL normalizes away on load. Question
+is whether to care (no real pipeline field carries NEL) — options:
+exclude line-break-class characters from the property's alphabet, or
+make the dump side escape them. Related: the BOM work (§124) already
+special-cases one invisible codepoint.
+
+---
+
+## 132. Merge swallows measurement failures — dataless summaries stay green
+
+**Status:** needs thinking (reachability census 2026-10-17, surfaced by
+the ruler-less table discussion)
+
+`MergePhase` catches `(OSError, ValueError)` around `_measure_quality`
+(merge.py, the "Could not measure quality" warning) and keeps the merged
+output with `metrics_dict = {}`. If every strategy's measurement fails
+this way, all summary rows persist empty, `_select_anchor` returns None,
+and the ruler-less comparison table renders in a green run — plus the
+empty summaries are baked into `merge.yaml` for replays. Asymmetric with
+encoding/optimization, where the same measurer's exceptions fail the
+phase before any table (and `_finish_measurement` also builds the plot,
+so even a matplotlib failure after a successful parse erases the metrics
+at merge while crashing encoding). Direction: fail loudly, matching
+encoding's semantics — recovery reuses the complete merged outputs and
+re-measures only, so the rerun is cheap.
+
+---
+
+## Last known = 132
 
 Keep this updated, so we can keep continuous numbering even on last todo item deletion.
 Keep this the last entry for easy human updates.

@@ -14,8 +14,10 @@ from hypothesis import strategies as st
 from pyqenc.models import QualityTarget
 from pyqenc.quality import MetricStatKey, MetricType, StatisticType
 from pyqenc.summary_tables import (
+    ABSOLUTE_MARKER,
     ANCHOR_SUFFIX,
     MISSING_VALUE,
+    NAME_HEADER,
     RULER_GLYPH,
     SELECTED_GLYPH,
     SOURCE_CUE,
@@ -64,9 +66,10 @@ def _lines_for(table: ComparisonTable) -> list[str]:
 
 def _strategy_rows(lines: list[str]) -> list[str]:
     """The strategy data lines: table body minus the ruler-carrier rows."""
+    header = next(i for i, ln in enumerate(lines) if ln.lstrip().startswith(NAME_HEADER))
     return [
-        ln for ln in lines[4:-1]
-        if "targets" not in ln and "(src)" not in ln and "ruler:" not in ln
+        ln for ln in lines[header + 2:-1]
+        if "targets" not in ln and "(src)" not in ln
     ]
 
 
@@ -83,15 +86,19 @@ class TestStrategyRow:
 class TestSearchMerge:
     """Targets ride the source row; strategies show deltas and verdicts."""
 
-    def test_convention_line_states_ruler_bases_and_legend(self) -> None:
+    def test_convention_lines_state_bar_bases_and_legend(self) -> None:
         lines = _lines_for(ComparisonTable(
             rows=_ROWS, ruler=Ruler(kind="targets", targets=_TARGETS),
             source=SourceInfo(stem="Movie", size_bytes=1_000_000_000),
             mark_legend="recommended",
         ))
         assert lines[1] == (
-            "  ruler: configured targets ◎ · Δ vs targets · size Δ% vs source · ◀ recommended"
+            "  targets: ◎  configured (VMAF · PSNR)"
         )
+        assert lines[2] == (
+            "  Δ vs targets · size Δ% vs source · ≈ negligible · ◀ recommended"
+        )
+        assert lines[3] == ""  # one blank line between the info block and the table
 
     def test_source_row_carries_glyph_cue_and_target_absolutes(self) -> None:
         lines = _lines_for(ComparisonTable(
@@ -101,7 +108,7 @@ class TestSearchMerge:
         source_line = next(ln for ln in lines if "(src)" in ln)
         assert f"{RULER_GLYPH} Movie (src)" in source_line
         assert SOURCE_CUE in source_line
-        assert "93.0 | 96.0" in source_line  # the targeted absolutes ride it
+        assert "◆ 93.0 | 96.0" in source_line  # the targeted absolutes ride it, ◆-marked
 
     def test_rows_sorted_by_size_with_deltas_and_marks(self) -> None:
         lines = _lines_for(ComparisonTable(
@@ -142,9 +149,12 @@ class TestSearchOptimization:
             mark_legend="selected", size_tolerance_pct=5.0,
         ))
         assert lines[1] == (
-            "  ruler: configured targets ◎ · Δ vs targets · size Δ% vs best size · ◀ selected · size tolerance 5%"
+            "  targets: ◎  configured (VMAF · PSNR)"
         )
-        assert f"{RULER_GLYPH} targets" in lines[4]  # the leading ruler row
+        assert lines[2] == (
+            "  Δ vs targets · size Δ% vs best size · ≈ negligible · ◀ selected · size tolerance 5%"
+        )
+        assert f"{RULER_GLYPH} targets" in lines[6]  # the leading ruler row
 
     def test_smallest_row_is_the_bare_basis(self) -> None:
         lines = _lines_for(ComparisonTable(
@@ -164,7 +174,7 @@ class TestFixedMode:
         ))
         anchor_line = next(ln for ln in _strategy_rows(lines) if ANCHOR_SUFFIX in ln)
         assert f"{RULER_GLYPH} h265+ultrafast {ANCHOR_SUFFIX}" in anchor_line
-        assert "93.2 | 97.1" in anchor_line  # absolutes, not deltas
+        assert "◆ 93.2 | 97.1" in anchor_line  # ◆-marked absolutes, not deltas
         assert "%" not in anchor_line  # smallest = basis = bare size cell
 
     def test_other_rows_show_deltas_vs_anchor(self) -> None:
@@ -187,6 +197,85 @@ class TestFixedMode:
         assert "(-54.4%)" in anchor_line      # %Δ basis is the source at merge
 
 
+class TestNegligibleDeltas:
+    """Deltas inside the metric's negligible band (acceptance_delta) render ≈."""
+
+    def _delta_line(self, vmaf_med: float) -> str:
+        single = (QualityTarget.parse("vmaf-med:96.0"),)
+        lines = _lines_for(ComparisonTable(
+            rows=[_row("s", 1000, vmaf_med=vmaf_med)],
+            ruler=Ruler(kind="targets", targets=single),
+        ))
+        return next(ln for ln in lines if ln.startswith("  s"))
+
+    def test_true_zero_renders_bare(self) -> None:
+        line = self._delta_line(96.0)
+        assert "0.0" in line
+        assert "≈" not in line and "+" not in line
+
+    def test_minor_positive_delta_renders_approx(self) -> None:
+        assert "≈0.0" in self._delta_line(96.02)  # rounds to 0.0, inside the VMAF band
+        assert "≈0.1" in self._delta_line(96.06)  # rounds to 0.1, still inside the band
+
+    def test_non_ignored_positive_delta_keeps_the_sign(self) -> None:
+        assert "+0.4" in self._delta_line(96.4)   # beyond the VMAF band (0.15)
+
+    def test_negative_deltas_mirror_the_band(self) -> None:
+        assert "≈0.0" in self._delta_line(95.98)  # negative dust — sign collapsed at zero
+        assert "≈-0.1" in self._delta_line(95.94)
+        assert "-0.4" in self._delta_line(95.6)
+
+    def test_band_boundary_is_per_metric(self) -> None:
+        ssim = (QualityTarget.parse("ssim-med:97.0"),)
+        row = StrategyRow(strategy="s", size_bytes=1000, metrics={
+            K(MetricType.SSIM, StatisticType.MEDIAN): 97.06,
+        })
+        lines = _lines_for(ComparisonTable(rows=[row], ruler=Ruler(kind="targets", targets=ssim)))
+        line = next(ln for ln in lines if ln.startswith("  s"))
+        assert "+0.1" in line  # 0.06 ≥ the SSIM band (0.05) — signed, not ≈
+
+
+class TestNegligibleSizeDeltas:
+    """Positive size deltas inside the stated tolerance render ≈ (one-sided band)."""
+
+    def _row_line(self, table: ComparisonTable, name: str) -> str:
+        return next(ln for ln in _lines_for(table) if ln.startswith(f"  {name}"))
+
+    def test_in_tolerance_positive_delta_renders_approx(self) -> None:
+        line = self._row_line(ComparisonTable(
+            rows=_ROWS, ruler=None, size_tolerance_pct=5.0,
+        ), "h265-aq+ultrafast")
+        assert "(≈0.2%)" in line  # +0.22% vs the smallest — inside the 5% band
+
+    def test_out_of_tolerance_delta_keeps_the_sign(self) -> None:
+        line = self._row_line(ComparisonTable(
+            rows=_ROWS, ruler=None, size_tolerance_pct=5.0,
+        ), "h264+ultrafast")
+        assert "(+12.3%)" in line
+
+    def test_without_a_stated_tolerance_nothing_is_marked(self) -> None:
+        line = self._row_line(ComparisonTable(rows=_ROWS, ruler=None), "h265-aq+ultrafast")
+        assert "(+0.2%)" in line
+        assert "≈" not in line  # no ruler, no tolerance — no ≈ anywhere, legend included
+
+    def test_legend_states_approx_even_ruler_less_with_tolerance(self) -> None:
+        lines = _lines_for(ComparisonTable(rows=_ROWS, ruler=None, size_tolerance_pct=5.0))
+        assert "≈ negligible" in lines[1]
+
+
+class TestValueDrivenWidths:
+    """Widths track the values; the header phrase rides above without inflating."""
+
+    def test_metric_header_is_compact_and_crossings_align(self) -> None:
+        lines = _lines_for(ComparisonTable(
+            rows=_ROWS, ruler=Ruler(kind="anchor", anchor="h265+ultrafast"),
+        ))
+        header, rule = lines[4], lines[5]
+        assert "VMAF  10% |  50%" in header  # first label flush after the name
+        assert [i for i, ch in enumerate(header) if ch == "|"] == \
+               [i for i, ch in enumerate(rule) if ch == "+"]
+
+
 class TestCaveatedRendering:
     """Rendering adapts to data available (Req 1.4)."""
 
@@ -203,8 +292,8 @@ class TestCaveatedRendering:
         lines = _lines_for(ComparisonTable(
             rows=_ROWS[:1], ruler=Ruler(kind="targets", targets=single),
         ))
-        assert "VMAF" in lines[2]
-        assert "|" not in lines[2]  # header line: no divider for one statistic
+        assert "VMAF" in lines[4]
+        assert "|" not in lines[4]  # header line: no divider for one statistic
 
     def test_long_names_truncate_suffix_safe(self) -> None:
         long_name = "h265-some-extremely-long-profile-name+ultrafast"
@@ -226,9 +315,11 @@ class TestRulerLess:
 
     def test_absolutes_render_with_the_comparison_statistics(self) -> None:
         lines = _lines_for(ComparisonTable(rows=_ROWS, ruler=None))
-        assert "ruler: none — absolutes" in lines[1]
+        assert lines[1] == "  size Δ% vs best size · ◀ selected"  # legend only — no basis line
+        assert "≈" not in lines[1]  # no deltas — no negligible glyph in the legend
         h265 = next(ln for ln in lines if ln.startswith("  h265+ultrafast"))
         assert "93.2 | 97.1" in h265  # absolute, not delta
+        assert ABSOLUTE_MARKER not in "\n".join(lines)  # no deltas — nothing to distinguish
 
 
 class TestProperties:
@@ -241,7 +332,7 @@ class TestProperties:
         """Sorted by size ascending regardless of input order."""
         rows = [_row(f"s{i}", size) for i, size in enumerate(sizes)]
         lines = _lines_for(ComparisonTable(rows=rows, ruler=None))
-        rendered_names = [ln.split()[0] for ln in lines if ln.startswith("  s")]
+        rendered_names = [ln.split()[0] for ln in _strategy_rows(lines)]
         expected = [f"s{i}" for i in sorted(range(len(sizes)), key=lambda i: (sizes[i], f"s{i}"))]
         assert rendered_names == expected
 

@@ -5,6 +5,7 @@
 - Spec: Unified Quality Summaries — one comparison table across optimization and merge
 - Created: 2026-10-03
 - Amended: 2026-10-12 — convergence rework (design sessions 2026-10-09 + 2026-10-12): one persisted row shape + one renderer, deltas in every mode, %-size deltas, ruler-row semantics, mode-dependent marks, tolerance-epsilon dominance, the shared plain-text formatter, merge presentation-bar closure
+- Amended: 2026-10-17 — presentation restoration (the 2026-10-12 evening rulings lost on the unmerged branch tip re-land on main) + the negligible-band delta ruling (`≈` within `acceptance_delta`)
 
 ## Context
 
@@ -99,10 +100,12 @@ Two layers, one direction of dependency:
   with no header text and no rule-row segment (an empty header is the
   candidate flag), so trailing zones like marks render through the
   formatter with real width computation and alignment instead of
-  hand-appended text. Rule rows preserve in-cell divider positions: the
-  formatter scans the cells it already renders per column and writes `|`
+  hand-appended text. Rule rows mark in-cell divider crossings: the
+  formatter scans the cells it already renders per column and writes `+`
   at the same offsets (dashes elsewhere) — compound columns read as ruled
-  sub-columns (`---------|------`), pipe-free columns keep solid spans, so
+  sub-columns (`---------+------`; the lighter crossing keeps the
+  emphasis on the column over the individual statistic, while data rows
+  keep ` | `), pipe-free columns keep solid spans, so
   tables without sub-columns (the §119 remainder) render identically.
   Logger-plain output: 2-space column gaps, no ANSI,
   no borders, and a documented narrow-glyph constraint (the current
@@ -158,26 +161,43 @@ spec.
 - **Size column:** one column — MB value + folded %Δ (`456.9 (+0.0%)`,
   `512.3 (-63.0%)`). Basis: source (merge) or smallest strategy row
   (optimization). The basis row carries no self-delta; the source row shows
-  `(src)` instead. With the tolerance stated in the ruler line, a cut row's
-  `+12%` is self-explanatory — no separate cut annotation exists.
+  `(src)` instead. A positive %Δ inside the stated tolerance renders
+  `(≈0.2%)` — the one-sided ≈ cue for the selection band (2026-10-17
+  ruling); fixed mode's pairwise dominance makes the mark approximate
+  there, an end-user cue only — the marks and the dominated-by detail
+  lines carry the verdicts. With the tolerance stated in the legend, a
+  cut row's `+12%` is self-explanatory — no separate cut annotation
+  exists.
 - **Alignment:** numeric cells right-aligned at uniform precision
   (decimal-point alignment); names left-aligned; suffix-safe truncation
   (`(src)`/`(anchor)` always survive). One blank line after the table before
   any detail lines.
-- **Headers:** `VMAF 10% | 50%` — the compared statistics per metric,
+- **Headers:** `VMAF  10% |  50%` — the compared statistics per metric,
   listed in the closed set's order and rendered as sub-columns (search:
   the per-metric targeted statistics; fixed: the comparison statistics);
-  a single targeted statistic renders `VMAF 50%` with single-value cells.
-  The ` | ` is the single value separator — a divider, not a range: each
-  statistic's value right-aligns within its own sub-width, so the pipe
-  forms a continuous inner divider across the header and all rows
-  (headers, the ruler row's absolute pairs, and strategy delta pairs
-  alike).
-- **Convention line:** one line above the table states the reading basis —
-  ruler identity, Δ basis, size-%Δ basis, mark legend (`ruler: configured
-  targets ◎ · Δ vs targets · size Δ% vs source · ◀ recommended`). The mark
-  zone itself is a bare column (no header, no rule segment), so the legend
-  lives here rather than in a column header.
+  a single targeted statistic renders `VMAF  50%` with single-value cells.
+  The ` | ` is the single value separator — a divider, not a range.
+  Values ride UNDER the metric name (2026-10-12 night ruling): the header
+  is one compact phrase (first label flush after the name, later labels
+  right-aligned in their value-driven sub-widths), data lines carry no
+  reserved name zone, and every data line composes to the same length —
+  pipes align across data rows; the header's pipe may sit further right
+  (~3 characters saved per metric column; terminals run ~100 wide).
+  Absolute pairs carry one attention marker (`◆ 93.2 | 97.1` —
+  semantically empty; deltas keep `+`/`-`; ruler-less tables unmarked).
+  Deltas inside the metric's `acceptance_delta` render `≈`-prefixed
+  (2026-10-17 ruling — the negligible band the dominance pruning
+  ignores, mirrored for negative dust with the sign dropped at zero
+  rounding).
+- **Convention lines:** mode-native basis lines above the table, then a
+  blank line — fixed: `anchor: ◎  h265+ultrafast` (the mode's own
+  vocabulary; the table row keeps its `name (anchor)` suffix); search:
+  `targets: ◎  configured (VMAF · PSNR · …)` naming the targeted
+  metrics; ruler-less: no basis line. The legend line follows on every
+  table (`Δ vs anchor · size Δ% vs source · ≈ negligible · ◀ recommended
+  · size tolerance 5%`). The mark zone itself is a bare column (no
+  header, no rule segment), so the legend lives here rather than in a
+  column header.
 
 ## Anchor lifecycle: two elections, one audit
 

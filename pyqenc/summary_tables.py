@@ -5,8 +5,10 @@ Owns ``StrategyRow`` (THE row shape persisted by ``optimization.yaml`` and
 ``merge.yaml``) and the comparison renderer: the single place the table's
 cell text exists. Phases assemble row populations, rulers, and marks; the
 renderer composes every cell — the folded size cell, the sub-column delta
-pairs, the ruler cues, the convention line — and hands finished rows to
-``format_table``.
+pairs, the anchor/targets cues, the absolute-pair markers, the basis and
+legend lines — and hands finished rows to ``format_table``. Column widths
+are value-driven: the header phrase rides above the values without
+inflating the statistic sub-widths.
 
 Mechanics contract (Req 6): processing runs aggregate facts into rows and
 persist them; fast-exit runs load the rows and re-render. Deltas, %Δ, and
@@ -46,6 +48,13 @@ ANCHOR_SUFFIX = "(anchor)"
 
 MISSING_VALUE = "—"
 """Rendered where a compared statistic is absent from a row."""
+
+ABSOLUTE_MARKER = "◆"
+"""Prefixes an absolute-value pair (``◆ 93.2 | 97.1``) — pure attention,
+semantically empty; deltas carry their ``+``/``-`` signs instead."""
+
+NEGLIGIBLE_GLYPH = "≈"
+"""Prefixes deltas inside the metric's negligible band (acceptance_delta)."""
 
 SELECTED_GLYPH = "◀"
 """Selection mark (optimization) / recommendation mark (merge)."""
@@ -159,8 +168,9 @@ class ComparisonTable:
         mark_legend:        The ``◀`` legend word for the convention line
                             (``selected`` at optimization, ``recommended`` at
                             merge).
-        size_tolerance_pct: When set, stated in the convention line so cut
-                            rows' size deltas read against it.
+        size_tolerance_pct: The size tolerance band (percent) — stated in
+                            the legend; in-band positive size deltas
+                            render ``≈``.
     """
 
     rows:               list[StrategyRow]
@@ -176,19 +186,36 @@ class ComparisonTable:
 # ---------------------------------------------------------------------------
 
 def _format_metric(value: float) -> str:
-    """One decimal, no sign — the ruler row's absolute values."""
+    """One decimal, no sign — an ABSOLUTE value (the pair-level ``◆`` marker
+    distinguishes absolutes from ``+``/``-`` deltas)."""
     return f"{value:.1f}"
 
 
-def _format_delta(value: float) -> str:
-    """One decimal, signed — zero renders bare (``0.0``)."""
-    if round(value, 1) == 0.0:
+def _format_delta(value: float, negligible_band: float) -> str:
+    """One decimal, signed — the negligible band renders ``≈`` instead.
+
+    True zero renders bare (``0.0``); a nonzero delta inside
+    *negligible_band* renders ``≈``-prefixed with the sign dropped at
+    zero (``≈0.0``, ``≈0.1``, ``≈-0.1``); everything else keeps the sign
+    (``+0.4``, ``-1.2``, ``+0.0``).
+    """
+    if value == 0.0:
         return "0.0"
+    if abs(value) < negligible_band:
+        text = f"{value:.1f}"
+        return f"{NEGLIGIBLE_GLYPH}{'0.0' if text == '-0.0' else text}"
     return f"{value:+.1f}"
 
 
-def _format_pct_delta(value: float) -> str:
-    """The size sub-cell's percent delta — one decimal, signed, ``%``."""
+def _format_pct_delta(value: float, tolerance_pct: float | None) -> str:
+    """The size sub-cell's percent delta — one decimal, signed, ``%``.
+
+    A positive delta inside *tolerance_pct* renders ``≈``-prefixed (the
+    one-sided selection band the tolerance keeps); everything else keeps
+    the sign, and zero-rounding outside the band stays bare.
+    """
+    if tolerance_pct is not None and 0 < value < tolerance_pct:
+        return f"{NEGLIGIBLE_GLYPH}{value:.1f}%"
     if round(value, 1) == 0.0:
         return "0.0%"
     return f"{value:+.1f}%"
@@ -284,7 +311,8 @@ def _size_sub_value(table: ComparisonTable, row: StrategyRow, basis_size: int, i
         return ""
     if basis_size <= 0:
         return MISSING_VALUE
-    return f"({_format_pct_delta((row.size_bytes - basis_size) / basis_size * 100)})"
+    pct = (row.size_bytes - basis_size) / basis_size * 100
+    return f"({_format_pct_delta(pct, table.size_tolerance_pct)})"
 
 
 def _metric_sub_values(
@@ -305,9 +333,13 @@ def _metric_sub_values(
         # values (search); fixed mode has none here (the anchor row — a
         # strategy row — carries them).
         if ruler is not None and ruler.kind == "targets":
-            return {s: _format_metric(v) for s, v in column.ruler_values.items()}
+            return _mark_absolute(column, {
+                s: _format_metric(v) for s, v in column.ruler_values.items()
+            })
         return {s: MISSING_VALUE for s in column.stats}
     if ruler is None:
+        # Ruler-less tables render absolutes UNMARKED — the marker's job is
+        # distinguishing absolutes from deltas, and there are no deltas.
         return {
             s: _format_metric(row.metrics[MetricStatKey(column.metric, s)])
             if MetricStatKey(column.metric, s) in row.metrics
@@ -323,69 +355,115 @@ def _metric_sub_values(
         elif is_ruler_row or s not in column.ruler_values:
             rendered[s] = _format_metric(measured)
         else:
-            rendered[s] = _format_delta(measured - column.ruler_values[s])
-    return rendered
+            rendered[s] = _format_delta(
+                measured - column.ruler_values[s],
+                column.metric.info.acceptance_delta,
+            )
+    return _mark_absolute(column, rendered) if is_ruler_row else rendered
+
+
+def _mark_absolute(
+    column: _MetricColumn,
+    values: dict[StatisticType, str],
+) -> dict[StatisticType, str]:
+    """Prefix the pair's first statistic with the absolute marker.
+
+    ``◆ value1 | value2`` — one attention glyph before the pair; only the
+    first statistic is prefixed, and the value-driven sub-widths absorb it.
+    """
+    if not values:
+        return values
+    first = column.stats[0]
+    if first in values:
+        values[first] = f"{ABSOLUTE_MARKER} {values[first]}"
+    return values
 
 
 def _compose_sub_columns(
     column:     _MetricColumn,
     sub_widths: Mapping[StatisticType, int],
-    line_values: Mapping[StatisticType, str] | None,
+    line_values: Mapping[StatisticType, str],
 ) -> str:
-    """Compose one line of a metric column from its sub-values.
+    """Compose one DATA line of a metric column.
 
-    The header line (``line_values is None``) prefixes the metric name to
-    the first statistic's label; every line shares the same sub-widths, so
-    the dividers align vertically (Req 2.8) and header/cell totals match.
+    The values ride UNDER the metric name — no reserved name zone on data
+    lines. Sub-values right-align in value-driven sub-widths, so every
+    data line has the same length and the ``|`` dividers align across
+    data rows (the header's own pipe may sit further right, under the
+    name overhang).
     """
-    parts: list[str] = []
-    for index, statistic in enumerate(column.stats):
-        width = sub_widths[statistic]
-        if line_values is None:
-            label = f"{statistic.display:>{width}}"
-            if index == 0:
-                label = f"{column.metric.info.name} {label}"
-            parts.append(label)
-        else:
-            parts.append(line_values.get(statistic, MISSING_VALUE).rjust(width))
+    parts = [
+        line_values.get(statistic, MISSING_VALUE).rjust(sub_widths[statistic])
+        for statistic in column.stats
+    ]
     return SUB_COLUMN_SEPARATOR.join(parts)
+
+
+def _metric_header_text(
+    column:     _MetricColumn,
+    sub_widths: Mapping[StatisticType, int],
+) -> str:
+    """The metric column's header cell — the name, then the stat labels.
+
+    The first label sits flush after the name (bare); later labels
+    right-align in their value-driven sub-widths — the header reads as one
+    compact phrase while the column's right edge still matches the data.
+    """
+    name_zone = f"{column.metric.info.name}  "
+    labels = [
+        statistic.display if index == 0 else statistic.display.rjust(sub_widths[statistic])
+        for index, statistic in enumerate(column.stats)
+    ]
+    return name_zone + SUB_COLUMN_SEPARATOR.join(labels)
 
 
 # ---------------------------------------------------------------------------
 # The renderer
 # ---------------------------------------------------------------------------
 
-def _convention_line(table: ComparisonTable) -> str:
-    """The line above the table: ruler identity, bases, mark legend (Req 2.9)."""
+def _convention_lines(table: ComparisonTable) -> list[str]:
+    """The lines above the table: the mode's basis line, then the legend.
+
+    Fixed runs name the elected anchor, search runs the configured targets
+    (naming the targeted metrics); ruler-less tables carry no basis line.
+    The legend line states the delta bases, the negligible-band glyph, the
+    mark legend, and the size tolerance when set.
+    """
     ruler = table.ruler
-    size_basis = "source" if table.source is not None else "best size"
+    size_basis = f"size Δ% vs {'source' if table.source is not None else 'best size'}"
+    approx_active = ruler is not None or table.size_tolerance_pct is not None
     if ruler is None:
-        segments = ["ruler: none — absolutes", f"size Δ% vs {size_basis}"]
+        head = []
+        segments = [size_basis]
+    elif ruler.kind == "targets":
+        metrics = " · ".join(
+            metric.info.name
+            for metric in MetricType
+            if any(t.metric == metric.value for t in ruler.targets)
+        )
+        head = [f"targets: {RULER_GLYPH}  configured ({metrics})"]
+        segments = ["Δ vs targets", size_basis]
     else:
-        if ruler.kind == "targets":
-            ruler_text, delta_text = f"configured targets {RULER_GLYPH}", "targets"
-        else:
-            ruler_text, delta_text = f"{ruler.anchor} (anchor) {RULER_GLYPH}", "anchor"
-        segments = [
-            f"ruler: {ruler_text}",
-            f"Δ vs {delta_text}",
-            f"size Δ% vs {size_basis}",
-        ]
+        head = [f"anchor: {RULER_GLYPH}  {ruler.anchor}"]
+        segments = ["Δ vs anchor", size_basis]
+    if approx_active:
+        segments.append(f"{NEGLIGIBLE_GLYPH} negligible")
     segments.append(f"{SELECTED_GLYPH} {table.mark_legend}")
     if table.size_tolerance_pct is not None:
         segments.append(f"size tolerance {table.size_tolerance_pct:g}%")
-    return CONVENTION_SEPARATOR.join(segments)
+    return [*head, CONVENTION_SEPARATOR.join(segments)]
 
 
 def render_comparison_table(table: ComparisonTable) -> list[str]:
-    """Render the full table block: convention line, table, blank line.
+    """Render the full table block: convention lines, blank, table, blank.
 
     Args:
         table: The complete render input (rows, ruler, source, marks).
 
     Returns:
         Lines ending with one blank line (Req 1.6 — anything after comes
-        from the caller, below the table).
+        from the caller, below the table). The two convention lines (bar
+        and bases, then legend) sit one blank line above the table.
     """
     ruler = table.ruler
     sorted_rows = sorted(table.rows, key=lambda r: (r.size_bytes, r.strategy))
@@ -404,16 +482,13 @@ def render_comparison_table(table: ComparisonTable) -> list[str]:
     for ci, column in enumerate(metric_columns):
         widths: dict[StatisticType, int] = {}
         for statistic in column.stats:
+            # Value-driven widths only — the metric name lives in its own
+            # left zone and never inflates the statistic widths.
             candidates = [len(statistic.display)]
             for line in scan_lines:
                 candidates.append(len(line[ci].get(statistic, MISSING_VALUE)))
             widths[statistic] = max(candidates)
         sub_widths_per.append(widths)
-
-    # First sub-label carries the metric name; widen it into sub-1's width.
-    for column, widths in zip(metric_columns, sub_widths_per):
-        first = column.stats[0]
-        widths[first] = max(widths[first], len(column.metric.info.name) + 1 + len(first.display))
 
     # --- size cells: fixed-length composition (MB + paren sub-field) ---
     if table.source is not None:
@@ -427,7 +502,7 @@ def render_comparison_table(table: ComparisonTable) -> list[str]:
         for row in sorted_rows
     ]
     mb_strings = [fmt_size_mb(r.size_bytes) for r in sorted_rows]
-    mb_width = max([len(SIZE_HEADER), *(len(s) for s in mb_strings)], default=len(SIZE_HEADER))
+    mb_width = max((len(s) for s in mb_strings), default=1)
     sub_width = max([len(SOURCE_CUE), *(len(s) for s in size_cells)], default=len(SOURCE_CUE))
 
     def _size_cell(mb: str, sub: str) -> str:
@@ -481,11 +556,15 @@ def render_comparison_table(table: ComparisonTable) -> list[str]:
     ]
     for ci, column in enumerate(metric_columns):
         columns_def.append(
-            Column(_compose_sub_columns(column, sub_widths_per[ci], None), align="right")
+            Column(_metric_header_text(column, sub_widths_per[ci]), align="right")
         )
     columns_def.append(Column("", align="right"))
 
-    lines = ["", f"  {_convention_line(table)}"]
-    lines.extend(format_table(columns_def, table_rows, indent="  "))
-    lines.append("")
+    lines = [
+        "",
+        *(f"  {line}" for line in _convention_lines(table)),
+        "",
+        *format_table(columns_def, table_rows, indent="  "),
+        "",
+    ]
     return lines

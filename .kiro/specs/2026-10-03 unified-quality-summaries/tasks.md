@@ -3,7 +3,7 @@
 <!-- markdownlint-disable MD024 -->
 
 - Created: 2026-10-12 (requirements + design approved same day)
-- Completed:
+- Completed: 2026-10-12
 
 ## 0. Cross-spec review (convention)
 
@@ -119,11 +119,18 @@
 
 ## 6. Verification render (Req 5)
 
-- [ ] 6.1 Render the frozen renderer on a real work dir's data (the
+- [x] 6.1 Render the frozen renderer on a real work dir's data (the
   2026-10-09 fixed-run shape — 4 strategies, anchor, near-ties inside both
   tolerance bars, a dominated case, a mixed-delta row; regenerate to that
   shape if the dir is gone) and present all four tables to the user;
   freeze. Post-freeze changes are constant flips only.
+  Verified three ways 2026-10-12: the synthetic render (presented), a live
+  `-q 18 h26*+ultrafast` run on `test.mkv` (live optimization + merge
+  tables, a real near-tie prune, the anchor-holds audit line, inline
+  values-only in fixed mode), and the all-reuse replay (byte-identical
+  merge table, zero recompute). The live rerun additionally caught the
+  partial-re-test regression — fixed on main in 287e023 with a
+  regression test.
 
 ## 7. Docs + housekeeping
 
@@ -136,4 +143,4 @@
 - [x] 7.3 Full unit-suite green gate (the §114 ffmpeg hang keeps
   `tests/e2e/` out of the gate; any e2e run follows the standing speed
   rule).
-- [ ] 7.4 Update `- Completed:` (last task).
+- [x] 7.4 Update `- Completed:` (last task).

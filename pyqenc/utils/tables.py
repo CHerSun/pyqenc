@@ -11,10 +11,11 @@ Two structural capabilities beyond plain columns:
   and no rule-row segment (blank space instead), for low-weight trailing
   zones such as marks.
 - **Pipe-preserving rules**: a column whose rendered cells contain ``|``
-  renders its rule with ``|`` at the same offsets, dashes elsewhere
-  (``---------|------``) — compound sub-column cells read as ruled
-  sub-columns. The template is the column's first piped data cell (header
-  as fallback) — data rows define the sub-column structure.
+  renders its rule with ``+`` at the same offsets, dashes elsewhere
+  (``---------+------``) — the crossing marks the sub-column break while
+  keeping the visual emphasis on the column; data rows keep `` | ``. The
+  template is the column's first piped data cell (header as fallback) —
+  data rows define the sub-column structure.
 """
 # CHerSun 2026
 
@@ -28,6 +29,9 @@ COLUMN_GAP = "  "
 
 RULE_CHAR = "-"
 """The dash character filling rule rows."""
+
+RULE_CROSSING_CHAR = "+"
+"""Marks a sub-column divider crossing in rule rows (data rows keep `` | ``)."""
 
 TRUNCATION_ELLIPSIS = "…"
 """Marks the cut point in truncated cells."""
@@ -68,14 +72,14 @@ def _truncate(cell: str, width: int) -> str:
 
 
 def _rule_segment(column: Column, cells: Sequence[str], width: int) -> str:
-    """The column's rule-row span: dashes, with ``|`` where a piped cell has one."""
+    """The column's rule-row span: dashes, with ``+`` where a piped cell has one."""
     if not column.header:
         return " " * width
     template = next((c for c in (*cells, column.header) if "|" in c), None)
     if template is None:
         return RULE_CHAR * width
     aligned = template.rjust(width) if column.align == "right" else template.ljust(width)
-    return "".join("|" if ch == "|" else RULE_CHAR for ch in aligned)
+    return "".join(RULE_CROSSING_CHAR if ch == "|" else RULE_CHAR for ch in aligned)
 
 
 def format_table(

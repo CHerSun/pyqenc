@@ -389,17 +389,28 @@ row shape, one renderer, identical mechanics (`pyqenc/summary_tables.py`).
   strings on disk — `pyqenc/quality.py` owns the closed metric/statistic
   sets, the display vocabulary, and tolerant parsing). Breadth is the
   per-phase caveat: optimization rows keep the full worst-chunk statistics
-  (the ruler re-derivation substrate); merge rows keep the rendered basis
+  (the anchor re-derivation substrate); merge rows keep the rendered basis
   (the presentation bar's keys).
 - **One renderer** over the generic `format_table` util (`pyqenc/utils/tables.py`):
-  sub-column cells (` | ` dividers with per-statistic right alignment, pipes
-  preserved in the dash rules), the folded size cell (MB + %Δ), ruler cues,
-  a bare marks column, and the convention line above the table. Presentation
-  constants are named and switchable.
-- **The ruler row (◎)**: search mode = the configured targets (riding the
+  sub-column cells (` | ` dividers with per-statistic right alignment; the
+  dash rules mark the divider crossings with `+`), the folded size cell
+  (MB + %Δ), anchor/targets cues, `◆`-marked absolute pairs, a bare marks
+  column, and the convention block above the table — the mode-native basis
+  line (`anchor: ◎ <name>` / `targets: ◎ configured (VMAF · …)` naming the
+  targeted metrics; ruler-less tables carry none), then the legend line
+  (delta bases, `≈` negligible, mark legend, size tolerance), then a blank
+  line. Column widths are value-driven — the header phrase rides above the
+  values without inflating the statistic sub-widths. Presentation constants
+  are named and switchable.
+- **The bar row (◎)**: search mode = the configured targets (riding the
   source row at merge); fixed mode = the anchor with absolute values.
-  Strategy rows show per-statistic deltas vs the ruler in BOTH modes —
-  never averaged across statistics.
+  Strategy rows show per-statistic deltas vs the bar in BOTH modes —
+  never averaged across statistics. Absolute pairs carry one `◆`
+  attention marker (ruler-less tables render absolutes unmarked);
+  deltas inside the metric's `acceptance_delta` (the same negligible
+  band the dominance pruning ignores) render `≈` instead of a sign —
+  as do positive size deltas inside the stated size tolerance (the
+  one-sided selection band, optimization tables only).
 - **Anchors are elected per population**: the test anchor at optimization
   (smallest survivor of tolerance-epsilon dominance pruning — size within
   `optimize_tolerance`, every compared statistic within the metric's

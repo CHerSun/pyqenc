@@ -5,6 +5,7 @@
 - Spec: Unified Quality Summaries — one comparison table across optimization and merge
 - Created: 2026-10-03
 - Amended: 2026-10-12 — convergence rework: one persisted row shape + one renderer for all four populations (optimization/merge × search/fixed); strategy rows show deltas in every mode; %-size deltas replace ratios; tolerance-epsilon dominance (§97) folds in; marks are mode-dependent; the shared plain-text table formatter (§119) folds in; the merge miss-detail block is dropped
+- Amended: 2026-10-17 — presentation restoration: the 2026-10-12 evening rulings lost on the unmerged branch tip re-land on main (value-driven widths with the compact header phrase, `+` rule crossings, `◆` absolute-pair markers, mode-native basis lines, legend line, blank line before the table) plus the new negligible-band ruling (Req 2.8: `≈`-prefixed deltas inside `acceptance_delta`)
 
 ## Cross-Spec Notes
 
@@ -203,19 +204,51 @@ presentation because "how far off" is the question I bring to the table.
    rendering has no fixed-mode case (a no-measurement anchor is the
    caveated-rendering exception, Req 1.4).
 8. Number formatting SHALL be uniform across the table: one decimal for
-   metric values, deltas, and %Δ values; zero deltas render bare (`0.0`);
-   the ` | ` value separator, glyphs, and number formats are named
-   constants, switchable without renderer changes. ONE value separator
-   serves headers, the ruler row's absolute pairs, and strategy delta
-   pairs alike; each statistic's value right-aligns within its own
-   sub-width so the `|` forms a continuous inner divider across the
-   header and all rows (the sub-column effect — the pipe is a divider,
-   structurally kin to the table's rules, not a pause between values).
-   The dash rule row SHALL preserve the pipe positions within compound
-   columns (`---------|------`); pipe-free columns keep solid rule spans.
-9. One convention line SHALL precede the table, stating the ruler identity,
-   the Δ basis, the size-%Δ basis, and the mark legend (e.g. `ruler:
-   configured targets ◎ · Δ vs targets · size Δ% vs source · ◀ recommended`).
+   metric values, deltas, and %Δ values; true zero renders bare (`0.0`).
+   Delta formatting follows the negligible band (2026-10-17 ruling): a
+   nonzero delta inside the metric's `acceptance_delta` — the same band
+   the dominance pruning ignores (Req 9) — renders `≈`-prefixed (`≈0.0`,
+   `≈0.1`, `≈-0.1`, the sign dropped at zero rounding); every delta
+   outside the band keeps its sign (`+0.4`, `-1.2`). The size %Δ mirrors
+   this ONE-SIDED (2026-10-17 ruling): a positive %Δ inside the stated
+   size tolerance renders `≈`-prefixed (`(≈0.2%)` — the selection band
+   the tolerance keeps; only the optimization table states one, its
+   basis being the smallest row); out-of-band and no-stated-tolerance
+   deltas keep the sign. The ` | ` value
+   separator, glyphs, and number formats are named constants, switchable
+   without renderer changes. ONE value separator serves headers, the
+   ruler row's absolute pairs, and strategy delta pairs alike; each
+   statistic's value right-aligns within its own sub-width so the `|`
+   forms a continuous inner divider across the header and all rows (the
+   sub-column effect — the pipe is a divider, structurally kin to the
+   table's rules, not a pause between values).
+   Sub-widths are VALUE-DRIVEN and the values ride UNDER the metric name
+   (2026-10-12 live-run rulings): the header is one compact phrase
+   (``VMAF  10% |  50%`` — first label flush after the name, later labels
+   right-aligned in their sub-widths) and data lines carry NO reserved
+   name zone — every data line composes to the same length, so the ``|``
+   dividers align across DATA rows (the header's own pipe may sit further
+   right, under the name overhang). Terminal width is the constraint:
+   ~3-4 characters saved per metric column, plus the size column's MB
+   zone (values only, no header floor). Absolute pairs carry one
+   attention marker before the pair (``◆ 93.2 | 97.1`` — semantically
+   empty, pure emphasis; deltas keep their ``+``/``-`` signs; ruler-less
+   tables render absolutes unmarked — no deltas to distinguish). The dash
+   rule row marks the divider crossings with ``+``
+   (``---------+------`` — the lighter crossing keeps the emphasis on
+   the column over the individual statistic; data rows keep `` | ``);
+   pipe-free columns keep solid rule spans.
+9. The table block SHALL open with mode-native basis lines, then a blank
+   line, then the table (2026-10-12 live-run rulings): fixed runs carry
+   ``anchor: ◎ <name>`` (the elected anchor — the mode's own vocabulary;
+   the table row keeps its ``name (anchor)`` suffix); search runs carry
+   ``targets: ◎ configured (VMAF · PSNR · …)`` naming the targeted
+   metrics; ruler-less tables carry no basis line. The legend line
+   follows on every table: the Δ basis, the size-%Δ basis, the
+   negligible-band glyph (stated whenever either band is active — a
+   ruler or a stated tolerance), the mark legend, and the size tolerance
+   when stated (``Δ vs anchor · size Δ% vs source · ≈ negligible · ◀
+   recommended · size tolerance 5%``).
 
 ### Requirement 3 — Anchor lifecycle: elect per population, audit across populations
 

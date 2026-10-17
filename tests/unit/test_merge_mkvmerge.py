@@ -1273,10 +1273,10 @@ class TestMergeYamlReplayAggregate:
 
 
 def _summary_block(caplog_text: str) -> str:
-    """The rendered summary block: from the convention line to before the
+    """The rendered summary block: from the convention lines to before the
     ``Files named`` line (the table + the below-table audit line)."""
     lines = caplog_text.splitlines()
-    start = next(i for i, ln in enumerate(lines) if "ruler:" in ln)
+    start = next(i for i, ln in enumerate(lines) if "anchor:" in ln or "targets:" in ln)
     end = next(i for i, ln in enumerate(lines) if "Files named:" in ln)
     return "\n".join(ln for ln in lines[start:end] if ln.strip())
 
@@ -1296,12 +1296,12 @@ class TestUnifiedMergeSummary:
             _run_full_merge(tmp_path, fixed=True, anchor="h265-aq+slow")
 
         text = caplog.text
-        assert "ruler: h265-aq+slow (anchor) ◎" in text
+        assert "anchor: ◎  h265-aq+slow" in text
         assert "anchor holds at full scale: h265-aq+slow" in text
         # The source row renders with the (src) cue; the anchor row carries
-        # the full-movie absolutes as sub-column pairs.
+        # the full-movie absolutes as ◆-marked sub-column pairs.
         assert "test (src)" in text
-        assert "95.0 | 96.5" in text
+        assert "◆ 95.0 | 96.5" in text
         # Inline completion: values only, comparison statistics only.
         assert "vmaf-p10=95.0  vmaf-median=96.5  ssim-median=98.2  psnr-median=46.0" in text
         # The old furniture is gone: no targets reminder under the table (the
@@ -1322,9 +1322,9 @@ class TestUnifiedMergeSummary:
             _run_full_merge(tmp_path, fixed=False)
 
         text = caplog.text
-        assert "ruler: configured targets ◎" in text
+        assert "targets: ◎  configured" in text
         assert "◎ test (src)" in text
-        assert "93.0 | 96.0" in text  # the vmaf p10 | median target absolutes
+        assert "◆ 93.0 | 96.0" in text  # the vmaf p10 | median target absolutes
         strategy_rows = [
             ln for ln in _summary_block(text).splitlines()
             if "h265" in ln and "(src)" not in ln
