@@ -8,7 +8,7 @@ Rules for writing code: language, typing, docstrings, naming, constants, logging
 - Line endings are LF everywhere, enforced by `.gitattributes` (`eol=lf`) — it overrides core.autocrlf for this repo. Write LF; never convert.
 - 4 spaces are used as indentation.
 - Annotations rely on PEP 649 lazy evaluation (3.14 default): NEVER write `from __future__ import annotations` (a deprecated no-op on 3.14) and NEVER quote annotations (`"AppConfig"`) — bare names work for forward references and `TYPE_CHECKING`-only imports.
-- For volatile things (file system) - try (not check).
+- For volatile things (file system) - try. EAFP
 - All functions, classes and class members MUST BE type-hinted, `Any` is not allowed. `object` is discouraged.
 - Avoid optional (nullable), where reasonable. Use explicit typing and type upgrades instead of nullability. Producer guarantees should be explicit, upgradable (see VideoStream and ProbedVideoStream, or Fingerprint and SizedFingerprint).
 - Docstrings are GOOGLE-STYLE, universally (every function, class, and class member): one-line summary, extended prose paragraphs, then structured sections — `Args:` (or `Arguments:`), `Returns:`, `Raises:`, `Yields:`, `Attributes:` for classes — with `name: description` entries and indented continuations. This format is parsed by the LSP (Pylance/Pyright hover help and per-parameter info) — keep it exact so the tooling works. No reST fields (`:param x:`), no NumPy-style underlined headers. Docstrings state the CURRENT CONTRACT only — summary, role, field semantics, invariants and their non-obvious why; dated reasoning, tombstones of removed fields, and discovery history live in commits and specs, never in the docstring.
