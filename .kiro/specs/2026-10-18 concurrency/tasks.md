@@ -82,7 +82,7 @@
 - [x] Rewrite `docs/architecture.md` §Parallelism and §Pipeline parallelism
       default of 1 to the landed model.
 - [x] README: `--concurrency` guidance for audio/measure.
-- [ ] `default_config.yaml` knob comments carry the empirical results (or
+- [x] `default_config.yaml` knob comments carry the empirical results (or
       "no measured benefit") once the validation runs land.
 
 ## Task 9 — Backlog hygiene
@@ -107,11 +107,18 @@
 
 ## Task 12 — Empirical validation (post-implementation, user-visible runs)
 
-- [ ] Video A/B: `h264+ultrafast` fixed-quality e2e, `--concurrency 1` vs
+- [x] Video A/B: `h264+ultrafast` fixed-quality e2e, `--concurrency 1` vs
       `2`, fresh work dirs under `D:\_encoding\pyqenc_parallel`.
-- [ ] Audio A/B: 2 streams × 2 chains, concurrency 1 vs 4.
-- [ ] Measure effect test: several distorted videos, 1 vs >1.
-- [ ] Record findings into the knob doc comments (Task 8 remainder).
+      (2026-10-18: encoding phase 13:13 → 10:36, 1.25×; measurement is 84%
+      of the ultrafast encoding wall; outputs byte-identical metrics.)
+- [x] Audio A/B: 2 streams × 2 chains, concurrency 1 vs 4.
+      (2026-10-18: 51.8s → 22.2s phase (2.3×), 55.5s → 26.0s wall (2.1×).)
+- [x] Measure effect test: several distorted videos, 1 vs >1.
+      (2026-10-18: 2 distorted videos, 889.7s at 1 vs 997.2s at 2 — ~12%
+      REGRESSION; one metrics pass already saturates the CPU.)
+- [x] Record findings into the knob doc comments (Task 8 remainder).
+      Also caught live: nested-`asyncio.run` bug in the measure rework
+      (fixed in `0e2b9e9`).
 
 ## Task 13 — Closeout
 
