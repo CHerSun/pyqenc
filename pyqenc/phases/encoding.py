@@ -74,6 +74,7 @@ from pyqenc.stream_model import (
     File as StreamFile,
 )
 from pyqenc.utils.alive import AdvanceState, ProgressBar
+from pyqenc.utils.concurrency import run_bounded
 from pyqenc.utils.ffmpeg_runner import FFmpegRequest, FFmpegRunResult, run_ffmpeg
 from pyqenc.utils.fs import remove_stale_tmp_files, safe_stat_size
 from pyqenc.utils.log_format import (
@@ -1459,80 +1460,6 @@ def build_encoded_chunk(
     )
 
 
-class ChunkQueue:
-    """Manages queue of chunks for parallel encoding.
-
-    Prioritizes completing started chunks before starting new ones.
-    """
-
-    def __init__(self, chunks: list[VideoStreamChunk], strategies: list[Strategy]):
-        """Initialize chunk queue.
-
-        Args:
-            chunks:     List of chunks to encode.
-            strategies: List of strategies to apply.
-        """
-        self.chunks     = chunks
-        self.strategies = strategies
-        self._pending:     list[tuple[VideoStreamChunk, Strategy]] = []
-        self._in_progress: set[tuple[str, str]]                 = set()
-
-        # Build initial queue (all chunk+strategy combinations)
-        for chunk in chunks:
-            for strategy in strategies:
-                self._pending.append((chunk, strategy))
-
-    def get_next(self) -> tuple[VideoStreamChunk, Strategy] | None:
-        """Get next chunk+strategy to encode.
-
-        Prioritizes completing started chunks before starting new ones.
-
-        Returns:
-            Tuple of (chunk, strategy) or None if queue empty.
-        """
-        if not self._pending:
-            return None
-
-        # Check if any in-progress chunks have other strategies pending
-        for chunk, strategy in self._pending:
-            if any((chunk.safe_name(), s.display_name()) in self._in_progress for s in self.strategies):
-                # This chunk has work in progress, prioritize it
-                self._pending.remove((chunk, strategy))
-                self._in_progress.add((chunk.safe_name(), strategy.display_name()))
-                return (chunk, strategy)
-
-        # No in-progress chunks, take first pending
-        chunk, strategy = self._pending.pop(0)
-        self._in_progress.add((chunk.safe_name(), strategy.display_name()))
-        return (chunk, strategy)
-
-    def mark_complete(self, chunk_id: str, strategy: Strategy) -> None:
-        """Mark chunk+strategy as complete.
-
-        Args:
-            chunk_id: Chunk identifier.
-            strategy: Encoding strategy.
-        """
-        self._in_progress.discard((chunk_id, strategy.display_name()))
-
-    def mark_failed(self, chunk_id: str, strategy: Strategy) -> None:
-        """Mark chunk+strategy as failed.
-
-        Args:
-            chunk_id: Chunk identifier.
-            strategy: Encoding strategy.
-        """
-        self._in_progress.discard((chunk_id, strategy.display_name()))
-
-    def is_empty(self) -> bool:
-        """Check if queue is empty.
-
-        Returns:
-            True if no more work to do.
-        """
-        return len(self._pending) == 0 and len(self._in_progress) == 0
-
-
 async def _encode_chunk_async(
     encoder:         ChunkEncoder,
     chunk:           VideoStreamChunk,
@@ -1566,47 +1493,55 @@ async def _encode_chunk_async(
     )
 
 
-async def _encode_chunks_parallel(
+async def _encode_pairs(
     encoder:          ChunkEncoder,
     chunks:           list[VideoStreamChunk],
     strategies:       list[Strategy],
     quality_targets:  list[QualityTarget],
-    max_parallel:     int,
+    concurrency:      int,
     force:            bool,
     collector:        MetricsCollector,
     phase_recovery:   _PhaseRecovery | None                                  = None,
     advance:          Callable[[int | float, AdvanceState], None] | None = None,
     metric_prefix:    MetricKey                                                  = MetricKey.ENCODING,
 ) -> EncodingResult:
-    """Encode chunks in parallel with semaphore control.
+    """Encode the pending (chunk, strategy) pairs through the bounded runner.
+
+    ``COMPLETE`` pairs from *phase_recovery* seed the result and are
+    skipped; every remaining pair runs as one job — the sync quality search
+    in an executor thread (``_encode_chunk_async``), then the pair's
+    bookkeeping (result append, counters, count-based bar advance,
+    convergence step). A failed pair is recorded and the batch continues
+    (per-job error containment).
+
+    No top-level timing span here: the owning phase's template run() wraps
+    this under its own top-level key (encoding / optimization). Only the
+    dotted sub-action spans are recorded by the encoder machinery.
 
     Args:
         encoder:        ChunkEncoder instance.
         chunks:         List of chunk windows to encode.
         strategies:     List of strategies to use.
         quality_targets: Quality targets to meet.
-        max_parallel:   Maximum concurrent encodings.
+        concurrency:    Maximum simultaneous (encode+measure) jobs.
         force:          Whether to force re-encoding.
         collector:      Metrics collector for timing and convergence tracking.
-                        Per-attempt timing is recorded inside ``ChunkEncoder``:
-                        ``encoding.<strategy>`` for each ffmpeg encode and
-                        ``encoding.quality_measure`` for each quality measurement.
-                        ``step(MetricKey.ENCODING, convergence_update=...)`` is
+                        ``step(metric_prefix, convergence_update=...)`` is
                         called after each chunk/strategy pair converges.
         phase_recovery: Optional recovery state from ``recover_attempts``; when
                         provided, ``COMPLETE`` pairs are skipped and ``PARTIAL``
                         pairs resume from their recovered ``QualitySearch`` state.
-        advance:        Optional advance callable from ``ProgressBar``; called with
-                        chunk duration in seconds and an ``AdvanceState`` on each
-                        chunk completion.
+        advance:        Optional advance callable from ``ProgressBar``; called
+                        with ``(1, AdvanceState)`` on each pair completion —
+                        the count-based bar measures completed pairs.
+        metric_prefix:  Metric prefix for the encoder's dotted spans.
 
     Returns:
         EncodingResult with all encoding outcomes.
     """
-    result    = EncodingResult()
-    semaphore = asyncio.Semaphore(max_parallel)
+    result = EncodingResult()
 
-    # Pre-populate result with COMPLETE pairs from recovery (skip them in the queue)
+    # Seed the result with COMPLETE pairs from recovery (skip them in the job list)
     complete_pairs: set[tuple[str, str]] = set()
     if phase_recovery is not None:
         for chunk in chunks:
@@ -1633,84 +1568,65 @@ async def _encode_chunks_parallel(
                     result.reused_count += 1
                     complete_pairs.add((chunk.safe_name(), strategy.display_name()))
 
-    queue = ChunkQueue(chunks, strategies)
-    # Remove already-complete pairs from the queue
-    queue._pending = [
-        (c, s) for (c, s) in queue._pending
-        if (c.safe_name(), s.display_name()) not in complete_pairs
+    pending = [
+        (chunk, strategy)
+        for chunk in chunks
+        for strategy in strategies
+        if (chunk.safe_name(), strategy.display_name()) not in complete_pairs
     ]
 
-    async def encode_worker() -> None:
-        """Worker coroutine for encoding chunks."""
-        while not queue.is_empty():
-            next_item = queue.get_next()
-            if next_item is None:
-                break
+    async def process(pair: tuple[VideoStreamChunk, Strategy]) -> None:
+        """One (chunk, strategy) job: the quality search, then bookkeeping."""
+        chunk, strategy = pair
 
-            chunk, strategy = next_item
+        # Encode chunk using the codec's default quality as the fixed starting point.
+        # Predictable initial quality = predictable recovery path when parameters change.
+        gran = strategy.codec.quality_granularity
+        chunk_initial_quality = strategy.codec.default_quality.quantize(gran)
 
-            async with semaphore:
-                # Encode chunk using the codec's default quality as the fixed starting point.
-                # Predictable initial quality = predictable recovery path when parameters change.
-                gran = strategy.codec.quality_granularity
-                chunk_initial_quality = strategy.codec.default_quality.quantize(gran)
+        chunk_result = await _encode_chunk_async(
+            encoder,
+            chunk,
+            strategy,
+            quality_targets,
+            chunk_initial_quality,
+            force,
+        )
 
-                # Encode chunk — timing is recorded inside encode_chunk:
-                #   encoding.<strategy>       for each ffmpeg encode attempt
-                #   encoding.quality_measure  for each quality measurement
-                chunk_result = await _encode_chunk_async(
-                    encoder,
-                    chunk,
-                    strategy,
-                    quality_targets,
-                    chunk_initial_quality,
-                    force,
+        if chunk_result.success:
+            # Success implies a built winner (encode_chunk's contract).
+            assert chunk_result.encoded_file is not None and chunk_result.final_quality is not None
+            result.encoded_chunks.setdefault(
+                strategy.display_name(), [],
+            ).append(build_encoded_chunk(
+                chunk        = chunk,
+                strategy     = strategy,
+                path         = chunk_result.encoded_file.path,
+                frame_count  = chunk_result.frame_count,
+            ))
+
+            if chunk_result.reused:
+                result.reused_count += 1
+                if advance is not None:
+                    advance(1, AdvanceState.SKIPPED)
+            else:
+                result.encoded_count += 1
+                if advance is not None:
+                    advance(1, AdvanceState.SUCCESS)
+                # Record convergence for this chunk/strategy pair
+                collector.step(
+                    metric_prefix,
+                    convergence_update=ConvergenceUpdate(
+                        strategy      = strategy.display_name(),
+                        attempt_count = chunk_result.attempts,
+                    ),
                 )
+        else:
+            result.failed_chunks.append(chunk.safe_name())
+            if advance is not None:
+                advance(1, AdvanceState.FAILED)
 
-                # Update result
-                if chunk_result.success:
-                    # Success implies a built winner (encode_chunk's contract).
-                    assert chunk_result.encoded_file is not None and chunk_result.final_quality is not None
-                    result.encoded_chunks.setdefault(
-                        strategy.display_name(), [],
-                    ).append(build_encoded_chunk(
-                        chunk        = chunk,
-                        strategy     = strategy,
-                        path         = chunk_result.encoded_file.path,
-                        frame_count  = chunk_result.frame_count,
-                    ))
-
-                    if chunk_result.reused:
-                        result.reused_count += 1
-                        if advance is not None:
-                            advance(chunk.end_timestamp - chunk.start_timestamp, AdvanceState.SKIPPED)
-                    else:
-                        result.encoded_count += 1
-                        if advance is not None:
-                            advance(chunk.end_timestamp - chunk.start_timestamp, AdvanceState.SUCCESS)
-                        # Record convergence for this chunk/strategy pair
-                        collector.step(
-                            metric_prefix,
-                            convergence_update=ConvergenceUpdate(
-                                strategy      = strategy.display_name(),
-                                attempt_count = chunk_result.attempts,
-                            ),
-                        )
-
-                    queue.mark_complete(chunk.safe_name(), strategy)
-                else:
-                    queue.mark_failed(chunk.safe_name(), strategy)
-                    result.failed_chunks.append(chunk.safe_name())
-                    if advance is not None:
-                        advance(chunk.end_timestamp - chunk.start_timestamp, AdvanceState.FAILED)
-
-    # Start worker tasks
-    workers = [asyncio.create_task(encode_worker()) for _ in range(max_parallel)]
-
-    # No top-level timing span here: the owning phase's template run() wraps
-    # _execute() under its own top-level key (encoding / optimization). Only
-    # the dotted sub-action spans are recorded by the encoder machinery.
-    await asyncio.gather(*workers)
+    await run_bounded(pending, concurrency, process)
 
     _assert_one_winner_per_chunk(result, chunks, strategies)
 
@@ -1895,7 +1811,7 @@ def encode_all_chunks(
     quality_targets:   list[QualityTarget],
     work_dir:          Path,
     collector:         MetricsCollector,
-    max_parallel:    int,
+    concurrency:       int,
     force:           bool              = False,
     dry_run:         bool              = False,
     crop_params:     CropParams | None = None,
@@ -1912,7 +1828,7 @@ def encode_all_chunks(
     - Classifying all ``(chunk, strategy)`` pairs via
       ``_recover_encoding_attempts``
     - Skipping ``COMPLETE`` pairs and resuming pending pairs
-    - Parallel encoding of chunks that need work
+    - Bounded encoding of chunks that need work
 
     ``encoding.yaml`` persistence and probe-mismatch validation are owned by
     ``EncodingPhase``.
@@ -1923,7 +1839,7 @@ def encode_all_chunks(
         quality_targets:   Quality targets to meet.
         work_dir:          Working directory for artifacts.
         collector:         Metrics collector for timing and convergence tracking.
-        max_parallel:      Maximum concurrent encoding processes
+        concurrency:       Maximum simultaneous (encode+measure) jobs.
         force:             If False, reuse existing encodings that meet current targets
         dry_run:           If True, only report what would be done without encoding
         crop_params:       Crop parameters to apply uniformly to every chunk attempt.
@@ -1982,30 +1898,29 @@ def encode_all_chunks(
         measure_attempts  = measure_attempts,
     )
 
-    # Run parallel encoding — COMPLETE pairs are skipped inside _encode_chunks_parallel
+    # Run bounded encoding — COMPLETE pairs are skipped inside _encode_pairs
     pending_count  = sum(1 for r in phase_recovery.pairs.values() if r.state != ArtifactState.COMPLETE)
     complete_count = len(chunks) * len(strategies) - pending_count
     logger.info(
         "Starting encoding: %d pair(s) to encode, %d already complete",
         pending_count, complete_count,
     )
-    logger.debug("Starting parallel encoding with %d workers", max_parallel)
-    total_seconds = sum(c.end_timestamp - c.start_timestamp for c in chunks) * len(strategies)
-    with ProgressBar(total_seconds, title="Encoding", total_count=len(chunks) * len(strategies)) as advance:
-        # Update the bar for completed chunks
-        chunks_by_id = {c.safe_name(): c for c in chunks}
+    logger.debug("Starting bounded encoding with concurrency %d", concurrency)
+    pair_count = len(chunks) * len(strategies)
+    with ProgressBar(pair_count, title="Encoding", total_count=pair_count) as advance:
+        # Update the bar for already-complete pairs (count-based: one tick each)
         for r in phase_recovery.pairs.values():
             if r.state == ArtifactState.COMPLETE:
-                advance((chunks_by_id[r.chunk_id].end_timestamp - chunks_by_id[r.chunk_id].start_timestamp), AdvanceState.SKIPPED)
+                advance(1, AdvanceState.SKIPPED)
 
-        # Run parallel encoding
+        # Run bounded encoding
         result = asyncio.run(
-            _encode_chunks_parallel(
+            _encode_pairs(
                 encoder         = encoder,
                 chunks          = chunks,
                 strategies      = strategies,
                 quality_targets = quality_targets,
-                max_parallel    = max_parallel,
+                concurrency     = concurrency,
                 force           = force,
                 phase_recovery  = phase_recovery,
                 advance         = advance,
@@ -2505,7 +2420,7 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
             quality_targets  = presentation_targets,
             work_dir         = work_dir,
             collector        = self._collector,
-            max_parallel     = self._config.encoding.concurrency,
+            concurrency      = self._config.encoding.concurrency,
             force            = False,  # attempt reuse is never bypassed by --force (permission, not a command)
             dry_run          = False,
             crop_params      = crop,

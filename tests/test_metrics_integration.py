@@ -1086,7 +1086,7 @@ class TestOptimizationPhaseTiming:
         )
 
     def test_shared_executor_records_no_top_level_span(self, tmp_path: Path) -> None:
-        """``_encode_chunks_parallel`` must not open a timing span of its own.
+        """``_encode_pairs`` must not open a timing span of its own.
 
         Bug guarded: the shared executor (driven by both the encoding and the
         optimization phase) recording a top-level span would double-count
@@ -1105,7 +1105,7 @@ class TestOptimizationPhaseTiming:
         """
         import asyncio
 
-        from pyqenc.phases.encoding import ChunkEncodingResult, _encode_chunks_parallel
+        from pyqenc.phases.encoding import ChunkEncodingResult, _encode_pairs
 
         strategy = _STRATEGY_SLOW_H265
 
@@ -1133,12 +1133,12 @@ class TestOptimizationPhaseTiming:
                 patch("pyqenc.phases.encoding._encode_chunk_async", return_value=successful_result),
             ):
                 asyncio.run(
-                    _encode_chunks_parallel(
+                    _encode_pairs(
                         encoder          = MagicMock(),
                         chunks           = [chunk],
                         strategies       = [strategy],
                         quality_targets  = [],
-                        max_parallel     = 1,
+                        concurrency      = 1,
                         force            = False,
                         collector        = collector,
                         metric_prefix    = MetricKey.OPTIMIZATION,
@@ -1345,7 +1345,7 @@ class TestEncodingPhaseTiming:
         """
         import asyncio
 
-        from pyqenc.phases.encoding import ChunkEncodingResult, _encode_chunks_parallel
+        from pyqenc.phases.encoding import ChunkEncodingResult, _encode_pairs
 
         chunk = _make_chunk_window(tmp_path / "source.mkv", 0.0, 1.0)
 
@@ -1368,12 +1368,12 @@ class TestEncodingPhaseTiming:
         def run(collector: MetricsCollector) -> None:
             with patch("pyqenc.phases.encoding._encode_chunk_async", return_value=successful_result):
                 asyncio.run(
-                    _encode_chunks_parallel(
+                    _encode_pairs(
                         encoder          = MagicMock(),
                         chunks           = [chunk],
                         strategies       = [_STRATEGY_SLOW_H265],
                         quality_targets  = [],
-                        max_parallel     = 1,
+                        concurrency      = 1,
                         force            = False,
                         collector        = collector,
                     )
@@ -1404,7 +1404,7 @@ class TestEncodingPhaseTiming:
         """
         import asyncio
 
-        from pyqenc.phases.encoding import ChunkEncodingResult, _encode_chunks_parallel
+        from pyqenc.phases.encoding import ChunkEncodingResult, _encode_pairs
 
         chunk = _make_chunk_window(tmp_path / "source.mkv", 0.0, 1.0)
 
@@ -1424,12 +1424,12 @@ class TestEncodingPhaseTiming:
         def run(collector: MetricsCollector) -> None:
             with patch("pyqenc.phases.encoding._encode_chunk_async", return_value=reused_result):
                 asyncio.run(
-                    _encode_chunks_parallel(
+                    _encode_pairs(
                         encoder          = MagicMock(),
                         chunks           = [chunk],
                         strategies       = [_STRATEGY_SLOW_H265],
                         quality_targets  = [],
-                        max_parallel     = 1,
+                        concurrency      = 1,
                         force            = False,
                         collector        = collector,
                     )

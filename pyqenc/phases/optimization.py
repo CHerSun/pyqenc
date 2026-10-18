@@ -809,7 +809,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         current_sampling = self._config.measurement.sampling
 
         from pyqenc.phases.encoding import (
-            _encode_chunks_parallel,
+            _encode_pairs,
             _recover_encoding_attempts,
         )  # deferred: circular import (encoding <-> optimization)
 
@@ -837,9 +837,8 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
                 cleanup_level    = job_result.cleanup,
                 metric_prefix    = MetricKey.OPTIMIZATION,
             )
-            test_chunk_seconds = sum(c.end_timestamp - c.start_timestamp for c in test_chunks)
-            total_seconds      = test_chunk_seconds * len(strategies_to_test)
-            total_count        = len(test_chunks) * len(strategies_to_test)
+            # Count-based bar: progress is completed (chunk, strategy) pairs.
+            total_count = len(test_chunks) * len(strategies_to_test)
 
             test_chunk_ids = [c.safe_name() for c in test_chunks]
             phase_recovery = _recover_encoding_attempts(work_dir, test_chunk_ids, strategies_to_test)
@@ -851,15 +850,14 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
                 pending_pairs, complete_pairs,
             )
 
-            with ProgressBar(total_seconds, title="Optimization", total_count=total_count) as advance:
-                # Pre-advance bar for already-complete pairs
-                chunks_by_id = {c.safe_name(): c for c in test_chunks}
+            with ProgressBar(total_count, title="Optimization", total_count=total_count) as advance:
+                # Pre-advance the bar for already-complete pairs (count-based: one tick each)
                 for r in phase_recovery.pairs.values():
                     if r.state == ArtifactState.COMPLETE:
-                        advance((chunks_by_id[r.chunk_id].end_timestamp - chunks_by_id[r.chunk_id].start_timestamp), AdvanceState.SKIPPED)
+                        advance(1, AdvanceState.SKIPPED)
 
                 asyncio.run(
-                    _encode_chunks_parallel(
+                    _encode_pairs(
                         encoder           = encoder,
                         chunks            = test_chunks,
                         strategies        = strategies_to_test,
@@ -868,7 +866,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
                         # the anchor's target set does not exist until these
                         # results do.
                         quality_targets   = [] if fixed else plan.targets,
-                        max_parallel      = self._config.encoding.concurrency,
+                        concurrency       = self._config.encoding.concurrency,
                         force             = False,
                         collector         = self._collector,
                         phase_recovery    = phase_recovery,
