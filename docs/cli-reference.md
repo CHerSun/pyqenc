@@ -44,6 +44,14 @@ Applies to all pipeline subcommands (`auto`, `video`, `audio`, `extract`).
 | `--no-metrics`  | Suppress process metrics.yaml output (pipeline run stats). Does not affect quality metrics measurements.                                                                                                           | off     |
 | `--concurrency N` | Concurrency for bounded work — sets every config knob (encoding, audio, measurement); each phase consumes its own. Values above the CPU count are clamped. Per-domain control: edit the config file. Applies to `auto`, `video`, `audio`, `measure`. | from config (`1`) |
 
+### Concurrency
+
+Every concurrency knob defaults to `1` — no concurrency.
+
+- **`audio.concurrency`** — scales well: audio filter chains are single-process, so parallel (track, chain) jobs put the extra cores to work (measured ~2× faster wall at 4 jobs).
+- **`encoding.concurrency`** (video chain: optimization + encoding) — ffmpeg already scales encoding and metric computation across the CPU, so raise it only if you observe CPU underutilization. The measured benefit is limited to measurement-bound runs (fast presets, where quality measurement dominates wall time) at ~1.25×.
+- **`measurement.concurrency`** (`measure` command) — keep at `1`: concurrent metric passes contend for the same cores and measured ~12% *slower* at 2.
+
 ---
 
 ## `auto` / `video` Options
