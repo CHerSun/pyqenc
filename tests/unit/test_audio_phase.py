@@ -66,7 +66,7 @@ def _audio_config(chains: list[ChainSpec], select: list[SelectEntry] | None = No
         "aac":       _fi("encode", codec="aac", bitrate_per_channel="96k", extension="m4a"),
         "passthrough": _fi("passthrough"),
     }
-    return AudioConfig(filters=palette, chains=chains, select=select or [])
+    return AudioConfig(filters=palette, chains=chains, select=select or [], concurrency=1)
 
 
 def _track(tmp_path: Path, stem: str, *, track_id: int = 1, language: str = "eng", layout: str = "5.1") -> AudioStream:
