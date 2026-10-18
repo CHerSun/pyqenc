@@ -209,6 +209,26 @@ def compute_screenshot_positions_interval(
 # Duration parsing
 # ---------------------------------------------------------------------------
 
+
+def _display_path(path: Path) -> str:
+    """Return *path* relative to the CWD when possible, absolute otherwise.
+
+    The measure table lists several videos whose stems may coincide (e.g.
+    merged outputs of different runs); the CWD-relative form keeps rows
+    short while still telling them apart.
+
+    Args:
+        path: The path to display.
+
+    Returns:
+        The display form.
+    """
+    try:
+        return str(path.relative_to(Path.cwd()))
+    except ValueError:
+        return str(path)
+
+
 _DURATION_HMS_RE = re.compile(
     r"^(?:(?P<h>\d+)h)?(?:(?P<m>\d+)m)?(?:(?P<s>\d+(?:\.\d+)?)s?)?$"
 )
@@ -994,8 +1014,10 @@ async def run_measure(
         distorted_streams = []
 
     kv: dict[str, object] = {
-        "source":      str(source_video),
-        "distorted":  [f"{i+1:>2} - {t.name}" for i, t in enumerate(distorted_videos)] if distorted_videos else ["(none — screenshots only)"],
+        "videos": (
+            [f"#0 {_display_path(source_video)}"]
+            + [f"#{n} {_display_path(t)}" for n, t in enumerate(distorted_videos, start=1)]
+        ) if distorted_videos else [f"#0 {_display_path(source_video)}", "(no distorted — screenshots only)"],
         "crop":        str(resolved_crop) if not resolved_crop.is_empty() else "none",
         "width":       str(width) if width else "none",
         "sampling":    str(sampling),
@@ -1125,21 +1147,23 @@ async def run_measure(
 
     # Duration-based shared bar over the distorted videos' effective
     # durations (screenshots-only mode: zero total → indeterminate spinner).
+    # Job numbering: the source is #0, distorted videos follow from #1.
     bar_total = sum(d for d in effective_durations.values() if d is not None)
-    jobs: list[tuple[Path, bool]] = [(source_video, False)] + [
-        (video, True) for video in distorted_videos
+    jobs: list[tuple[int, Path, bool]] = [(0, source_video, False)] + [
+        (number, video, True) for number, video in enumerate(distorted_videos, start=1)
     ]
 
     with ProgressBar(bar_total, title="Measure", total_count=len(jobs)) as advance:
 
-        async def process(job: tuple[Path, bool]) -> None:
+        async def process(job: tuple[int, Path, bool]) -> None:
             """One video's task: screenshots, then (distorted) metrics + sidecar."""
-            video, is_distorted = job
+            number, video, is_distorted = job
+            label = f"#{number} {video.stem}"
 
             # Screenshots — shared positions, per-video directory.
             shots: list[Path] = []
             if positions is not None:
-                logger.info("Taking %d screenshots of %s...", len(positions.frame_nums), video.stem)
+                logger.info("%s: taking %d screenshots...", label, len(positions.frame_nums))
                 try:
                     shots = await make_screenshots(
                         video_path      = video,
@@ -1154,7 +1178,7 @@ async def run_measure(
                         ),
                     )
                 except OSError as exc:
-                    logger.error("Screenshots failed for %s — skipping: %s", video.stem, exc)
+                    logger.error("%s: screenshots failed — skipping: %s", label, exc)
 
             if not is_distorted:
                 nonlocal source_screenshots
@@ -1167,7 +1191,7 @@ async def run_measure(
             # Measurement + sidecar — contained per video (Req 10): a failure
             # yields a failed result row, never an aborted run.
             eff_dur = effective_durations[video]
-            logger.info("Measuring %s", video.stem)
+            logger.info("%s: measuring", label)
             metrics: PerMetricStats = {}
             failed  = False
             try:
@@ -1196,7 +1220,7 @@ async def run_measure(
                 )
             except (OSError, ValueError) as exc:
                 failed = True
-                logger.error("Measurement failed for %s — skipping: %s", video.stem, exc)
+                logger.error("%s: measurement failed — skipping: %s", label, exc)
 
             results_by_video[video] = DistortedMeasureResult(
                 distorted_video    = video,
