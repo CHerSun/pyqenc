@@ -5,6 +5,18 @@
 - Created: 2026-03-19
 - Completed: 2026-03-19
 
+## Cross-Spec Notes
+
+**Superseded in part by `2026-10-18 concurrency`.** The encoding and
+optimization bars' fraction basis moved from duration-weighted
+(Σ chunk durations × strategies) to completed-pair counting — the bar-mode
+doctrine: count-based where items are many and substeps non-deterministic;
+duration-based with in-job `PROGRESS` ticks where steps are few and
+deterministic (merge, measure). The `measure` command's per-video inner bars
+are gone, replaced by one shared duration-based bar fed through the same
+`show_progress` pass-down merge already used. Bar mechanics (`ProgressBar`,
+`AdvanceState`, advance callables) are unchanged.
+
 ## Introduction
 
 The pipeline currently uses `duration_bar` (in `pyqenc/utils/alive.py`) for duration-based progress in the chunking, encoding, optimization, and metrics phases, and a separate `alive_bar` in manual count mode for the audio phase (`SynchronousRunner` and `AsyncRunner` in `pyqenc/phases/audio.py`). Two problems have been identified:
