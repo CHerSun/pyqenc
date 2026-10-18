@@ -42,6 +42,7 @@ Applies to all pipeline subcommands (`auto`, `video`, `audio`, `extract`).
 | `--force`       | On source-file mismatch or unrecoverable config changes in execute mode: delete all intermediate artifacts and reset state to start anew                                                                           | off     |
 | `--cleanup`     | Delete workspace files per artifact after completion. `--cleanup all`: also remove remaining intermediate directories after full pipeline success. Not available on `extract` — materialized files are the product | off     |
 | `--no-metrics`  | Suppress process metrics.yaml output (pipeline run stats). Does not affect quality metrics measurements.                                                                                                           | off     |
+| `--concurrency N` | Concurrency for bounded work — sets every config knob (encoding, audio, measurement); each phase consumes its own. Values above the CPU count are clamped. Per-domain control: edit the config file. Applies to `auto`, `video`, `audio`, `measure`. | from config (`1`) |
 
 ---
 
@@ -57,7 +58,6 @@ These options apply to `auto` and `video` (the video chain resolvers).
 | `--strategies STRATEGIES` | Encoding strategies (see [Strategy Format](#strategy-format))                                                                                                                  | from config (`h264*,h265*`)        |
 | `-q, --quality V`         | Quality knob override for every matched strategy: a single value (`18`) pins it — a [fixed-quality run](./quality-targeting.md#fixed-quality-mode-q) with the per-chunk search disabled; a pair (`18:24`, `18-24`, `18..24`, order-free) constrains the search band. Replaces profile-level `quality_range` | off (config ranges) |
 | `--no-optimize`           | Disable optimization — produce output for all strategies                                                                                                                       | `False` (optimization enabled)     |
-| `--concurrency N`         | Maximum concurrent encoding processes. Increase only if you see CPU cores underutilized.                                                                                       | from config (`1`)                  |
 | `--sampling N`            | Frame sampling for quality measurement: every N-th frame. Lower = more precise but slower. Measurements precision directly affect encoding results. sampling=1 is recommended. | from config (`1`)                  |
 | `--no-visual-hash`        | Disable emoji visual-hash prefix on chunk log lines                                                                                                                            | off                                |
 
