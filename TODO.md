@@ -9,30 +9,6 @@ Status legend: 🤔 needs thinking · 🔍 verified against code
 
 ---
 
-## 🤔 2. `parallelism` field described by the metrics spec is not implemented
-
-**Status:** needs thinking (spec/code reconciliation)
-
-- `.kiro/specs/2026-04-22 app-metrics-two-tier/design.md:299` describes a top-level
-  `parallelism` field; `PipelineMetrics` explicitly notes it is
-  "NOT part of this model" (`pyqenc/metrics.py:258-259`).
-- Related minor spec staleness: `requirements.md:189-191` still motivates
-  "no dotted keys under `extraction`" with "(single mkvextract operation...)" —
-  mkvextract was removed from the extraction phase in `4d0433f`.
-  (The design.md call-site table row was already reworded in the 0.14.2 fix.)
-
-**Questions to think about:** implement the field, or reconcile the spec down
-to what exists? Worth a general pass over `app-metrics-two-tier` vs. current code.
-
-Also, it looks like parallelism should be separate for video and for audio. For video in general parallelism should be == 1 by default.
-For audio it can be higher. Probably 2 or 4 by default.
-
-Worth noting too. With parallelism==1 we could stick to sync mode. While parallelism >1 requires async.
-
-parallelism could also be named concurrency.
-
----
-
 ## 🤔 3. Sub-second metric keys are lossy across runs
 
 **Status:** needs thinking (accuracy quirk, verified live)
@@ -68,19 +44,6 @@ Warning is enough, but maybe make it log rarer, like exponential delay (first fa
 ---
 
 ## Metrics & quality search
-
-## 🤔 12. No per-chain dotted metrics from the audio phase
-
-**Status:** needs thinking (spec/code gap; the ChunkEncoder prefix-injection mechanism now exists — time per chain under `audio.<chain>`?)
-
-- Audio records only top-level `audio` and `recovery` — the only two
-  collector calls in the file (`pyqenc/phases/audio.py:197,219`); the whole
-  `_execute_audio` is timed under one key. No `audio.<chain>` dotted keys.
-
-**Questions to think about:** time per chain under dotted keys? Needs the
-the same prefix-injection mechanism the optimization phase already uses (metric_prefix on ChunkEncoder).
-
----
 
 ## 🤔 15. No outlier rejection for low min values (VMAF ≈ 20 case)
 
