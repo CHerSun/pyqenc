@@ -274,7 +274,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
     ``optimization.yaml``, and selects strategies within the configured
     tolerance of the best result. Optimization IS encoding on a chunk subset
     and follows the encoding contract: its test encodes are timed under
-    ``optimization.<strategy>`` / ``optimization.quality_measure`` (via the
+    ``optimization.<strategy>`` / ``optimization.measure`` (via the
     shared ``ChunkEncoder`` metric prefix) and receive the run's cleanup
     level for rolling attempt cleanup.
 
@@ -778,7 +778,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         The top-level ``optimization`` span belongs to the template and covers
         everything here. Test encodes run through the shared encoder machinery
         with ``metric_prefix=optimization``, so their dotted keys land under
-        ``optimization.<strategy>`` / ``optimization.quality_measure``.
+        ``optimization.<strategy>`` / ``optimization.measure``.
         ``dry_run`` is never ``True`` here (optimization is not a
         readonly-execute phase; the template previews instead).
 
@@ -1532,7 +1532,7 @@ def _make_encoder(
 
     The encoder follows the full encoding contract on the optimization
     subset: dotted timing keys are prefixed by ``metric_prefix``
-    (``optimization.<strategy>``, ``optimization.quality_measure``) and the
+    (``optimization.<strategy>``, ``optimization.measure``) and the
     run's ``cleanup_level`` enables rolling attempt cleanup after each pair
     converges. Test encodes are always measured — the anchor's anchor
     target set is derived from them (fixed-quality spec Req 8.1), regardless

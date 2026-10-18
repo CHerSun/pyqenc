@@ -29,7 +29,7 @@ from pyqenc.constants import (
     FAILURE_SYMBOL_MAJOR,
     FAILURE_SYMBOL_MINOR,
     FIXED_COMPARISON_STATS,
-    METRIC_KEY_QUALITY_MEASURE,
+    METRIC_KEY_MEASURE,
     NEUTRAL_INDICATOR_SYMBOL,
     SUCCESS_SYMBOL_MINOR,
     TEMP_SUFFIX,
@@ -744,7 +744,7 @@ class ChunkEncoder:
             sampling:  Frame subsampling factor for quality metric generation.
             metric_prefix:     Top-level key prefixing this encoder's dotted timing
                                keys — ``<prefix>.<strategy>`` per ffmpeg encode and
-                               ``<prefix>.quality_measure`` per quality measurement.
+                               ``<prefix>.measure`` per quality measurement.
                                EncodingPhase uses the default (``encoding``);
                                OptimizationPhase passes ``optimization`` so its test
                                encodes are attributed to the owning phase.
@@ -1209,7 +1209,7 @@ class ChunkEncoder:
             # seam off-path (TODO §83) skips measurement entirely: no metrics, no
             # verdict — single-point domains accept the attempt unconditionally.
             if self._measure_attempts:
-                with self._collector.time(self._metric_prefix, METRIC_KEY_QUALITY_MEASURE):
+                with self._collector.time(self._metric_prefix, METRIC_KEY_MEASURE):
                     measurement = self.quality_measurer.measure_chunk(
                         encoded              = output_file,
                         reference            = chunk.as_input(),

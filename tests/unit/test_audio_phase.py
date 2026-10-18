@@ -489,6 +489,6 @@ class TestBoundedExecution:
         assert result.outcome == PhaseOutcome.COMPLETED
         collector.flush()
         raw = yaml.safe_load((tmp_path / "metrics.yaml").read_text(encoding="utf-8-sig"))
-        dotted = raw["pipeline_metrics"]["time_distribution"]["dotted"]
+        dotted = raw["time_distribution"]["dotted"]
         keys = {e["key"] for group in dotted.values() for e in group["breakdown"]}
         assert {"audio.normal", "audio.night"} <= keys
