@@ -507,7 +507,7 @@ The graph below shows the model: `select` chooses the working track set, and eac
 
 ### Parallelism
 
-Audio processing is parallelized independently from the main pipeline — audio tasks are I/O-bound and benefit from concurrency. Pipeline encoding parallelism defaults to 1 because ffmpeg/codecs already saturate available CPUs; extra pipeline-level parallelism adds memory pressure and disrupts progress display without meaningful throughput gain.
+Each (track, chain) job runs through the shared bounded runner at `audio.concurrency` (default 1) — one job per output, per-job error containment (a failing chain fails only its own artifact), and per-chain dotted timing under `audio.<chain>`. Audio jobs are lightweight and I/O-bound, so higher concurrency can pay off where video encode jobs would merely oversubscribe the machine.
 
 ---
 
@@ -596,9 +596,11 @@ Running VMAF, SSIM, PSNR, and VIF in separate ffmpeg passes is ~4× slower and r
 
 Crop is detected once during the Probe phase using ffmpeg's `cropdetect` filter across multiple sampled frames. The same crop parameters are stored in `probe.yaml` and applied consistently across all subsequent phases. Crop is applied as an encode-time filter when reading source segments — the source itself is never modified, and quality measurement crops the reference branch identically so the comparison is like-for-like.
 
-### Pipeline parallelism default of 1
+### Per-domain concurrency, uniform bounded execution
 
-ffmpeg and modern codecs (x264, x265, SVT-AV1) already scale across all available CPU cores internally. Adding pipeline-level parallelism (encoding multiple chunks simultaneously) creates memory pressure, disrupts the progress display ordering, and provides no meaningful throughput improvement for CPU-bound codecs. Audio processing is different — audio tasks are lightweight and I/O-bound, so audio parallelism is configured separately and defaults higher.
+ffmpeg and modern codecs (x264, x265, SVT-AV1) already scale across all available CPU cores internally, so video encoding defaults to `encoding.concurrency = 1`; a higher bound overlaps one chunk's measurement tail with another chunk's encode rather than out-threading the codec. Audio (`audio.concurrency`) and the standalone measure command (`measurement.concurrency`) have their own knobs — audio jobs are lightweight and I/O-bound, measure jobs are one ffmpeg metrics pass per video. All values are validated at config load: `>= 1` and clamped to the machine's CPU count.
+
+Every bounded phase — optimization, encoding, audio, measure — runs the same `run_bounded` machinery: a pre-filtered, input-ordered job list consumed by bound workers, one result per job in input order, identical order at any value. Progress reporting and error containment are the job's own: count-based bars where items are many and substeps non-deterministic (encoding, optimization, audio), duration-based bars with in-job ticks where steps are few and deterministic (merge, measure). Dotted app-metrics sub-spans may overlap under concurrency and are judged against their internal sums, never against wall-clock.
 
 ### Atomic writes everywhere
 

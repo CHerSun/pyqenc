@@ -212,7 +212,7 @@ Config build order: built-in defaults → `~/.config/pyqenc/config.yaml` → `./
 
 **Insufficient disk space** — the whole process typically needs several times the source size (attempts for several strategies + audio + merged outputs). Before encoding, pyqenc logs a space estimate (required and recommended ranges) against the available space. Use `--work-dir` to point to a larger disk if required.
 
-**Slow encoding** — try a faster codec or faster codec preset (`fast`, `medium`). If CPU is not fully utilized - add `--concurrency 2` or higher. OR switch to GPU-encoding. Besides concurrency all other options affect resulting quality and/or size. Effective encoding is slow and CPU-only. You can also choose to use fixed quality encoding instead of quality targeting - quality search is costly, convergence is in ~4.1 attempts currently.
+**Slow encoding** — try a faster codec or faster codec preset (`fast`, `medium`). If CPU is not fully utilized - add `--concurrency 2` or higher (sets every knob — encoding, audio, and the standalone `measure` command; per-domain values live in the config file, values above the CPU count are clamped). OR switch to GPU-encoding. Besides concurrency all other options affect resulting quality and/or size. Effective encoding is slow and CPU-only. You can also choose to use fixed quality encoding instead of quality targeting - quality search is costly, convergence is in ~4.1 attempts currently.
 
 **Strategy wildcard not expanding** — some shells require quoting: `"h265*"`. Use dry-run to verify expansion. Verify that the config does have the wanted profiles.
 
