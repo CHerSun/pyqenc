@@ -54,6 +54,7 @@ from pyqenc.phases.job import JobPhase
 from pyqenc.state import ArtifactState
 from pyqenc.stream_model import AudioOutput, AudioStream, File
 from pyqenc.utils.alive import AdvanceState, ProgressBar
+from pyqenc.utils.concurrency import run_bounded
 from pyqenc.utils.fs import remove_stale_tmp_files
 from pyqenc.utils.yaml_utils import load_model, save_model
 
@@ -458,13 +459,15 @@ class AudioPhase(Phase[AudioPhaseResult]):
     # ------------------------------------------------------------------
 
     def _execute(self, wanted: list[Artifact], dry_run: bool) -> AudioPhaseResult:
-        """Produce every pending (track, chain) output via the chain executor.
+        """Produce every pending (track, chain) output via the bounded runner.
 
-        Pending artifacts (ABSENT / PARTIAL) are produced one at a time through
-        :func:`~pyqenc.audio.chain.execute_chain`, advancing a count-based
-        :class:`ProgressBar` (total = pending job count). A
-        ``passthrough`` chain raises ``NotImplementedError`` and a failing chain
-        raises ``ChainExecutionError``; both are caught per-job and surfaced as a
+        Pending artifacts (ABSENT / PARTIAL) run as jobs through
+        :func:`~pyqenc.utils.concurrency.run_bounded` at
+        ``audio.concurrency`` — one :func:`~pyqenc.audio.chain.execute_chain`
+        await per job, timed under the ``audio.<chain>`` dotted key, plus its
+        bookkeeping on the count-based bar. A ``passthrough`` chain raises
+        ``NotImplementedError`` and a failing chain raises
+        ``ChainExecutionError``; both are caught per-job and surfaced as a
         FAILED artifact for that output — the phase never crashes on one bad
         chain. ``dry_run`` is never ``True`` here (audio is not
         a readonly-execute phase; the template previews instead).
@@ -490,13 +493,18 @@ class AudioPhase(Phase[AudioPhaseResult]):
 
         produced = 0
         failed = 0
-        with ProgressBar(total=len(pending), title="AUDIO", total_count=len(pending)) as advance:
-            for art in pending:
+        with ProgressBar(len(pending), title="AUDIO", total_count=len(pending)) as advance:
+
+            async def process(art: Artifact) -> None:
+                """One (track, chain) job: the chain executor, then bookkeeping."""
+                nonlocal produced, failed
                 output = art.payload
+                chain = resolved[output.chain_name]
                 label = f"[{output.chain_name}] {output.stream.file.path.stem}"
                 logger.debug("Producing %s", label)
                 try:
-                    self._produce_one(output, resolved[output.chain_name], audio_dir)
+                    with self._collector.time(MetricKey.AUDIO, output.chain_name):
+                        await execute_chain(chain, output.stream, audio_dir)
                     art.state = ArtifactState.COMPLETE
                     produced += 1
                     advance(1, AdvanceState.SUCCESS)
@@ -510,6 +518,8 @@ class AudioPhase(Phase[AudioPhaseResult]):
                     failed += 1
                     logger.error("%s — chain failed: %s", label, exc)
                     advance(1, AdvanceState.FAILED)
+
+            asyncio.run(run_bounded(pending, audio_cfg.concurrency, process))
 
         reused = sum(1 for a in artifacts if a.state == ArtifactState.COMPLETE) - produced
         logger.info(
@@ -530,24 +540,6 @@ class AudioPhase(Phase[AudioPhaseResult]):
             artifacts,
             f"produced {produced}, reused {max(reused, 0)}, failed {failed}",
         )
-
-    def _produce_one(self, output: AudioOutput, chain: ResolvedChain, output_dir: Path) -> None:
-        """Execute one (track, chain) job, writing the output's delivery file.
-
-        Runs the async chain executor to completion. The executor enforces the
-        ``.tmp``-then-rename protocol and the correct output container muxer,
-        and writes into the phase's dedicated ``output_dir``.
-
-        Args:
-            output:     The pending row's payload (the source track + chain).
-            chain:      The resolved chain to apply.
-            output_dir: The dedicated audio output directory.
-
-        Raises:
-            NotImplementedError: For a ``passthrough`` chain.
-            ChainExecutionError: When a measurement or application pass fails.
-        """
-        asyncio.run(execute_chain(chain, output.stream, output_dir))
 
     def _make_result(
         self,

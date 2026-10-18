@@ -21,6 +21,7 @@ Bugs guarded:
 """
 # CHerSun 2026
 
+import asyncio
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -396,3 +397,98 @@ class TestPassthrough:
 
         assert result.outcome == PhaseOutcome.FAILED
         assert not _chain_out(tmp_path, tracks[0], "copy").exists()
+
+
+class TestBoundedExecution:
+    """The bounded runner integration: order, and per-chain dotted timing.
+
+    **Validates: concurrency spec Req 6–8, 14**
+    """
+
+    def test_jobs_run_in_pending_order_at_every_concurrency(self, tmp_path: Path) -> None:
+        """Bug guarded: raising audio.concurrency must not change the job order.
+
+        A bound > 1 that started jobs out of pending-list order would make
+        run logs and output appearance machine-dependent (Req 7).
+        """
+        config = _audio_config(
+            [ChainSpec(name="normal", filters=["peaknorm"]),
+             ChainSpec(name="night",  filters=["peaknorm2", "aac"])],
+        )
+        config.concurrency = 3
+        tracks = [_track(tmp_path, "t1", track_id=1), _track(tmp_path, "t2", track_id=2)]
+        phase  = _make_phase(tmp_path, config, tracks)
+
+        record: list[tuple[str, str]] = []
+        with patch("pyqenc.phases.audio.execute_chain", _fake_execute_chain_factory(record)):
+            result = phase.run()
+
+        assert result.outcome == PhaseOutcome.COMPLETED
+        # Pending order is the classified (track, chain) enumeration —
+        # identical at bound 1 and 3.
+        assert record == [
+            ("normal", "t1"), ("night", "t1"),
+            ("normal", "t2"), ("night", "t2"),
+        ]
+
+    def test_per_chain_dotted_timing_recorded(self, tmp_path: Path) -> None:
+        """Bug guarded (Req 14, ex-TODO §12): each chain's work is timed
+        under its own ``audio.<chain>`` dotted key.
+
+        A missing per-chain span leaves the audio phase with a single
+        top-level wall-time entry — no way to see which chain dominates.
+        """
+        import yaml
+
+        from pyqenc.metrics import YamlMetricsCollector
+
+        config = _audio_config(
+            [ChainSpec(name="normal", filters=["peaknorm"]),
+             ChainSpec(name="night",  filters=["peaknorm2", "aac"])],
+        )
+        tracks = [_track(tmp_path, "t1")]
+        registry: dict = {}
+
+        from pyqenc.phase import Artifact
+        from pyqenc.state import ArtifactState
+
+        job_result = MagicMock()
+        job_result.work_dir = tmp_path
+        job_result.force = False
+        job_result.file.payload.fingerprint = _STUB_SOURCE_FP
+        app_config = MagicMock()
+        app_config.audio = config
+        job_result.config = app_config
+        job_mock = MagicMock()
+        job_mock.result = job_result
+        extraction_result = MagicMock()
+        extraction_result.audio_streams = [
+            Artifact(payload=t, state=ArtifactState.COMPLETE) for t in tracks
+        ]
+        extraction_mock = MagicMock()
+        extraction_mock.result = extraction_result
+
+        from pyqenc.phases.extraction import ExtractionPhase
+        from pyqenc.phases.job import JobPhase
+
+        collector = YamlMetricsCollector(tmp_path)
+        phase = AudioPhase(app_config, registry, collector=collector)
+        registry[JobPhase] = job_mock
+        registry[ExtractionPhase] = extraction_mock
+
+        # Sub-second spans truncate to zero rows at report time (TODO §3) —
+        # sleep past one second so the dotted entries survive the dump.
+        async def _slow_fake(resolved: ResolvedChain, stream: AudioStream, output_dir: Path) -> Path:
+            await asyncio.sleep(1.05)
+            fake = _fake_execute_chain_factory([])
+            return await fake(resolved, stream, output_dir)
+
+        with patch("pyqenc.phases.audio.execute_chain", _slow_fake):
+            result = phase.run()
+
+        assert result.outcome == PhaseOutcome.COMPLETED
+        collector.flush()
+        raw = yaml.safe_load((tmp_path / "metrics.yaml").read_text(encoding="utf-8-sig"))
+        dotted = raw["pipeline_metrics"]["time_distribution"]["dotted"]
+        keys = {e["key"] for group in dotted.values() for e in group["breakdown"]}
+        assert {"audio.normal", "audio.night"} <= keys
