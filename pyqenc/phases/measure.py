@@ -5,7 +5,6 @@ crop resolution, resolution validation, duration parsing, screenshot
 timestamp generation, and screenshot filename formatting.
 """
 
-import asyncio
 import hashlib
 import logging
 import re
@@ -1213,7 +1212,7 @@ async def run_measure(
             )
             advance(eff_dur or 0, AdvanceState.FAILED if failed else AdvanceState.SUCCESS)
 
-        asyncio.run(run_bounded(jobs, concurrency, process))
+        await run_bounded(jobs, concurrency, process)
         advance(0, AdvanceState.COMPLETE)
 
     # Summary log after the task run (all screenshots and results are in)
