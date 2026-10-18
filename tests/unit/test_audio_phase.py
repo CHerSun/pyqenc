@@ -400,10 +400,46 @@ class TestPassthrough:
 
 
 class TestBoundedExecution:
-    """The bounded runner integration: order, and per-chain dotted timing.
+    """The bounded runner integration: order, per-chain dotted timing, and
+    the concurrency key-params announcement.
 
     **Validates: concurrency spec Req 6–8, 14**
     """
+
+    def test_key_params_announce_concurrency_only_above_one(
+        self, tmp_path: Path, caplog,
+    ) -> None:
+        """Concurrency appears in the key-params block only when > 1.
+
+        Bug condition: interleaved per-job log lines at concurrency > 1
+        read as a bug without an announced cause, while a constant
+        "Concurrency: 1" line on every run is pure noise.
+        """
+        import logging
+
+        tracks = [_track(tmp_path, "t1")]
+
+        def _run(work_dir: str, concurrency: int) -> None:
+            config = _audio_config([ChainSpec(name="normal", filters=["peaknorm"])])
+            config.concurrency = concurrency
+            (tmp_path / work_dir).mkdir(exist_ok=True)
+            phase = _make_phase(tmp_path / work_dir, config, tracks)
+            caplog.clear()
+            with caplog.at_level(logging.INFO, logger="pyqenc.phases.audio"):
+                phase.run()
+
+        # fmt_key_value_table logs under its own module logger, so the level
+        # is set at root rather than on the phase logger.
+        with (
+            patch("pyqenc.phases.audio.execute_chain", _fake_execute_chain_factory([])),
+            caplog.at_level(logging.INFO),
+        ):
+            _run("w1", 1)
+            assert "Concurrency" not in caplog.text
+
+            _run("w2", 2)
+            assert "Concurrency:" in caplog.text
+            assert "2" in caplog.text
 
     def test_jobs_run_in_pending_order_at_every_concurrency(self, tmp_path: Path) -> None:
         """Bug guarded: raising audio.concurrency must not change the job order.

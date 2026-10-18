@@ -194,11 +194,14 @@ class AudioPhase(Phase[AudioPhaseResult]):
         """Log the audio phase key input params."""
         audio_cfg = self._config.audio
 
-        fmt_key_value_table({
+        kv: dict[str, object] = {
             "Processing chains:" : len(audio_cfg.chains),
             "Selectors:"         : "0 (all extracted tracks)" if not audio_cfg.select else len(audio_cfg.select),
-            "Tracks:"            : len(self._deps[ExtractionPhase].audio_streams)
-        })
+            "Tracks:"            : len(self._deps[ExtractionPhase].audio_streams),
+        }
+        if audio_cfg.concurrency > 1:
+            kv["Concurrency:"] = audio_cfg.concurrency
+        fmt_key_value_table(kv)
 
     # ------------------------------------------------------------------
     # Recovery + invalidation

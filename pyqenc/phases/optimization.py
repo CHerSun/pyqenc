@@ -406,6 +406,8 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         kv: dict[str, object] = {
             "Tolerance:":  self._config.encoding.optimize_tolerance,
         }
+        if self._config.encoding.concurrency > 1:
+            kv["Concurrency:"] = self._config.encoding.concurrency
 
         if plan.fixed_quality:
             kv["Quality:"]    = [f"{strategy.codec.quality_label}={strategy.codec.quality_range[0]} for {strategy.display_name()}" for strategy in plan.strategies]

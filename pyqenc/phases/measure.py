@@ -993,14 +993,17 @@ async def run_measure(
     else:
         distorted_streams = []
 
-    fmt_key_value_table({
+    kv: dict[str, object] = {
         "source":      str(source_video),
         "distorted":  [f"{i+1:>2} - {t.name}" for i, t in enumerate(distorted_videos)] if distorted_videos else ["(none — screenshots only)"],
         "crop":        str(resolved_crop) if not resolved_crop.is_empty() else "none",
         "width":       str(width) if width else "none",
         "sampling":    str(sampling),
         "screenshots": f"every {screenshot_interval}s (cap {effective_screenshot_count})" if screenshot_interval else str(effective_screenshot_count),
-    })
+    }
+    if concurrency > 1:
+        kv["concurrency"] = str(concurrency)
+    fmt_key_value_table(kv)
 
     # ------------------------------------------------------------------
     # Directory creation
