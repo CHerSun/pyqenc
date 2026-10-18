@@ -4,7 +4,7 @@
 
 - Spec: Concurrency — per-domain knobs, uniform bounded execution, and app-metrics alignment
 - Created: 2026-10-18
-- Completed:
+- Completed: 2026-10-19
 
 ## Current state (verified 2026-10-18)
 

@@ -616,7 +616,7 @@ What the observability must answer (granular, of course):
 - with a clear distinction between **actual wall time** (top-level metrics) and **sub-time** (parallelized flows — parts of the full time, never summable against it),
 - all safely dumpable, **crash-resistant with minor allowed delta loss** (see the current `metrics.yaml` implementation).
 
-Task: research best industry practices for standalone CLI tooling — hierarchical span/task timing (inclusive vs exclusive time is exactly the wall-vs-sub-time problem), OTel SDK in offline/local-file-export modes, what a trace-shaped local dump would look like vs the current flat dotted-key metrics — and their applicability to a local `metrics.yaml` dump. §2 (parallelism field / spec reconciliation), §12 (per-chain dotted audio metrics) and §59 (concurrent dumps) all ride under this umbrella and should be re-evaluated against whatever shape lands.
+Task: research best industry practices for standalone CLI tooling — hierarchical span/task timing (inclusive vs exclusive time is exactly the wall-vs-sub-time problem), OTel SDK in offline/local-file-export modes, what a trace-shaped local dump would look like vs the current flat dotted-key metrics — and their applicability to a local `metrics.yaml` dump. §59 (concurrent dumps) rides under this umbrella and should be re-evaluated against whatever shape lands. (Former riders §2 and §12 were consumed by the 2026-10-18 concurrency spec; the wall-vs-sub-time invariant is now stated on `AppMetrics`.)
 
 ---
 
