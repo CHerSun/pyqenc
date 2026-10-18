@@ -1014,7 +1014,7 @@ class TestOptimizationPhaseTiming:
             strategy_dir.mkdir(parents=True, exist_ok=True)
             (strategy_dir / EncodedChunk.format_winner_file_name(chunk.safe_name())).write_bytes(b"x" * 64)
             (strategy_dir / EncodedChunk.format_winner_sidecar_name(chunk.safe_name())).write_text(
-                "crf: 18.0\n", encoding="utf-8",
+                "quality: 18.0\n", encoding="utf-8",
             )
 
     def _persist_current_sidecar(
@@ -1118,7 +1118,7 @@ class TestOptimizationPhaseTiming:
             chunk_id     = "chunk_0",
             strategy     = strategy.display_name(),
             success      = True,
-            final_crf    = Decimal("28.0"),
+            final_quality    = Decimal("28.0"),
             attempts     = 2,
             encoded_file = MagicMock(path=encoded_path),
             reused       = False,
@@ -1339,7 +1339,7 @@ class TestEncodingPhaseTiming:
 
         Bug guarded: convergence data collected in memory but lost on the way
         to ``metrics.yaml`` — the per-strategy attempt statistics are the
-        report's record of how hard the CRF search worked.
+        report's record of how hard the quality search worked.
 
         Validates: Requirements 6.5, 4.1a
         """
@@ -1359,7 +1359,7 @@ class TestEncodingPhaseTiming:
             chunk_id     = "chunk_0",
             strategy     = "h265+slow",
             success      = True,
-            final_crf    = Decimal("28.0"),
+            final_quality    = Decimal("28.0"),
             attempts     = 3,
             encoded_file = MagicMock(path=encoded_path),
             reused       = False,
@@ -1415,7 +1415,7 @@ class TestEncodingPhaseTiming:
             chunk_id     = "chunk_0",
             strategy     = "h265+slow",
             success      = True,
-            final_crf    = Decimal("28.0"),
+            final_quality    = Decimal("28.0"),
             attempts     = 1,
             encoded_file = MagicMock(path=encoded_path),
             reused       = True,

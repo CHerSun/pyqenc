@@ -1,4 +1,4 @@
-"""Integration tests for encoding → quality evaluation pipeline."""
+"""Integration tests for encoding → quality measurement pipeline."""
 
 from pathlib import Path
 from typing import cast
@@ -19,10 +19,10 @@ from tests.fixtures.video_fixtures import sample_video_exists
 
 
 class TestEncodingQualityIntegration:
-    """Integration tests for encoding and quality evaluation."""
+    """Integration tests for encoding and quality measurement."""
 
     def test_quality_evaluation_with_mock_metrics(self, tmp_path):
-        """Test quality evaluation using mock metric files."""
+        """Test quality measurement using mock metric files."""
         # Create mock metric files
         metrics_dir = tmp_path / "metrics"
         metrics_dir.mkdir()
@@ -44,8 +44,8 @@ class TestEncodingQualityIntegration:
         assert expected_stats["min"] >= targets[0].value
         assert expected_stats["median"] >= targets[1].value
 
-    def test_quality_target_evaluation(self):
-        """Test quality target evaluation logic."""
+    def test_quality_target_judging(self):
+        """Test quality target judging logic."""
         targets = [
             QualityTarget(metric="vmaf", statistic="min",    value=95.0),
             QualityTarget(metric="ssim", statistic="median", value=0.98),
@@ -87,7 +87,7 @@ class TestEncodingQualityIntegration:
         assert not all_met
 
     def test_artifact_generation(self, tmp_path):
-        """Test that quality evaluation generates expected artifacts."""
+        """Test that quality measurement generates expected artifacts."""
         metrics_dir = tmp_path / "metrics"
         metrics_dir.mkdir()
 
@@ -123,7 +123,7 @@ class TestEncodingQualityIntegration:
 class TestEncodingQualityWithRealVideo:
     """Integration tests using real video files (requires sample videos)."""
 
-    def test_quality_evaluator_initialization(self, tmp_path):
+    def test_quality_measurer_initialization(self, tmp_path):
         """Test quality evaluator can be initialized."""
         evaluator = QualityMeasurer(tmp_path)
         assert evaluator.work_dir == tmp_path
@@ -192,14 +192,14 @@ class TestEncodeChunkQualitySearchV2Integration:
         chunk    = self._make_chunk(tmp_path)
         target   = QualityTarget(metric="vmaf", statistic="min", value=95.0)
 
-        # Build a real AttemptMetadata so .crf is a proper Decimal.
+        # Build a real AttemptMetadata so .quality is a proper Decimal.
         attempt_path = tmp_path / "chunk_001.q18.0.mkv"
         attempt_path.write_bytes(b"fake mkv")
         fake_attempt = AttemptMetadata(
             path            = attempt_path,
             chunk_id        = "chunk_001",
             strategy        = "test-strategy",
-            crf             = Decimal("18.0"),
+            quality          = Decimal("18.0"),
             file_size_bytes = 8,
         )
 
@@ -216,10 +216,10 @@ class TestEncodeChunkQualitySearchV2Integration:
         evaluator.work_dir = tmp_path
 
         encoder = ChunkEncoder(
-            quality_evaluator = evaluator,
+            quality_measurer  = evaluator,
             work_dir          = tmp_path,
             collector         = MagicMock(spec=MetricsCollector),
-            metrics_sampling  = 10,
+            sampling           = 10,
         )
 
         reference = MagicMock()
@@ -233,7 +233,7 @@ class TestEncodeChunkQualitySearchV2Integration:
                 chunk           = chunk,
                 strategy        = strategy,
                 quality_targets = [target],
-                initial_crf     = Decimal("18.0"),
+                initial_quality     = Decimal("18.0"),
                 force           = False,
             )
 
@@ -258,7 +258,7 @@ class TestEncodeChunkQualitySearchV2Integration:
         chunk    = self._make_chunk(tmp_path)
         target   = QualityTarget(metric="vmaf", statistic="min", value=95.0)
 
-        # Fake evaluation result: passes with surplus within acceptance_delta → early acceptance.
+        # Fake measurement result: passes with surplus within acceptance_delta → early acceptance.
         fake_measurement = MagicMock(spec=QualityMeasurement)
         fake_measurement.targets_met    = True
         fake_measurement.failed_targets = []
@@ -274,7 +274,7 @@ class TestEncodeChunkQualitySearchV2Integration:
         evaluator.measure_chunk.return_value = fake_measurement
 
         encoder = ChunkEncoder(
-            quality_evaluator = evaluator,
+            quality_measurer  = evaluator,
             work_dir          = tmp_path,
             collector         = MagicMock(spec=MetricsCollector),
         )
@@ -297,7 +297,7 @@ class TestEncodeChunkQualitySearchV2Integration:
                 chunk           = chunk,
                 strategy        = strategy,
                 quality_targets = [target],
-                initial_crf     = Decimal("18.0"),
+                initial_quality     = Decimal("18.0"),
                 force           = False,
             )
 

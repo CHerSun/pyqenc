@@ -324,7 +324,6 @@ def _add_quality_arguments(parser: argparse.ArgumentParser) -> None:
         type=int,
         default=None,
         metavar="N",
-        dest="metrics_sampling",
         help=(
             "Frame sampling factor for quality metrics measurement: measure every N-th frame. "
             "Min: 1 (every frame measured). Default: from config. "
@@ -392,9 +391,9 @@ def _build_config(args: argparse.Namespace) -> AppConfig:
     if concurrency is not None:
         config.encoding.concurrency = concurrency
 
-    metrics_sampling = getattr(args, "metrics_sampling", None)
-    if metrics_sampling is not None:
-        config.measurement.sampling = metrics_sampling
+    sampling = getattr(args, "sampling", None)
+    if sampling is not None:
+        config.measurement.sampling = sampling
 
     no_visual_hash = getattr(args, "no_visual_hash", False)
     config.encoding.visual_hash = not no_visual_hash
@@ -748,16 +747,16 @@ def _create_measure_subcommand(subparsers: argparse._SubParsersAction) -> None:
         type=Path,
         help=(
             "Reference (original/lossless) video file. "
-            "ORDER MATTERS: swapping source and target produces incorrect metrics (VMAF is not symmetric)."
+            "ORDER MATTERS: swapping source and distorted produces incorrect metrics (VMAF is not symmetric)."
         ),
     )
     p.add_argument(
-        "targets",
+        "distorted",
         type=Path,
         nargs="*",
         default=[],
         help=(
-            "Zero or more encoded/distorted video files to evaluate against the source. "
+            "Zero or more encoded/distorted video files to measure against the source. "
             "Omit all to run in screenshots-only mode (no metric computation)."
         ),
     )
@@ -768,7 +767,6 @@ def _create_measure_subcommand(subparsers: argparse._SubParsersAction) -> None:
         type=int,
         default=None,
         metavar="N",
-        dest="metrics_sampling",
         help=(
             "Frame sampling factor for quality metrics measurement: measure every N-th frame. "
             "Min: 1 (every frame measured). Default: from config. "
@@ -781,8 +779,8 @@ def _create_measure_subcommand(subparsers: argparse._SubParsersAction) -> None:
         default=None,
         metavar="W",
         help=(
-            "Scale both source and target to width W (preserving aspect ratio) during metric "
-            "computation. Crop is applied first. Does not affect screenshots."
+            "Scale both source and distorted video to width W (preserving aspect ratio) during "
+            "metric computation. Crop is applied first. Does not affect screenshots."
         ),
     )
     p.add_argument(
@@ -821,9 +819,9 @@ def _cmd_measure(args: argparse.Namespace) -> int:
         logger.critical(f"Invalid crop parameters: {e}")
         return 1
 
-    _config          = load_app_config()
-    metrics_sampling = (
-        args.metrics_sampling if args.metrics_sampling is not None
+    _config  = load_app_config()
+    sampling = (
+        args.sampling if args.sampling is not None
         else _config.measurement.sampling
     )
 
@@ -831,9 +829,9 @@ def _cmd_measure(args: argparse.Namespace) -> int:
         measure_quality(
             source_video             = args.source,
             work_dir                 = args.work_dir,
-            target_videos            = args.targets,
+            distorted_videos         = args.distorted,
             crop_params              = crop_params,
-            metrics_sampling         = metrics_sampling,
+            sampling                 = sampling,
             screenshot_count         = args.screenshots,
             screenshot_interval      = args.every,
             screenshot_include_edges = args.screenshot_include_edges,
@@ -894,7 +892,7 @@ Examples:
   # Multiple strategies
   pyqenc auto source.mkv --strategies h265-aq,h264 -y
 
-  # Delete CRF attempt files as each chunk completes
+  # Delete attempt files as each chunk completes
   pyqenc auto source.mkv -y --cleanup
 
   # Delete all intermediate directories after full pipeline success

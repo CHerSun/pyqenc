@@ -487,8 +487,8 @@ def merge_final(
 def measure_quality(
     source_video:             Path,
     work_dir:                 Path,
-    metrics_sampling:         int,
-    target_videos:            list[Path]        | None = None,
+    sampling:                 int,
+    distorted_videos:         list[Path]        | None = None,
     crop_params:              CropParams | None = None,
     screenshot_count:         int | None        = DEFAULT_SCREENSHOT_COUNT,
     screenshot_interval:      str | None        = None,
@@ -497,9 +497,10 @@ def measure_quality(
 ) -> MeasureResult:
     """Measure quality metrics between a source and one or more encoded videos.
 
-    Computes VMAF, SSIM, and PSNR metrics for each target, writes a metrics
-    sidecar YAML per target, generates a quality graph per target, and captures
-    screenshots from the source (once, shared positions) and each target.
+    Computes VMAF, SSIM, and PSNR metrics for each distorted video, writes a
+    measurement sidecar YAML per distorted video, generates a quality graph
+    per distorted video, and captures screenshots from the source (once,
+    shared positions) and each distorted video.
 
     Screenshot positions are computed from the source video's frame count and
     exact rational FPS using integer frame arithmetic — no float drift.
@@ -509,13 +510,13 @@ def measure_quality(
     Args:
         source_video:             Path to the reference (original) video file.
         work_dir:                 Working directory. Outputs go under ``work_dir/measure/``.
-        target_videos:            Paths to encoded/distorted videos to evaluate. Pass an
+        distorted_videos:         Paths to encoded/distorted videos to measure. Pass an
                                   empty list to run in screenshots-only mode.
         crop_params:              Crop parameters applied to the source during metric
                                   computation. Pass ``None`` to auto-load from
                                   ``job.yaml`` in ``work_dir`` if present; pass an
                                   empty ``CropParams`` to explicitly disable cropping.
-        metrics_sampling:         Frame subsampling factor (≥1).
+        sampling:                 Frame subsampling factor (≥1).
         screenshot_count:         Screenshots to capture from each video (≥1, default 20).
                                   In interval mode, acts as a cap on the total count.
         screenshot_interval:      Interval string between screenshots in interval mode
@@ -527,11 +528,12 @@ def measure_quality(
                                   screenshot positions (count mode only).
 
     Returns:
-        ``MeasureResult`` containing source screenshots directory and per-target results.
+        ``MeasureResult`` containing source screenshots directory and per-distorted-video
+        results.
 
     Raises:
-        FileNotFoundError: If ``source_video`` or any path in ``target_videos`` does not exist.
-        ValueError:        If ``metrics_sampling`` < 1 or ``screenshot_count`` < 1.
+        FileNotFoundError: If ``source_video`` or any path in ``distorted_videos`` does not exist.
+        ValueError:        If ``sampling`` < 1 or ``screenshot_count`` < 1.
     """
 
     if not source_video.exists():
@@ -546,10 +548,10 @@ def measure_quality(
 
     return asyncio.run(run_measure(
         source_video             = source_video,
-        target_videos            = target_videos or [],
+        distorted_videos         = distorted_videos or [],
         work_dir                 = work_dir,
         crop_params              = crop_params,
-        sampling                  = metrics_sampling,
+        sampling                 = sampling,
         width                    = width,
         screenshot_count         = screenshot_count,
         screenshot_interval      = parsed_interval,

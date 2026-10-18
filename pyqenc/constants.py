@@ -16,11 +16,11 @@ FIXED_COMPARISON_STATS: tuple[str, ...] = ("p10", "median")
 """The fixed-mode comparison statistic set per metric.
 
 The single definition of what fixed-mode comparison consumes — the anchor's
-synthetic target set (the ruler), the dominance pruning input, the
+anchor target set, the dominance pruning input, the
 comparison-table columns, and the winner sidecars' targeted subset: ``p10``
 guards the worst decile, ``median`` the central tendency; the remaining
 stats are stability/shape indicators (``std``, ``min``, ``max``, other
-percentiles), not quality bars — comparing or ruling on them silently
+percentiles), not quality targets — comparing or ruling on them silently
 skews selection. The full measured set stays on attempt/merged sidecars
 (data retention), so re-selecting the comparison set never re-measures."""
 
@@ -40,7 +40,7 @@ BITS_PER_PIXEL_ENCODED = 0.10
 """Estimated bits per pixel for encoded video output (attempts, final). Covers a wide range of
 content at typical quality targets. Tune this constant if estimates are consistently off."""
 AVG_ATTEMPTS_PER_CHUNK = 4.1
-"""Average number of CRF search attempts per chunk per strategy. Used to estimate space consumed
+"""Average number of quality search attempts per chunk per strategy. Used to estimate space consumed
 by intermediate attempt files during the encoding phase. Value was taken from metrics measured."""
 
 # Fallback source-size multiplier (used only when stream pixel data is unavailable)
@@ -71,9 +71,9 @@ SKIPPED_SYMBOL = "⏭"
 WARNING_SYMBOL = "⚠"
 """Symbol to indicate a warning condition, such as excessive encoding attempts or potential issues with disk space."""
 NEUTRAL_INDICATOR_SYMBOL = "•"
-"""Symbol to mark the metric with the least surplus on a passing attempt — the bottleneck constraining CRF search."""
+"""Symbol to mark the metric with the least surplus on a passing attempt — the bottleneck constraining quality search."""
 APPROXIMATE_INDICATOR_SYMBOL = "≈"
-"""Symbol to mark a soft miss against an approximate bar — a fixed-run acceptance below the auto-elected anchor ruler: a matter of fact, not a failure (distinct from per-attempt ✘ misses and exhausted-search ❌)."""
+"""Symbol to mark a soft miss against an approximate reference — a fixed-run acceptance below the auto-elected anchor targets: a matter of fact, not a failure (distinct from per-attempt ✘ misses and exhausted-search ❌)."""
 RANGE_SEPARATOR = "-"
 """Separator used in filename patterns to indicate ranges, such as frame ranges or chunk ranges."""
 TIME_SEPARATOR = ":"
@@ -89,7 +89,7 @@ for metric key structure — distinct from file extension dots, ``TIME_SEPARATOR
 (U+2024, used in filenames), and other uses of ``"."`` in the codebase."""
 
 METRIC_KEY_QUALITY_MEASURE: str = "quality_measure"
-"""Dotted-key suffix used to time quality metric measurement (VMAF/PSNR evaluation)
+"""Dotted-key suffix used to time quality metric measurement (VMAF/PSNR measurement)
 within a phase.  Combined with a ``MetricKey`` prefix it forms keys such as
 ``"encoding.quality_measure"`` and ``"merge.quality_measure"``.  Using a shared
 constant ensures the suffix is identical across all phases that measure quality."""
@@ -104,7 +104,7 @@ RIGHT_ARROW="→"
 EXTRACTED_DIR          = "extracted"
 """Output directory for extracted streams (ExtractionPhase)."""
 ENCODING_WORKSPACE_DIR = "encoding"
-"""Working directory for CRF search attempt files (intermediate, per-strategy)."""
+"""Working directory for quality-search attempt files (intermediate, per-strategy)."""
 ENCODED_OUTPUT_DIR     = "encoded"
 """Output directory for finalized encoded artifacts (hard-linked winning attempts)."""
 AUDIO_OUTPUT_DIR       = "audio"

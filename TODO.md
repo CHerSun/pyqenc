@@ -9,8 +9,6 @@ Status legend: 🤔 needs thinking · 🔍 verified against code
 
 ---
 
-# From the 2026-09-19/20 metrics investigation
-
 ## 🤔 2. `parallelism` field described by the metrics spec is not implemented
 
 **Status:** needs thinking (spec/code reconciliation)
@@ -66,14 +64,6 @@ Make zero-row omission display-only rather than load-bearing for resume?
 
 Human input: metrics are not what the user wants to get - he wants to get audio/video processed. So it's just an extra nice-to-have info.
 Warning is enough, but maybe make it log rarer, like exponential delay (first failure - ignore, happens; on second failure - log warning; on forth failure - log failure that still failing after N attempts; max at say 8 failures to write - after that keep logging every few failures; on success - reset counter))
-
----
-
-# Imported from `D:\todo pyqenc.md` (verified 2026-09-20)
-
-## Correctness / invalidation
-
----
 
 ---
 
@@ -574,7 +564,7 @@ Related: §91 (LongPath trailing-whitespace idempotence — the other open
 LongPath finding, 2026-10-05).
 
 2026-10-02, pyright cross-check evaluation DONE and stance DECIDED (recorded in
-agent-commands.md): ruff + ty are the static gates; pyright/Pylance stays an
+commands-and-gates.md): ruff + ty are the static gates; pyright/Pylance stays an
 editor aid + occasional probe (`uvx pyright --pythonpath .venv/Scripts/python.exe`).
 Its real findings were fixed (LongPath operator params widened to StrPath,
 dead Strategy.raw branch, Artifact wrap, Decimal literals in tests); the known
@@ -930,9 +920,9 @@ x265 docs (https://x265.readthedocs.io — `q=`/`b=` only).
 
 ## 104. too many `str` usages as attributes with convention
 
-We need to check class fields, which still use `str`. 
+We need to check class fields, which still use `str`.
 
-Bad examples: 
+Bad examples:
 - fps, fps_fraction - looks like candidates for single class with 2 representations
 - resolution - actually a width and height and a name (display_name / safe_name?). Probably also with support for Crop operations or resizes.
 
@@ -1102,6 +1092,15 @@ same refactor wave — do the record type and the key type together?).
 `FIXED_COMPARISON_STATS` should also become explicit targets?
 
 and need a distinction between full metrics set and targeted metrics set at typing level, so that we don't have to guess.
+
+
+Extra from human:
+- Metric vs Stat vs Metric-Stat pair vs Target (metric-stat-value) vs Targets (a set of Target)
+- Each owns its own mechanics, explicitly, (disowned functions are strongly discouraged). Naming. Targeted-set selection from full measured metrics, etc.
+- Anchor targets also belong here (targets)
+- Deltas / basic Scoring should be also based on those classes.
+- Ideally the last place where we see plain values - are the measurements logs or user inputs (both are inputs). Since then full path should be class-based.
+- Single instanciation where possible (i.e. user input targets are instanciated once and passed as that object ever since).
 
 ---
 
@@ -1366,12 +1365,6 @@ binds to the preceding selector).
 
 ---
 
-## 127. Fingerprint vs SizedFingerprint
-
-pydantic doesn't allow `__eq__` between different models by default, so `Fingerprint` and `SizedFingerprint` aren't directly comparable. Resulting question is - do we need `size` optional field on `Fingerprint`? I don't like optionals, they break programmatic contracts. I prefer a clean explicit typing, like upgrading `Fingerprint` to `SizedFingerprint`, rather then asserting / none-checking size on each access.
-
----
-
 ## 128. Merge/optimization sidecar loaders duplicate `load_model` verbatim — generalize it to take a `TypeAdapter`
 
 **Status:** needs thinking (verified against code 2026-10-12; mechanical —
@@ -1404,23 +1397,6 @@ apply to telemetry; §117 stub), and `app_config.py`'s three opens are a
 (warn-and-`None` would silently encode with default settings).
 
 **Questions to think about:** none blocking — mechanical.
-
----
-
-## 129. Revise terminology
-
-Quality targets vs quality vs quality range. Measurements, sidecars, anchor (including synthetic targets), intermediate results (also with sidecars).
-Looks like our terminology is muddy now. Need a more concise and distinct one.
-
-So:
-
-- collect terminilogy from both code and docs.
-- Revise (with explicit approval) and define
-- Apply
-
-Note (2026-10-17): the comparison tables' rendered output already dropped
-"ruler" (now `anchor:` / `targets:` lines) — code identifiers still carry it
-(`Ruler`, `RULER_GLYPH`, `ComparisonTable.ruler`, the `ruler` param names).
 
 ---
 
@@ -1475,7 +1451,113 @@ re-measures only, so the rerun is cheap.
 
 ---
 
-## Last known = 132
+## 133. Downscaling of videos for encoding
+
+User scenario: got 4k source, encoding produces a 50 GB output - too huge for user's archiving policy
+User wants to keep archiving size under 15 GB.
+
+Possible resolution: allow downscaling of the videos.
+
+Scope: encoding and in-run measurements. No upscaling (nowhere to get extra info from, so no reason to
+increase size as part of pyqenc).
+
+Extra considerations:
+- downscaling is applied after crop (on top of it)
+- aspect ratio must be preserved (and here's a question of stored vs presented resolution)
+- a single scale (`--width <value>`?) or a box (`--downscale <width>[,<height>]` or `--scale`?) to fit in?
+- separate from `measure` intent - where we allow scaling either way (up or down) - but only to have the same measuring scale.
+- downscaling algorithm used? probably in config.
+- noop if either not specified by the user, or the same as the source.
+- nullable is probably ok (and omitted on none from sidecars - default behvaior already)
+- a change invalidates all investment (winners, attempts, merged too) - both for algorithm used and for the scale change
+- resolution granularity for the codec (different codecs have different requirements; some older ones needed like 16 granularity; newer ones are often 2 or 4 granularity).
+  we define resulting colorspace in the codec, so probably resolution granularity should also be part of codec
+
+---
+
+## 134. Names and constants
+
+CHUNK_NAME_PATTERN is still in use. Target - both name derivation and parsing to be owned by the relevant class.
+
+```
+CROP_SOURCE_MANUAL = "manual"
+CROP_SOURCE_DETECTED = "detected"
+```
+
+looks like a candidate for either enum, or specific site ownership.
+
+
+```
+# Directory names for phase output
+EXTRACTED_DIR          = "extracted"
+ENCODING_WORKSPACE_DIR = "encoding"
+ENCODED_OUTPUT_DIR     = "encoded"
+AUDIO_OUTPUT_DIR       = "audio"
+MERGED_OUTPUT_DIR      = "merged"
+MEASURE_DIR            = "measure"
+```
+
+Candidates for phase classes ownership?
+
+
+```
+DEFAULT_SCREENSHOT_COUNT  = 20
+```
+
+single source of truth should be the default config?
+
+
+```
+TIMESTAMPS_FILENAME = "timestamps.txt"
+"""Filename for the per-frame PTS timestamp index produced by ExtractionPhase."""
+CHAPTERS_FILENAME = "chapters.xml"
+"""Filename for the extracted chapter edition produced by ExtractionPhase."""
+```
+
+Extraction phase ownership?
+
+```
+CHAIN_FILENAME_SUFFIX = " chain="
+```
+
+audio phase ownership?
+
+```
+FFMPEG_ARG_INPUT    = "-i"
+"""ffmpeg input-file flag."""
+FFMPEG_ARG_MAP      = "-map"
+"""ffmpeg stream-map flag."""
+FFMPEG_ARG_SEEK     = "-ss"
+...
+```
+
+FFMPEG runner class ownership? Also, doesn't look like worth the constants, just a command building, no reuse. Not a magic constant either - just syntax of the ffmpeg.
+much more concise when cleanly built right inline.
+
+```
+FFMPEG_MUXER_
+```
+
+those are more interesting. It is part of pyqenc setup, not just syntax. Which muxers exactly we want to use. Need to think better. Probably, worth a dict const, to be used in ffmpeg runner.
+a dict of type -> muxer, like image/png -> image2? need to check usage sites. Similarly with extensions.
+
+```
+SELECTOR_KEY_
+```
+
+need to check usage. not sure if we need those at all. Initial intention for selector was plain regex over a well-formatted stream's display name, so `lang=(rus|eng)` is not a
+language selector, rather a plain regex matcher.
+
+
+!!! Need to review constants and re-judge. Constants.py is a place, where we store things that we expect to tinker with, or where they are used for multiple modules
+If constants are used for a single module - they should belong there. If they are not tunables (like, ffmpeg args - they are the external tool syntax, not pyqenc tunables)
+- they shouldn't be constants probably.
+
+
+
+---
+
+## Last known = 133
 
 Keep this updated, so we can keep continuous numbering even on last todo item deletion.
 Keep this the last entry for easy human updates.

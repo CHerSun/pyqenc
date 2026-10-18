@@ -253,7 +253,7 @@ class TestStrategyFingerprint:
         """``codec.default_quality`` does not change the fingerprint — it is
         the search's starting point, not product identity (Req 10a).
 
-        Bug guarded: tuning the starting CRF would demand wiping attempts
+        Bug guarded: tuning the starting quality would demand wiping attempts
         that are still perfectly valid products of the same strategy.
         """
         base = _strategy(default_quality=Decimal(20))
@@ -271,7 +271,7 @@ class TestStrategyFingerprint:
         fingerprint, every strategy flipped into the per-strategy
         catastrophic fatal — demanding ``--force`` to wipe attempts that
         were valid products. Quality-change invalidation is owned by the
-        mode tag and the pinned-quality map, never the fingerprint.
+        mode tag and the fixed-quality map, never the fingerprint.
         """
         base = _strategy()
         steered = _strategy(

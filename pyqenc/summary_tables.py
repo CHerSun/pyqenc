@@ -3,7 +3,8 @@
 
 Owns ``StrategyRow`` (THE row shape persisted by ``optimization.yaml`` and
 ``merge.yaml``) and the comparison renderer: the single place the table's
-cell text exists. Phases assemble row populations, rulers, and marks; the
+cell text exists. Phases assemble row populations, the comparison basis
+(the quality targets or the anchor), and marks; the
 renderer composes every cell — the folded size cell, the sub-column delta
 pairs, the anchor/targets cues, the absolute-pair markers, the basis and
 legend lines — and hands finished rows to ``format_table``. Column widths
@@ -18,7 +19,6 @@ marks exist only at render time — persisted rows stay absolute facts.
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -37,7 +37,7 @@ from pyqenc.utils.tables import Column, format_table
 # Presentation constants (Req 5.2 — named, switchable without renderer changes)
 # ---------------------------------------------------------------------------
 
-RULER_GLYPH = "◎"
+ANCHOR_GLYPH = "◎"
 """Marks the row every delta reads against."""
 
 SOURCE_CUE = "(src)"
@@ -89,7 +89,7 @@ class StrategyRow(BaseModel):
     """One per-strategy row of a comparison table — THE persisted shape.
 
     Breadth is the per-phase caveat (Req 6.8): optimization rows carry the
-    full worst-chunk statistics (the ruler re-derivation substrate); merge
+    full worst-chunk statistics (the anchor-targets re-derivation substrate); merge
     rows carry the rendered basis only. The renderer tolerates missing
     keys with ``—``.
 
@@ -123,22 +123,6 @@ class SourceInfo:
 
 
 @dataclass(frozen=True)
-class Ruler:
-    """What every delta reads against (Req 2).
-
-    Attributes:
-        kind:    ``targets`` (search — the configured quality targets) or
-                 ``anchor`` (fixed — a strategy from the same rows).
-        targets: The target set (``kind == "targets"``).
-        anchor:  The anchor strategy's display name (``kind == "anchor"``).
-    """
-
-    kind:    Literal["targets", "anchor"]
-    targets: tuple[QualityTarget, ...] = ()
-    anchor:  str = ""
-
-
-@dataclass(frozen=True)
 class Mark:
     """One strategy's marks (Req 4 — data-driven, derived by the phase).
 
@@ -156,11 +140,17 @@ class Mark:
 class ComparisonTable:
     """The renderer's complete input (Req 6.3 — typed models only).
 
+    The comparison basis is exactly one of ``targets`` (search mode) and
+    ``anchor`` (fixed mode) — mutually exclusive; a table with neither is
+    uncompared and renders absolutes.
+
     Attributes:
         rows:               Strategy rows (the renderer sorts by size
                             ascending; ties break by name).
-        ruler:              The ruler (targets in search, anchor in fixed),
-                            or ``None`` for uncompared absolute rendering.
+        targets:            The configured quality targets (search mode) —
+                            the search-run basis.
+        anchor:             The anchor strategy's display name (fixed mode)
+                            — the fixed-run basis.
         source:             The source row (merge only; carries the target
                             values in search mode — its own metric cells are
                             undefined by construction).
@@ -173,12 +163,13 @@ class ComparisonTable:
                             render ``≈``.
     """
 
-    rows:               list[StrategyRow]
-    ruler:              Ruler | None
-    source:             SourceInfo | None = None
-    marks:              Mapping[str, Mark] = field(default_factory=dict)
-    mark_legend:        str = "selected"
-    size_tolerance_pct: float | None = None
+    rows:                list[StrategyRow]
+    targets:             tuple[QualityTarget, ...] | None = None
+    anchor:              str | None                  = None
+    source:              SourceInfo | None           = None
+    marks:               Mapping[str, Mark] = field(default_factory=dict)
+    mark_legend:         str = "selected"
+    size_tolerance_pct:  float | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -227,18 +218,19 @@ def _format_pct_delta(value: float, tolerance_pct: float | None) -> str:
 
 @dataclass(frozen=True)
 class _MetricColumn:
-    """One metric's compared statistics and ruler values.
+    """One metric's compared statistics and reference values.
 
     Attributes:
-        metric:       The metric.
-        stats:        Compared statistics in the closed set's order.
-        ruler_values: The ruler's absolute value per statistic (empty for
-                      ruler-less rendering).
+        metric:          The metric.
+        stats:           Compared statistics in the closed set's order.
+        reference_values: The comparison basis' absolute value per statistic
+                         (the targets' values in search, the anchor's in
+                         fixed; empty for uncompared rendering).
     """
 
-    metric:       MetricType
-    stats:        tuple[StatisticType, ...]
-    ruler_values: dict[StatisticType, float]
+    metric:           MetricType
+    stats:            tuple[StatisticType, ...]
+    reference_values: dict[StatisticType, float]
 
 
 _STAT_ORDER = {statistic: index for index, statistic in enumerate(StatisticType)}
@@ -249,31 +241,30 @@ _METRIC_ORDER = {metric: index for index, metric in enumerate(MetricType)}
 
 
 def _metric_columns(table: ComparisonTable) -> list[_MetricColumn]:
-    """Derive the compared statistics per metric from the ruler."""
-    ruler = table.ruler
-    if ruler is not None and ruler.kind == "targets":
+    """Derive the compared statistics per metric from the comparison basis."""
+    if table.targets is not None:
         by_metric: dict[MetricType, dict[StatisticType, float]] = {}
-        for target in ruler.targets:
+        for target in table.targets:
             key = target.key()
             by_metric.setdefault(key.metric, {})[key.statistic] = target.value
         return sorted(
             (
                 _MetricColumn(
-                    metric       = metric,
-                    stats        = tuple(sorted(values, key=_STAT_ORDER.__getitem__)),
-                    ruler_values = dict(values),
+                    metric           = metric,
+                    stats            = tuple(sorted(values, key=_STAT_ORDER.__getitem__)),
+                    reference_values = dict(values),
                 )
                 for metric, values in by_metric.items()
             ),
             key=lambda c: _METRIC_ORDER[c.metric],
         )
-    # Fixed mode (anchor) and ruler-less rendering compare the fixed
+    # Fixed mode (anchor) and uncompared rendering compare the fixed
     # comparison statistics, of every metric the carrier holds. The carrier
-    # is the anchor row; ruler-less falls back to the union across rows
+    # is the anchor row; uncompared falls back to the union across rows
     # (absolute rendering of what the population measured).
     carrier: MetricStatMap = {}
-    if ruler is not None and ruler.kind == "anchor":
-        anchor_row = next((r for r in table.rows if r.strategy == ruler.anchor), None)
+    if table.anchor is not None:
+        anchor_row = next((r for r in table.rows if r.strategy == table.anchor), None)
         if anchor_row is not None:
             carrier = anchor_row.metrics
     else:
@@ -285,9 +276,9 @@ def _metric_columns(table: ComparisonTable) -> list[_MetricColumn]:
     )
     return [
         _MetricColumn(
-            metric       = metric,
-            stats        = COMPARISON_STATS,
-            ruler_values = {
+            metric           = metric,
+            stats            = COMPARISON_STATS,
+            reference_values = {
                 key.statistic: value
                 for key, value in carrier.items()
                 if key.metric == metric and key.statistic in COMPARISON_STATS
@@ -318,27 +309,28 @@ def _size_sub_value(table: ComparisonTable, row: StrategyRow, basis_size: int, i
 def _metric_sub_values(
     column: _MetricColumn,
     row:    StrategyRow | None,
-    ruler:  Ruler | None,
+    table:  ComparisonTable,
 ) -> dict[StatisticType, str]:
     """One line's rendered sub-values for a metric column.
 
     Args:
-        column: The metric column (stats + ruler values).
-        row:    The strategy row, or ``None`` for the ruler-carrier line
-                (the source row at merge / the targets row at optimization).
-        ruler:  The table's ruler (``None`` renders absolutes).
+        column: The metric column (stats + reference values).
+        row:    The strategy row, or ``None`` for the carrier line
+                (the source row at merge / the targets line at optimization).
+        table:  The table (the comparison basis; uncompared renders
+                absolutes).
     """
     if row is None:
-        # The ruler-carrier line shows the ruler's absolutes: the target
+        # The carrier line shows the basis' absolutes: the target
         # values (search); fixed mode has none here (the anchor row — a
         # strategy row — carries them).
-        if ruler is not None and ruler.kind == "targets":
+        if table.targets is not None:
             return _mark_absolute(column, {
-                s: _format_metric(v) for s, v in column.ruler_values.items()
+                s: _format_metric(v) for s, v in column.reference_values.items()
             })
         return {s: MISSING_VALUE for s in column.stats}
-    if ruler is None:
-        # Ruler-less tables render absolutes UNMARKED — the marker's job is
+    if table.targets is None and table.anchor is None:
+        # Uncompared tables render absolutes UNMARKED — the marker's job is
         # distinguishing absolutes from deltas, and there are no deltas.
         return {
             s: _format_metric(row.metrics[MetricStatKey(column.metric, s)])
@@ -346,20 +338,20 @@ def _metric_sub_values(
             else MISSING_VALUE
             for s in column.stats
         }
-    is_ruler_row = ruler.kind == "anchor" and row.strategy == ruler.anchor
+    is_anchor_row = table.anchor is not None and row.strategy == table.anchor
     rendered: dict[StatisticType, str] = {}
     for s in column.stats:
         measured = row.metrics.get(MetricStatKey(column.metric, s))
         if measured is None:
             rendered[s] = MISSING_VALUE
-        elif is_ruler_row or s not in column.ruler_values:
+        elif is_anchor_row or s not in column.reference_values:
             rendered[s] = _format_metric(measured)
         else:
             rendered[s] = _format_delta(
-                measured - column.ruler_values[s],
+                measured - column.reference_values[s],
                 column.metric.info.acceptance_delta,
             )
-    return _mark_absolute(column, rendered) if is_ruler_row else rendered
+    return _mark_absolute(column, rendered) if is_anchor_row else rendered
 
 
 def _mark_absolute(
@@ -425,26 +417,26 @@ def _convention_lines(table: ComparisonTable) -> list[str]:
     """The lines above the table: the mode's basis line, then the legend.
 
     Fixed runs name the elected anchor, search runs the configured targets
-    (naming the targeted metrics); ruler-less tables carry no basis line.
+    (naming the targeted metrics); uncompared tables carry no basis line.
     The legend line states the delta bases, the negligible-band glyph, the
     mark legend, and the size tolerance when set.
     """
-    ruler = table.ruler
+    compared = table.targets is not None or table.anchor is not None
     size_basis = f"size Δ% vs {'source' if table.source is not None else 'best size'}"
-    approx_active = ruler is not None or table.size_tolerance_pct is not None
-    if ruler is None:
+    approx_active = compared or table.size_tolerance_pct is not None
+    if not compared:
         head = []
         segments = [size_basis]
-    elif ruler.kind == "targets":
+    elif table.targets is not None:
         metrics = " · ".join(
             metric.info.name
             for metric in MetricType
-            if any(t.metric == metric.value for t in ruler.targets)
+            if any(t.metric == metric.value for t in table.targets)
         )
-        head = [f"targets: {RULER_GLYPH}  configured ({metrics})"]
+        head = [f"targets: {ANCHOR_GLYPH}  configured ({metrics})"]
         segments = ["Δ vs targets", size_basis]
     else:
-        head = [f"anchor: {RULER_GLYPH}  {ruler.anchor}"]
+        head = [f"anchor: {ANCHOR_GLYPH}  {table.anchor}"]
         segments = ["Δ vs anchor", size_basis]
     if approx_active:
         segments.append(f"{NEGLIGIBLE_GLYPH} negligible")
@@ -458,24 +450,24 @@ def render_comparison_table(table: ComparisonTable) -> list[str]:
     """Render the full table block: convention lines, blank, table, blank.
 
     Args:
-        table: The complete render input (rows, ruler, source, marks).
+        table: The complete render input (rows, basis, source, marks).
 
     Returns:
         Lines ending with one blank line (Req 1.6 — anything after comes
-        from the caller, below the table). The two convention lines (bar
+        from the caller, below the table). The two convention lines (basis
         and bases, then legend) sit one blank line above the table.
     """
-    ruler = table.ruler
+    compared_by_targets = table.targets is not None
     sorted_rows = sorted(table.rows, key=lambda r: (r.size_bytes, r.strategy))
     metric_columns = _metric_columns(table)
 
     # --- metric lines: sub-values per (line, column), then shared widths ---
-    has_carrier_line = table.source is not None or (ruler is not None and ruler.kind == "targets")
+    has_carrier_line = table.source is not None or compared_by_targets
     carrier_values = (
-        [_metric_sub_values(c, None, ruler) for c in metric_columns]
+        [_metric_sub_values(c, None, table) for c in metric_columns]
         if has_carrier_line else []
     )
-    row_values = [[_metric_sub_values(c, row, ruler) for c in metric_columns] for row in sorted_rows]
+    row_values = [[_metric_sub_values(c, row, table) for c in metric_columns] for row in sorted_rows]
 
     scan_lines = ([carrier_values] if carrier_values else []) + row_values
     sub_widths_per: list[dict[StatisticType, int]] = []
@@ -510,11 +502,11 @@ def render_comparison_table(table: ComparisonTable) -> list[str]:
 
     table_rows: list[list[str]] = []
 
-    # --- the ruler-carrier line (source row at merge / targets row at opt) ---
+    # --- the carrier line (source row at merge / targets line at opt) ---
     if table.source is not None:
         name = f"{table.source.stem} (src)"
-        if ruler is not None and ruler.kind == "targets":
-            name = f"{RULER_GLYPH} {name}"
+        if compared_by_targets:
+            name = f"{ANCHOR_GLYPH} {name}"
         source_cell = _size_cell(fmt_size_mb(table.source.size_bytes), SOURCE_CUE)
         table_rows.append([
             name,
@@ -523,9 +515,9 @@ def render_comparison_table(table: ComparisonTable) -> list[str]:
               for i, c in enumerate(metric_columns)],
             "",
         ])
-    elif ruler is not None and ruler.kind == "targets":
+    elif compared_by_targets:
         table_rows.append([
-            f"{RULER_GLYPH} targets",
+            f"{ANCHOR_GLYPH} targets",
             _size_cell("", ""),
             *[_compose_sub_columns(c, sub_widths_per[i], carrier_values[i])
               for i, c in enumerate(metric_columns)],
@@ -535,8 +527,8 @@ def render_comparison_table(table: ComparisonTable) -> list[str]:
     # --- strategy rows ---
     for index, (row, values) in enumerate(zip(sorted_rows, row_values)):
         name = row.strategy
-        if ruler is not None and ruler.kind == "anchor" and row.strategy == ruler.anchor:
-            name = f"{RULER_GLYPH} {name} {ANCHOR_SUFFIX}"
+        if table.anchor is not None and row.strategy == table.anchor:
+            name = f"{ANCHOR_GLYPH} {name} {ANCHOR_SUFFIX}"
         mark = table.marks.get(row.strategy, Mark())
         mark_text = (SELECTED_GLYPH if mark.selected else "") + (
             f" {VERDICT_PASS_GLYPH if mark.verdict else VERDICT_MISS_GLYPH}"

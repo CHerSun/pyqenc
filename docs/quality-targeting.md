@@ -2,7 +2,7 @@
 
 <!-- markdownlint-disable MD024 -->
 
-`pyqenc` encodes each video chunk to meet a set of quality targets rather than a fixed bitrate or CRF. This guide explains what metrics are available, how to choose good target values, and how to tune them.
+`pyqenc` encodes each video chunk to meet a set of quality targets rather than a fixed bitrate or CRF. This guide explains what metrics are available, how to choose good target values, and how to tune them. Terms follow [glossary.md](glossary.md).
 
 ---
 
@@ -144,13 +144,13 @@ Columns:
 | `pass •`  | Passing chunks whose tightest target is this limiter.                                                                                                                                       |
 | `miss ✘` | Chunks that exhausted the search without passing, limited by this target. The parenthesized number is the **median deficit** — how far below the target the misses landed, in metric units. |
 | `share`   | Percentage of the strategy's chunks in this row.                                                                                                                                            |
-| `med CRF` | Median winning quality value (CRF/CQ/QP) of the row's chunks.                                                                                                                               |
+| `med <label>` | Median winning quality value of the row's chunks. The column is labeled with each strategy's own knob label (`med CRF`, `med CQ`, `med QP`, `med Mbit/s`).                                              |
 
 How to read it for tuning:
 
 - **Small deficits** (`-0.2` above) are near-misses: lowering that target by the deficit flips those chunks — the cheapest tuning lever visible in the table.
 - **Large deficits on `min` statistics while the medians pass** (the `vmaf_min` rows above: `-4.7`/`-4.6` with `vmaf_median` dominating the passes) mark content the metric structurally punishes — VMAF's grain and first-frame biases — not a tuning problem. This is also what later surfaces as the merged-output `vmaf-min` target-miss warning.
-- **Compare strategy groups**: the `med CRF` column shows where each strategy's quality values land under the same targets — a grain-preserving profile converging at lower CRF on `vif` rows while a plain profile binds on `vmaf` is the grain-retention trade-off made visible.
+- **Compare strategy groups**: the median-quality column shows where each strategy's quality values land under the same targets — a grain-preserving profile converging at lower CRF on `vif` rows while a plain profile binds on `vmaf` is the grain-retention trade-off made visible.
 - Most chunks are limited by vmaf and vif - those are the points to tune if you want to lower quality and resulting size.
 
 ---
@@ -191,7 +191,7 @@ pyqenc auto movie.mkv --strategies "h265*" -y   # picks up any overridden h265 p
 - The profile range must be a **subset** of the codec's declared range — only narrowing is allowed. A range that extends beyond the codec's bounds raises a `ValidationError` at startup.
 - Direction is preserved: for CRF/CQ/QP codecs `[better, worse]` means `[low_crf, high_crf]`; for VBR codecs it means `[high_bitrate, low_bitrate]`.
 - Both endpoints must be exact multiples of the codec's `quality_granularity` — the search can attempt a range boundary verbatim, so a misaligned endpoint would reach the encoder unquantized.
-- A pinned value (`min == max`) skips quality search but not the pipeline — chunking, resumption, and merge still work normally. This is the legacy form of a fixed run; `-q <value>` is the ergonomic path.
+- A collapsed range (`min == max`) fixes the run — quality search is skipped but not the pipeline: chunking, resumption, and merge still work normally. This is the legacy form of a fixed run; `-q <value>` is the ergonomic path.
 - To affect all profiles that share a codec, override `quality_range` under `codecs:` instead of under `profiles:`. The profile-level override is preferable when you want per-profile control without changing the shared codec definition.
 
 ## Fixed-quality mode (`-q`)
@@ -220,9 +220,9 @@ codec such as AV1 fails at startup naming the nearest aligned values).
   and `-q 18` are the same thing through one door; mixing collapsed and
   ranged strategies stops loudly before any phase runs.
 - **One attempt per chunk.** The per-chunk quality search is disabled — each
-  chunk encodes exactly once at the pinned value and is accepted
+  chunk encodes exactly once at the fixed value and is accepted
   unconditionally. Resumability is untouched: attempts are keyed by
-  crf-embedded filenames as always.
+  quality-embedded filenames as always.
 - **A WARNING banner** declares what a fixed run does not guarantee: strategy
   sizes are compared at *nominally* equal knob, and knob scales are **not**
   comparable across encoder families (h264 CRF ≠ h265 CRF ≠ AV1 CRF). The
@@ -231,7 +231,7 @@ codec such as AV1 fails at startup naming the nearest aligned values).
   strategies (bigger **and** no better on any measured metric) are pruned;
   every **survivor** is fully encoded — no auto-pick, no composite score.
   The smallest survivor becomes the measurement **anchor**: its min-across-
-  test-chunks metrics form a synthetic target set against which the other
+  test-chunks metrics form the anchor target set against which the other
   survivors are shown as size and metric deltas in the optimization table.
   Single-strategy runs and `--no-optimize` skip this machinery entirely.
 - **Cleanup is blocked.** A fixed run with `--cleanup` (level INTERMEDIATE or
@@ -252,12 +252,12 @@ while your q18 results stay on disk untouched:
 ```sh
 pyqenc auto movie.mkv -q 18 -y    # encode at 18
 pyqenc auto movie.mkv -q 18 -y    # re-run: near-zero work (re-promotion from attempts)
-pyqenc auto movie.mkv -q 20 -y    # new value: only the crf-20 encodes run;
-                                  # crf-18 attempts stay on disk, unwanted but intact
+pyqenc auto movie.mkv -q 20 -y    # new value: only the q20 encodes run;
+                                  # q18 attempts stay on disk, unwanted but intact
 ```
 
 Configuration targets do not drive any decision or verdict in a fixed run —
-encoding presentation judges winners against the anchor's synthetic targets
+encoding presentation judges winners against the anchor targets
 (the anchor's min-across-test-chunk p10 and median values per metric;
 compared runs) or shows absolute values (uncompared runs), and the merged
 phase suppresses the config-target missed-targets warning.

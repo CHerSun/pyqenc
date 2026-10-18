@@ -73,7 +73,7 @@ pyqenc/
 
 ## Coding Standards
 
-The complete, living standard is [`.kiro/steering/coding-standards.md`](.kiro/steering/coding-standards.md); the essentials:
+The complete, living standards live in [`.kiro/steering/`](.kiro/steering/) (see `AGENTS.md` for the map); the essentials:
 
 ### Python Style
 

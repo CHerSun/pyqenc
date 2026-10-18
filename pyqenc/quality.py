@@ -1,7 +1,7 @@
 """
-Quality evaluation and CRF adjustment for encoding pipeline.
+Quality measurement and quality adjustment for the encoding pipeline.
 
-This module provides quality evaluation against targets and CRF adjustment
+This module provides quality measurement against targets and quality search
 algorithms for iterative encoding optimization.
 """
 # CHerSun 2026
@@ -42,7 +42,7 @@ logger = logging.getLogger(__name__)
 class MetricInfo:
     """Descriptor carrying all metric-specific properties.
 
-    Single source of truth for normalization, display, and CRF search behaviour.
+    Single source of truth for normalization, display, and quality search behaviour.
     Accessed via ``MetricType.PSNR.info``, etc.
 
     Attributes:
@@ -77,7 +77,7 @@ class MetricInfo:
                            where quality targets are set and misses occur.
                            VMAF ≈ 20 (targets typically 80–100), SSIM ≈ 10 (90–100),
                            PSNR ≈ 30 (40–70 dB), VIF ≈ 5 (empirical; limited data).
-        acceptance_delta:  Per-metric threshold for early acceptance during CRF search.
+        acceptance_delta:  Per-metric threshold for early acceptance during the quality search.
                            When all targets pass and the least-proficit target's surplus
                            (smallest surplus across all passing targets) is within this
                            delta, the current quality value is accepted as final without
@@ -170,7 +170,7 @@ class MetricType(Enum):
 
     Each member's ``.value`` is the lowercase string id used in filenames,
     dict keys, and ffmpeg filter names.  Use ``.info`` to access the full
-    ``MetricInfo`` descriptor for normalization, display, and CRF search.
+    ``MetricInfo`` descriptor for normalization, display, and quality search.
     """
 
     VMAF = "vmaf"
@@ -272,7 +272,8 @@ class MetricStats(TypedDict):
     max:    float
     std:    float
 
-ChunkQualityStats = dict[MetricType, MetricStats]
+PerMetricStats = dict[MetricType, MetricStats]
+"""Measured statistics per metric (one measurement's full nested form)."""
 
 
 # ---------------------------------------------------------------------------
@@ -413,7 +414,7 @@ MetricStatMap = Annotated[
 """Measured-metrics map: typed keys in memory, canonical strings on disk."""
 
 
-def flatten_metric_stats(metrics: ChunkQualityStats) -> dict[str, float]:
+def flatten_metric_stats(metrics: PerMetricStats) -> dict[str, float]:
     """Flatten per-metric statistics into ``{metric_stat: value}`` keys.
 
     Owns the single cast over the ``MetricStats`` TypedDict (its ``.items()``
@@ -425,7 +426,6 @@ def flatten_metric_stats(metrics: ChunkQualityStats) -> dict[str, float]:
         for metric, stats in metrics.items()
         for stat, value in cast(dict[str, float], stats).items()
     }
-"""Quality statistics for a video chunk across all metrics."""
 
 
 class FullMetricStatistics(TypedDict):
@@ -451,7 +451,7 @@ async def run_metrics(
     crop_reference:    CropParams,
     width:             int,
     use_gpu:           bool,
-    subsample:         int,
+    sampling:          int,
     output_prefix:     str,
     cwd:               Path | None             = None,
     progress_callback: ProgressCallback | None = None,
@@ -462,7 +462,7 @@ async def run_metrics(
 
     Uses ``split[]`` to fan decoded frames to multiple metric filters in one process,
     saving the cost of repeated video decoding.  PSNR and SSIM branches apply
-    ``select='not(mod(n,subsample))'`` when ``subsample > 1``
+    ``select='not(mod(n,sampling))'`` when ``sampling > 1``
     (``MetricInfo.subsample_via_filter == True``).  VMAF uses ``n_subsample``
     internally.  VIF is always embedded in the VMAF pass via ``feature=name=vif``
     and is not a separate branch.
@@ -484,7 +484,7 @@ async def run_metrics(
         crop_reference:    Crop parameters for the reference input.
         width:             Scale both inputs to this width (0 = no scaling).
         use_gpu:           Use GPU-accelerated VMAF (``libvmaf_cuda``).
-        subsample:         Frame subsampling factor (1 = every frame).
+        sampling:          Frame subsampling factor (1 = every frame).
         output_prefix:     Simple filename prefix (no path separators) for metric
                            output files written relative to ``cwd``.
         cwd:               Working directory for the ffmpeg process.  Defaults to
@@ -538,8 +538,8 @@ async def run_metrics(
     # both sides, so pairing is index-perfect.
     if n_branches == 1:
         # No split needed — single branch uses [main]/[ref] directly
-        sel = f",select='not(mod(n,{subsample}))',setpts=N/({retime_rate}*TB)" if (
-            subsample > 1 and branches[0].info.subsample_via_filter
+        sel = f",select='not(mod(n,{sampling}))',setpts=N/({retime_rate}*TB)" if (
+            sampling > 1 and branches[0].info.subsample_via_filter
         ) else f",setpts=N/({retime_rate}*TB)"
         f_dist = f"[0:v]{crop_d}{width_str}{sel}[main]"
         f_ref  = f"[1:v]{crop_r}{width_str}{sel}[ref]"
@@ -560,8 +560,8 @@ async def run_metrics(
         for i, branch in enumerate(branches):
             label_d = f"main{i}"
             label_r = f"ref{i}"
-            if subsample > 1 and branch.info.subsample_via_filter:
-                sel = f"select='not(mod(n,{subsample}))',setpts=N/({retime_rate}*TB)"
+            if sampling > 1 and branch.info.subsample_via_filter:
+                sel = f"select='not(mod(n,{sampling}))',setpts=N/({retime_rate}*TB)"
                 branch_parts_d.append(f"[d{i}]{sel}[{label_d}]")
                 branch_parts_r.append(f"[r{i}]{sel}[{label_r}]")
             else:
@@ -580,8 +580,8 @@ async def run_metrics(
         if branch == MetricType.VMAF:
             lib: str     = "libvmaf_cuda" if use_gpu else "libvmaf"
             options: str = "" if use_gpu else "n_threads=4:"
-            if subsample > 1:
-                options += f"n_subsample={subsample}:"
+            if sampling > 1:
+                options += f"n_subsample={sampling}:"
             ext = output_extension if output_extension is not None else ".json"
             metric_filters.append(
                 f"[{ld}][{lr}]{lib}={options}"
@@ -610,11 +610,11 @@ async def run_metrics(
 
 @dataclass
 class QualityLogs:
-    """Artifacts generated during quality evaluation.
+    """Artifacts generated during quality measurement.
 
     All log paths point to ``.tmp``-suffixed files during their lifetime —
     they are never renamed to canonical names.  Each file is deleted
-    immediately after successful parsing by the quality evaluator.
+    immediately after successful parsing by the quality measurer.
 
     Attributes:
         psnr_log:  Path to PSNR ``.tmp`` log file, or ``None`` if not generated.
@@ -633,10 +633,10 @@ class QualityLogs:
 
 @dataclass
 class QualityMeasurement:
-    """The measured facts of one quality evaluation (no verdict — Req 51-53).
+    """The measured facts of one quality measurement (no verdict — Req 51-53).
 
     Verdicts are decisions computed live from ``metrics`` against whatever
-    bar the caller holds (e.g. :meth:`QualitySearchBase.failed_targets`);
+    reference the caller holds (e.g. :meth:`QualitySearchBase.failed_targets`);
     nothing here compares against foreign state.
 
     Attributes:
@@ -649,7 +649,7 @@ class QualityMeasurement:
                      this is exact; ``0`` = not determined by this run.
     """
 
-    metrics:     ChunkQualityStats
+    metrics:     PerMetricStats
     logs:        QualityLogs
     frame_count: int
 
@@ -924,7 +924,7 @@ class QualitySearchBase(ABC):
         ...
 
     @abstractmethod
-    def record(self, quality: Decimal, quality_results: dict[str, float]) -> Decimal | None:
+    def record(self, quality: Decimal, metrics: dict[str, float]) -> Decimal | None:
         """Record one attempt result and return the next quality value to try.
 
         Updates internal state with the result of encoding at *quality*.
@@ -936,7 +936,7 @@ class QualitySearchBase(ABC):
 
         Args:
             quality:         Quality value used for this attempt.
-            quality_results: Measured quality metrics keyed as ``"<metric>_<stat>"``.
+            metrics: Measured values keyed as ``"<metric>_<stat>"``.
 
         Returns:
             Next quality value (quantized ``Decimal``), or ``None``.
@@ -953,7 +953,7 @@ class QualitySearchBase(ABC):
         Delegates to the module-level ``_score_attempt`` with ``self._quality_targets``.
 
         Args:
-            metrics: Measured quality metrics keyed as ``"<metric>_<stat>"``.
+            metrics: Measured values keyed as ``"<metric>_<stat>"``.
 
         Returns:
             Signed float score (0 = winner, positive = pass, negative = fail).
@@ -1009,8 +1009,8 @@ class QualitySearchBase(ABC):
         """The pure verdict function: which targets the measured stats fail.
 
         Measurement and verdict are separate steps (spec 2026-10-07,
-        Req 52-53): the evaluator measures; callers apply this function (or
-        their own bar) to the measured facts. A target whose metric or
+        Req 52-53): the measurer measures; callers apply this function (or
+        their own reference) to the measured facts. A target whose metric or
         statistic is missing from *metrics* counts as failed (never silently
         passed).
 
@@ -1253,12 +1253,12 @@ class QualitySearch(QualitySearchBase):
     # record()
     # ------------------------------------------------------------------
 
-    def record(self, quality: Decimal, quality_results: dict[str, float]) -> Decimal | None:
+    def record(self, quality: Decimal, metrics: dict[str, float]) -> Decimal | None:
         """Record one attempt and return the next quality value to try.
 
         Args:
             quality:         Quality value used for this attempt.
-            quality_results: Measured quality metrics keyed as ``"<metric>_<stat>"``.
+            metrics: Measured values keyed as ``"<metric>_<stat>"``.
 
         Returns:
             Next quality value (quantized ``Decimal``), or ``None`` when exhausted.
@@ -1269,7 +1269,7 @@ class QualitySearch(QualitySearchBase):
         self._attempts += 1
 
         try:
-            new_point = QualityPoint(quality, self._score(quality_results), quality_results)
+            new_point = QualityPoint(quality, self._score(metrics), metrics)
         except ValueError:
             raise ValueError(f"QualitySearch: missing metric key for quality={quality}")
 
@@ -1417,7 +1417,7 @@ class QualitySearchV2(QualitySearchBase):
     # record()
     # ------------------------------------------------------------------
 
-    def record(self, quality: Decimal, quality_results: dict[str, float]) -> Decimal | None:
+    def record(self, quality: Decimal, metrics: dict[str, float]) -> Decimal | None:
         """Record one attempt and return the next quality value to try.
 
         Implements the 3-point sweet-spot state machine.  Returns ``None``
@@ -1425,13 +1425,13 @@ class QualitySearchV2(QualitySearchBase):
 
         Args:
             quality:         Quality value used for this attempt.
-            quality_results: Measured quality metrics keyed as ``"<metric>_<stat>"``.
+            metrics: Measured values keyed as ``"<metric>_<stat>"``.
 
         Returns:
             Next quality value (quantized ``Decimal``), or ``None`` when exhausted.
         """
         try:
-            new_point = QualityPoint(quality, self._score(quality_results), quality_results)
+            new_point = QualityPoint(quality, self._score(metrics), metrics)
         except ValueError:
             raise ValueError(f"QualitySearchV2: missing metric key for quality={quality}")
 
@@ -1634,7 +1634,7 @@ class QualitySearchV3(QualitySearchBase):
     # record()
     # ------------------------------------------------------------------
 
-    def record(self, quality: Decimal, quality_results: dict[str, float]) -> Decimal | None:
+    def record(self, quality: Decimal, metrics: dict[str, float]) -> Decimal | None:
         """Record one attempt and return the next quality value to try.
 
         Implements the linear-extrapolation state machine with midpoint-probe
@@ -1643,7 +1643,7 @@ class QualitySearchV3(QualitySearchBase):
 
         Args:
             quality:         Quality value used for this attempt.
-            quality_results: Measured quality metrics keyed as ``"<metric>_<stat>"``.
+            metrics: Measured values keyed as ``"<metric>_<stat>"``.
 
         Returns:
             Next quality value (quantized ``Decimal``), or ``None`` when exhausted.
@@ -1652,7 +1652,7 @@ class QualitySearchV3(QualitySearchBase):
             return None
 
         try:
-            new_point = QualityPoint(quality, self._score(quality_results), quality_results)
+            new_point = QualityPoint(quality, self._score(metrics), metrics)
         except ValueError:
             raise ValueError(f"QualitySearchV3: missing metric key for quality={quality}")
 

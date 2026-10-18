@@ -249,12 +249,12 @@ class TestWriteSidecar:
             _write_sidecar(
                 path                       = tmp_path / "target.yaml",
                 source_video               = tmp_path / "source.mkv",
-                target_video               = tmp_path / "target.mkv",
-                subsample_factor           = 10,
+                distorted_video            = tmp_path / "target.mkv",
+                sampling                   = 10,
                 crop_params                = CropParams(top=0, bottom=0, left=0, right=0),
                 metrics                    = self._make_metrics(),
                 source_duration_seconds    = 100.0,
-                target_duration_seconds    = 98.0,
+                distorted_duration_seconds    = 98.0,
                 effective_duration_seconds = 98.0,
             )
 
@@ -264,12 +264,12 @@ class TestWriteSidecar:
         _write_sidecar(
             path                       = sidecar,
             source_video               = tmp_path / "source.mkv",
-            target_video               = tmp_path / "target.mkv",
-            subsample_factor           = 10,
+            distorted_video            = tmp_path / "target.mkv",
+            sampling                   = 10,
             crop_params                = CropParams(top=138, bottom=138, left=0, right=0),
             metrics                    = self._make_metrics(),
             source_duration_seconds    = 100.0,
-            target_duration_seconds    = 98.0,
+            distorted_duration_seconds    = 98.0,
             effective_duration_seconds = 98.0,
         )
 
@@ -284,26 +284,26 @@ class TestWriteSidecar:
         _write_sidecar(
             path                       = sidecar,
             source_video               = tmp_path / "source.mkv",
-            target_video               = tmp_path / "target.mkv",
-            subsample_factor           = 5,
+            distorted_video            = tmp_path / "target.mkv",
+            sampling                   = 5,
             crop_params                = CropParams(top=10, bottom=20, left=0, right=0),
             metrics                    = self._make_metrics(),
             source_duration_seconds    = 200.0,
-            target_duration_seconds    = None,
+            distorted_duration_seconds    = None,
             effective_duration_seconds = None,
         )
 
         data = yaml.safe_load(sidecar.read_text(encoding="utf-8"))
         assert "source_video" in data
-        assert "target_video" in data
+        assert "distorted_video" in data
         assert "source_duration_seconds" in data
-        assert "target_duration_seconds" not in data  # None → omitted (exclude_none)
+        assert "distorted_duration_seconds" not in data  # None → omitted (exclude_none)
         assert "effective_duration_seconds" not in data  # None → omitted (exclude_none)
         assert "sampling" in data
         assert "crop_params" in data
         assert "metrics" in data
         assert data["sampling"] == 5
-        assert "target_duration_seconds" not in data  # None → omitted (exclude_none)
+        assert "distorted_duration_seconds" not in data  # None → omitted (exclude_none)
         assert data["crop_params"] == {"top": 10, "bottom": 20, "left": 0, "right": 0}
         # metrics are flat: vmaf_min, vmaf_median, etc.
         assert f"{MetricType.VMAF.value}_min" in data["metrics"]

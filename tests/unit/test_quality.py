@@ -1,4 +1,4 @@
-"""Unit tests for quality evaluation and CRF adjustment."""
+"""Unit tests for quality measurement and quality search."""
 
 from collections.abc import Callable
 from decimal import Decimal
@@ -9,8 +9,8 @@ import pytest
 from pyqenc.models import CodecConfig, QualityTarget
 from pyqenc.quality import QualitySearch, QualitySearchBase, _score_attempt
 
-_CRF_MIN    = Decimal("0")
-_CRF_MAX    = Decimal("51")
+_QUALITY_MIN = Decimal("0")
+_QUALITY_MAX = Decimal("51")
 _GRAN       = Decimal("0.5")   # default granularity used in tests
 _GRAN_INT   = Decimal("1")     # integer-step granularity (QP-style)
 
@@ -173,7 +173,7 @@ class TestCodecConfigQualityLogPadding:
     def test_crf_range_padding(self):
         """CRF range [0, 51] with granularity 0.5 → padding 4 (len("51.0") == 4)."""
         codec = CodecConfig(
-            name="test-crf",
+            name="test-quality",
             default_quality=Decimal("18"),
             default_preset="slow",
             quality_label="CRF",
@@ -1445,7 +1445,7 @@ class TestRunMetricsCommandGolden:
                     crop_reference  = CropParams(),
                     width           = 0,
                     use_gpu         = False,
-                    subsample       = 1,
+                    sampling        = 1,
                     output_prefix   = "uuid",
                 )
             )
@@ -1502,7 +1502,7 @@ class TestRunMetricsCommandGolden:
                     crop_reference  = CropParams(),
                     width           = 0,
                     use_gpu         = False,
-                    subsample       = 1,
+                    sampling        = 1,
                     output_prefix   = "uuid",
                     fps             = 24000 / 1001,
                 )

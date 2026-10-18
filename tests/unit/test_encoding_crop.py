@@ -31,7 +31,7 @@ def _make_encoder(crop_params: CropParams | None = None) -> ChunkEncoder:
     """Build a minimal ChunkEncoder with mocked dependencies."""
     from pyqenc.metrics import NoOpMetricsCollector
     return ChunkEncoder(
-        quality_evaluator=MagicMock(),
+        quality_measurer=MagicMock(),
         work_dir=Path("/tmp/work"),
         collector=NoOpMetricsCollector(),
         crop_params=crop_params,

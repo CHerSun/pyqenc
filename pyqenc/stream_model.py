@@ -16,7 +16,7 @@ and passed by reference through phase results:
 - :class:`VideoStreamChunk` — ChunkingPhase; an extended video stream plus a
   ``[start, end)`` timestamp window. No file on disk.
 - :class:`EncodedChunk` — EncodingPhase; an attempt as a stream (the attempt
-  file's own video) composed with its source chunk, strategy and CRF.
+  file's own video) composed with its source chunk, strategy and quality.
 - :class:`Chapters` / :class:`AudioOutput` / :class:`MergedVideo` — artifact
   payloads (spec ``2026-09-28 artifact-model``): the container's chapter
   edition, one processed (track, chain) audio output, and one merged output
@@ -764,8 +764,8 @@ class EncodedChunk(BaseModel):
       the chunk identity, no quality and no resolution.
 
     The winning quality is NOT a field: it is a fact of the winner sidecar
-    only, read by processing-path consumers (the re-merge CRF graph, the
-    winner scan, the fixed ruler) — never at recovery (Req 4).
+    only, read by processing-path consumers (the re-merge quality graph, the
+    winner scan, the fixed anchor targets) — never at recovery (Req 4).
 
     Attributes:
         stream:   The attempt file's own extended video stream.
@@ -859,7 +859,7 @@ class MergedVideo(BaseModel):
     Composes the strategy with the source identity needed for naming plus the
     measured facts consumers need. This entity owns its output-name family:
     :meth:`output_file_name` composes ``<source stem> <strategy
-    safe_name>[ <LABEL>=<q>].mkv`` — the pinned-quality suffix appears
+    safe_name>[ <LABEL>=<q>].mkv`` — the fixed-quality suffix appears
     whenever the strategy's effective quality range is a single point
     (fixed), per-strategy by construction; value uniformity across the run
     is never a naming gate (spec 2026-10-07, Req 6 — closes M-2b). Search
@@ -895,19 +895,19 @@ class MergedVideo(BaseModel):
 
     @classmethod
     def output_file_name(cls, source_stem: str, strategy: Strategy) -> str:
-        """The output's file name: safe base, optional pinned-q suffix, ``.mkv``.
+        """The output's file name: safe base, optional fixed-q suffix, ``.mkv``.
 
-        The pinned suffix is PER-STRATEGY whenever that strategy's effective
+        The fixed suffix is PER-STRATEGY whenever that strategy's effective
         range is a single point — a non-uniform fixed run (collapsed profiles
         of different values) still names each output with its own value, so
         a stale same-name reuse is impossible (M-2b).
         """
         base = sanitize_filesystem_text(f"{source_stem} {strategy.display_name()}")
-        return f"{base}{cls.pinned_quality_suffix(strategy)}.mkv"
+        return f"{base}{cls.fixed_quality_suffix(strategy)}.mkv"
 
     @staticmethod
-    def pinned_quality_suffix(strategy: Strategy) -> str:
-        """The strategy's pinned-knob suffix: ``" CRF=18.0"``, or ``""``.
+    def fixed_quality_suffix(strategy: Strategy) -> str:
+        """The strategy's fixed-knob suffix: ``" CRF=18.0"``, or ``""``.
 
         The label is the strategy's own (sanitized — labels like ``Mbit/s``
         must land filesystem-safe), and the value is quantized to the

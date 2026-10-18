@@ -48,7 +48,7 @@ class ArtifactState(Enum):
                   later stages because a required component is missing; it is
                   kept to avoid discarding that investment and to allow
                   resuming.  Examples of this principle: the primary file is
-                  present but its sidecar is missing, or CRF attempts exist but
+                  present but its sidecar is missing, or quality attempts exist but
                   no winning attempt has been finalised.
         COMPLETE: All of the artifact's expected components are present, so the
                   artifact is fully ready to be worked on by later stages

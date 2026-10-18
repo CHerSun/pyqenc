@@ -2,7 +2,7 @@
 
 <!-- markdownlint-disable MD024 -->
 
-This document describes the current architecture, key design decisions, and main flows of pyqenc.
+This document describes the current architecture, key design decisions, and main flows of pyqenc. Project vocabulary is defined in [glossary.md](glossary.md) and reused verbatim throughout.
 
 ## Table of Contents
 
@@ -88,9 +88,9 @@ context".
 | **Probe** | Job, Extraction | Job: run context (`work_dir`, source); Extraction: stream inventory rows, `timestamps_path` |
 | **Chunking** | Job, Probe | Job: run context (`work_dir`); Probe: `stream` |
 | **Optimization** | Job, Probe, Chunking | Job: run context (`work_dir`, `config`); Probe: `plan`; Chunking: `chunks` |
-| **Encoding** | Job, Probe, Chunking, Optimization | Job: run context (`work_dir`, `force`, `cleanup`); Probe: `plan`, `stream`; Chunking: `chunks`; Optimization: `selected_strategies`, `synthetic_targets`, `anchor` |
+| **Encoding** | Job, Probe, Chunking, Optimization | Job: run context (`work_dir`, `force`, `cleanup`); Probe: `plan`, `stream`; Chunking: `chunks`; Optimization: `selected_strategies`, `anchor_targets`, `anchor` |
 | **Audio** | Job, Extraction | Job: run context (`config.audio`, `work_dir`, source); Extraction: audio stream rows |
-| **Merge** | Job, Extraction, Probe, Optimization, Encoding | Job: run context (`source`, `work_dir`, `force`); Extraction: `timestamps_path`; Probe: `plan`, facet; Optimization: `anchor`, `synthetic_targets`; Encoding: `winners`, `quality_labels`, `encoded_chunks` |
+| **Merge** | Job, Extraction, Probe, Optimization, Encoding | Job: run context (`source`, `work_dir`, `force`); Extraction: `timestamps_path`; Probe: `plan`, facet; Optimization: `anchor`, `anchor_targets`; Encoding: `winners`, `quality_labels`, `encoded_chunks` |
 
 ### Phase descriptions
 
@@ -291,7 +291,7 @@ sidecar); per-attempt and per-output sidecars mark pair/output completeness.
 | `extraction.yaml`     | Stream inventory (info slices), chapters presence, source identity key                       |
 | `probe.yaml`          | Frame count, crop, crop provenance, resulting resolution (human-facing, derived `source − crop`), source identity key |
 | `chunking.yaml`       | Scene boundaries + detection-param keys (`scene_threshold`, `min_scene_length`) + identity   |
-| `optimization.yaml`   | Per-mode union (tag `mode: fixed\|search`): mode key (pinned map / targets) + common keys    |
+| `optimization.yaml`   | Per-mode union (tag `mode: fixed\|search`): mode key (fixed quality map / targets) + common keys    |
 |                       | (source, chunk-set, per-strategy args fingerprints, probe facet, sampling) + `summary` rows |
 | `encoding.yaml`       | Replay aggregate: winning-limiter table (empty = no targets) + winners frame totals — no keys  |
 | `audio.yaml`          | Per-chain identity fingerprints + source identity key (stale outputs swept by listing)         |
@@ -390,23 +390,23 @@ row shape, one renderer, identical mechanics (`pyqenc/summary_tables.py`).
   sets, the display vocabulary, and tolerant parsing). Breadth is the
   per-phase caveat: optimization rows keep the full worst-chunk statistics
   (the anchor re-derivation substrate); merge rows keep the rendered basis
-  (the presentation bar's keys).
+  (the presentation reference's keys).
 - **One renderer** over the generic `format_table` util (`pyqenc/utils/tables.py`):
   sub-column cells (` | ` dividers with per-statistic right alignment; the
   dash rules mark the divider crossings with `+`), the folded size cell
   (MB + %Δ), anchor/targets cues, `◆`-marked absolute pairs, a bare marks
   column, and the convention block above the table — the mode-native basis
   line (`anchor: ◎ <name>` / `targets: ◎ configured (VMAF · …)` naming the
-  targeted metrics; ruler-less tables carry none), then the legend line
+  targeted metrics; uncompared tables carry none), then the legend line
   (delta bases, `≈` negligible, mark legend, size tolerance), then a blank
   line. Column widths are value-driven — the header phrase rides above the
   values without inflating the statistic sub-widths. Presentation constants
   are named and switchable.
-- **The bar row (◎)**: search mode = the configured targets (riding the
+- **The basis row (◎)**: search mode = the configured targets (riding the
   source row at merge); fixed mode = the anchor with absolute values.
-  Strategy rows show per-statistic deltas vs the bar in BOTH modes —
+  Strategy rows show per-statistic deltas vs the basis in BOTH modes —
   never averaged across statistics. Absolute pairs carry one `◆`
-  attention marker (ruler-less tables render absolutes unmarked);
+  attention marker (uncompared tables render absolutes unmarked);
   deltas inside the metric's `acceptance_delta` (the same negligible
   band the dominance pruning ignores) render `≈` instead of a sign —
   as do positive size deltas inside the stated size tolerance (the
@@ -550,7 +550,7 @@ All models are Pydantic.
 | `VideoStreamChunk` | An extended stream bounded by a `[start, end)` timestamp window; owns the chunk-id name family |
 | `Fingerprint` | The identity-comparison value type: `{size, token}` — token REQUIRED, authoritative; size an optional belt. Hash tokens only; canonical dumps are never persisted |
 | `EncodedChunk` | A winning attempt as a stream, composed with its chunk and strategy; owns both compose-only name families (attempt `<chunk>.q<q>.*`, winner `<chunk>.*`) — the quality value is a sidecar fact, never a payload field |
-| `Chapters` / `AudioOutput` / `MergedVideo` | Artifact payloads: the chapter edition, one (track, chain) audio output, one merged output — `MergedVideo` owns its output-name family incl. the per-strategy pinned-quality suffix |
+| `Chapters` / `AudioOutput` / `MergedVideo` | Artifact payloads: the chapter edition, one (track, chain) audio output, one merged output — `MergedVideo` owns its output-name family incl. the per-strategy fixed-quality suffix |
 | `Strategy` | Encoding strategy (`display_name()`/`safe_name()`/`fingerprint` triple, codec config, resolved ffmpeg args) |
 | `QualityTarget` | Quality constraint (metric, statistic, threshold value) |
 | `MetricStatKey` | The metric × statistic identity: canonical `vmaf_median` sidecar form, `VMAF 50%` display form, tolerant parse — the single naming authority |

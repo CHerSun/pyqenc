@@ -8,7 +8,7 @@ Covers:
   plan never reach selection, display, or the rewritten sidecar.
 - The per-pair ledger (presence-based to-test, both modes).
 - Fixed-mode entry (cleanup guard, winner wipe, banner) and the fixed
-  compared-run machinery (pruning, anchor, synthetic set).
+  compared-run machinery (pruning, anchor, anchor targets).
 """
 
 import logging
@@ -210,7 +210,7 @@ def _seed_winner(
     write_yaml_atomic(
         strategy_dir / _EC.format_winner_sidecar_name(chunk.safe_name()),
         WinnerSidecar(
-            crf=Decimal(20),
+            quality=Decimal(20),
             frame_count=24, metrics={}, targets_met=True,
         ).model_dump(exclude_none=True),
     )
@@ -665,7 +665,7 @@ class TestPairLedger:
         write_yaml_atomic(
             strategy_dir / _EC.format_winner_sidecar_name(chunk.safe_name()),
             WinnerSidecar(
-                crf=Decimal(20),
+                quality=Decimal(20),
                 frame_count=24, metrics={}, targets_met=True,
             ).model_dump(exclude_none=True),
         )
@@ -757,7 +757,7 @@ def _seed_encoded_winner(work_dir: Path, strategy: Strategy) -> Path:
     strategy_dir.mkdir(parents=True, exist_ok=True)
     winner = strategy_dir / "chunk-001.1920x1080.q18.mkv"
     winner.write_bytes(b"x" * 32)
-    (strategy_dir / "chunk-001.1920x1080.yaml").write_text("crf: 18\n", encoding="utf-8")
+    (strategy_dir / "chunk-001.1920x1080.yaml").write_text("quality: 18\n", encoding="utf-8")
     return strategy_dir
 
 
@@ -951,7 +951,7 @@ class TestFixedQualityBanner:
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture,
     ) -> None:
         # Collapsed config profiles of different values (no -q): the banner
-        # falls back to a per-strategy pinned-knob listing.
+        # falls back to a per-strategy fixed-knob listing.
         from pyqenc.phases.chunking import ChunkingPhase as _CP
         from pyqenc.phases.chunking import ChunkingPhaseResult
         from pyqenc.phases.probe import ProbePhase as _PP
@@ -988,7 +988,7 @@ class TestFixedQualityBanner:
         assert "knob pinned (h265-aq+slow: CRF=18.0, h264+veryslow: CRF=20.0)" in caplog.text
 
 # ---------------------------------------------------------------------------
-# Fixed compared-run optimization: pruning, anchor, synthetic set (Req 8)
+# Fixed compared-run optimization: pruning, anchor, anchor targets (Req 8)
 # ---------------------------------------------------------------------------
 
 def _result(name: str, size: int, metrics: dict[str, float]) -> StrategyRow:
@@ -1133,7 +1133,7 @@ class TestAnchorSelection:
 
     def test_dominated_size_minimum_not_anchor(self) -> None:
         """The overall size minimum can itself be dominated (equal size,
-        worse metrics) — pruning first guarantees the ruler is on the front."""
+        worse metrics) — pruning first guarantees the anchor is on the front."""
         results = [
             _result("a+slow", 900, {"vmaf_median": 80.0}),
             _result("b+slow", 900, {"vmaf_median": 85.0}),
@@ -1169,7 +1169,7 @@ class TestAnchorSelection:
 
     def test_stability_only_survivor_cannot_anchor(self) -> None:
         """A survivor measured only on stats outside the comparison set has
-        an empty ruler — it must not anchor over a compared survivor."""
+        empty anchor targets — it must not anchor over a compared survivor."""
         results = [
             _result("a+slow", 1000, {"vmaf_std": 1.5, "vmaf_max": 98.0}),
             _result("b+slow", 1400, {"vmaf_p10": 88.0, "vmaf_median": 91.0}),
@@ -1184,11 +1184,11 @@ class TestAnchorSelection:
         assert OptimizationPhase._select_anchor(results, ["a+slow"], ["a+slow"]) is None
 
 
-class TestSyntheticTargets:
-    """The synthetic set mirrors the anchor's min-aggregated metrics (Req 8.3)."""
+class TestAnchorTargets:
+    """The anchor targets mirror the anchor's min-aggregated metrics (Req 8.3)."""
 
     def test_comparison_stats_only_sorted(self) -> None:
-        """The ruler carries only the fixed-mode comparison statistics (p10,
+        """The anchor targets carry only the fixed-mode comparison statistics (p10,
         median) per metric — stability/shape stats stay out."""
         anchor = _result(
             "av1+slow", 1000,
@@ -1197,7 +1197,7 @@ class TestSyntheticTargets:
                 "vmaf_p10": 88.5, "vmaf_median": 91.2, "vmaf_std": 1.0,
             },
         )
-        targets = OptimizationPhase._synthetic_targets_from(anchor)
+        targets = OptimizationPhase._anchor_targets_from(anchor)
         assert [(t.metric, t.statistic, t.value) for t in targets] == [
             ("vif", "p10", 81.0),
             ("vif", "median", 84.0),
@@ -1206,7 +1206,7 @@ class TestSyntheticTargets:
         ]
 
     def test_none_anchor_empty_set(self) -> None:
-        assert OptimizationPhase._synthetic_targets_from(None) == []
+        assert OptimizationPhase._anchor_targets_from(None) == []
 
 
 class TestAggregateStrategyMetrics:
@@ -1228,7 +1228,7 @@ class TestAggregateStrategyMetrics:
             save_model(
                 strategy_dir / EncodedChunk.format_winner_sidecar_name(chunk.safe_name()),
                 WinnerSidecar(
-                    crf     = Decimal(20),
+                    quality = Decimal(20),
                     frame_count = 24,
                     metrics = {"vmaf_median": 91.0 + i, "vif_median": 84.0 - i},
                     targets_met = True,
@@ -1280,7 +1280,7 @@ class TestFixedComparedExecute:
     Scenario (the design table): av1-analog smallest with lower metrics,
     h265-analog bigger with better metrics, h264-analog biggest with metrics
     strictly between — dominated by the h265-analog. Survivors are the first
-    two; the anchor is the smallest survivor; the synthetic set mirrors the
+    two; the anchor is the smallest survivor; the anchor targets mirror the
     anchor's min-aggregated metrics; tolerance is never consulted.
     """
 
@@ -1342,7 +1342,7 @@ class TestFixedComparedExecute:
                     mkv.write_bytes(b"x" * per_chunk)
                     write_yaml_atomic(
                         strategy_dir / _EC.format_winner_sidecar_name(chunk.safe_name()),
-                        {"crf": "18.0", "targets_met": True, "frame_count": 24, "metrics": metrics[display]},
+                        {"quality": "18.0", "targets_met": True, "frame_count": 24, "metrics": metrics[display]},
                     )
                     result.encoded_chunks.setdefault(display, []).append(
                         build_encoded_chunk(
@@ -1389,7 +1389,7 @@ class TestFixedComparedExecute:
         },
     }
 
-    def test_pruning_anchor_synthetic_and_persistence(
+    def test_pruning_anchor_targets_and_persistence(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         result, work_dir = self._run_scenario(
@@ -1403,10 +1403,10 @@ class TestFixedComparedExecute:
         survivor_names = [s.display_name() for s in result.selected_strategies]
         assert survivor_names == ["h265-aq+slow", "h265+slow"]
 
-        # The anchor is the smallest survivor; the synthetic set mirrors its
+        # The anchor is the smallest survivor; the anchor targets mirror its
         # min-aggregated COMPARED stats only (sorted) — std/max stay out.
         assert result.anchor == "h265-aq+slow"
-        assert [(t.metric, t.statistic, t.value) for t in result.synthetic_targets] == [
+        assert [(t.metric, t.statistic, t.value) for t in result.anchor_targets] == [
             ("vif", "p10", 81.0),
             ("vif", "median", 84.0),
             ("vmaf", "p10", 87.0),
@@ -1414,24 +1414,24 @@ class TestFixedComparedExecute:
         ]
 
         # The sidecar persists facts only — selection/anchor are live
-        # derivations and the synthetic ruler re-derives from
-        # strategy_results on read (no synthetic_targets field).
+        # derivations and the anchor targets re-derive from
+        # strategy_results on read (no anchor_targets field).
         persisted = load_optimization_sidecar(work_dir / "optimization.yaml")
         assert persisted is not None
-        assert not hasattr(persisted, "synthetic_targets")
+        assert not hasattr(persisted, "anchor_targets")
         # The per-strategy records keep the FULL aggregated metrics for reuse
         # (data retention — re-selecting the comparison set never re-measures).
         by_name = {r.strategy: r for r in persisted.summary}
         aq = by_name["h265-aq+slow"].metrics
         assert aq[_K(_MT.VMAF, _ST.MEDIAN)] == 91.0
         assert aq[_K(_MT.VMAF, _ST.STD)] == 1.1
-        # Re-derivation from the persisted facts reproduces the ruler verbatim.
+        # Re-derivation from the persisted facts reproduces the anchor targets verbatim.
         anchor_result = next(
             r for r in persisted.summary if r.strategy == result.anchor
         )
         assert [
             (t.metric, t.statistic, t.value)
-            for t in OptimizationPhase._synthetic_targets_from(anchor_result)
+            for t in OptimizationPhase._anchor_targets_from(anchor_result)
         ] == [
             ("vif", "p10", 81.0),
             ("vif", "median", 84.0),
@@ -1481,7 +1481,7 @@ class TestFixedComparedExecute:
 
 
 class TestFixedReuseFromPersisted:
-    """Fixed reuse re-derives pruning/anchor/synthetic from persisted results."""
+    """Fixed reuse re-derives pruning/anchor/targets from persisted results."""
 
     def test_reuse_reselects_by_pruning_without_reencoding(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture,
@@ -1512,7 +1512,7 @@ class TestFixedReuseFromPersisted:
                 mkv.write_bytes(b"x" * 64)
                 write_yaml_atomic(
                     strategy_dir / _EC.format_winner_sidecar_name(chunk.safe_name()),
-                    {"crf": "18.0", "targets_met": True, "metrics": {}},
+                    {"quality": "18.0", "targets_met": True, "metrics": {}},
                 )
         _persist_optimization(
             phase,
@@ -1530,7 +1530,7 @@ class TestFixedReuseFromPersisted:
         assert [s.display_name() for s in result.selected_strategies] == [
             "h265-aq+slow", "h265+slow",
         ]
-        assert [(t.metric, t.statistic, t.value) for t in result.synthetic_targets] == [
+        assert [(t.metric, t.statistic, t.value) for t in result.anchor_targets] == [
             ("vmaf", "median", 91.0),
         ]
         assert "anchor: ◎  h265-aq+slow" in caplog.text
@@ -1550,14 +1550,14 @@ class TestFixedAlwaysRuns:
         )
         result = phase.run(dry_run=False)
         assert result.outcome is PhaseOutcome.FAILED
-        assert result.synthetic_targets == []
+        assert result.anchor_targets == []
         assert result.anchor is None
 
     def test_single_strategy_elects_itself_anchor(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """A single-strategy fixed run tests, elects its only strategy as
-        anchor, and derives the synthetic ruler from its test metrics."""
+        anchor, and derives the anchor targets from its test metrics."""
         from pyqenc.phases.encoding import EncodingResult, build_encoded_chunk
         from pyqenc.stream_model import EncodedChunk as _EC
 
@@ -1581,7 +1581,7 @@ class TestFixedAlwaysRuns:
         mkv.write_bytes(b"x" * 500)
         write_yaml_atomic(
             strategy_dir / _EC.format_winner_sidecar_name(chunks[0].safe_name()),
-            {"crf": "18.0", "targets_met": True, "frame_count": 24,
+            {"quality": "18.0", "targets_met": True, "frame_count": 24,
              "metrics": {"vmaf_p10": 87.0, "vmaf_median": 91.0}},
         )
 
@@ -1602,7 +1602,7 @@ class TestFixedAlwaysRuns:
 
         assert result.outcome is PhaseOutcome.COMPLETED
         assert result.anchor == strategy.display_name()
-        assert [(t.metric, t.statistic, t.value) for t in result.synthetic_targets] == [
+        assert [(t.metric, t.statistic, t.value) for t in result.anchor_targets] == [
             ("vmaf", "p10", 87.0), ("vmaf", "median", 91.0),
         ]
 
@@ -1642,7 +1642,7 @@ class TestFixedAlwaysRuns:
             mkv.write_bytes(b"x" * 500)
             write_yaml_atomic(
                 kept_dir / _EC.format_winner_sidecar_name(chunk.safe_name()),
-                {"crf": "18.0", "targets_met": True, "frame_count": 24,
+                {"quality": "18.0", "targets_met": True, "frame_count": 24,
                  "metrics": {"vmaf_median": 95.0}},
             )
 
@@ -1661,7 +1661,7 @@ class TestFixedAlwaysRuns:
             mkv_b.write_bytes(b"x" * 600)
             write_yaml_atomic(
                 pending_dir / _EC.format_winner_sidecar_name(chunks[0].safe_name()),
-                {"crf": "18.0", "targets_met": True, "frame_count": 24,
+                {"quality": "18.0", "targets_met": True, "frame_count": 24,
                  "metrics": {"vmaf_median": 93.0}},
             )
             result.encoded_chunks[pending.display_name()] = [

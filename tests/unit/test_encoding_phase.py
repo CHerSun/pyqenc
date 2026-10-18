@@ -29,10 +29,10 @@ _CHUNK_ID   = "00꞉00꞉00․000-00꞉01꞉30․000"
 _STRATEGY   = _STRATEGY_OBJ.display_name()
 _SAFE_STRAT = _STRATEGY_OBJ.safe_name()
 _RESOLUTION = "1920x800"
-_CRF        = Decimal("18.0")
+_QUALITY     = Decimal("18.0")
 
 
-def _make_complete_pair(encoded_dir: Path, chunk_id: str = _CHUNK_ID, crf: Decimal = _CRF) -> Path:
+def _make_complete_pair(encoded_dir: Path, chunk_id: str = _CHUNK_ID, quality: Decimal = _QUALITY) -> Path:
     """Write a winning .mkv and its result sidecar into encoded_dir.
 
     Layout mirrors the real encoded/ directory:
@@ -43,7 +43,7 @@ def _make_complete_pair(encoded_dir: Path, chunk_id: str = _CHUNK_ID, crf: Decim
     mkv     = encoded_dir / _EC.format_winner_file_name(chunk_id)
     sidecar = encoded_dir / _EC.format_winner_sidecar_name(chunk_id)
     mkv.write_bytes(b"\x00" * 512)
-    write_yaml_atomic(sidecar, {"crf": str(crf), "targets_met": True, "frame_count": 24, "metrics": {"vmaf_min": 94.5}})
+    write_yaml_atomic(sidecar, {"quality": str(quality), "targets_met": True, "frame_count": 24, "metrics": {"vmaf_min": 94.5}})
     return mkv
 
 
@@ -85,7 +85,7 @@ class TestRecoverEncodingAttempts:
         """A .mkv without a .yaml sidecar is not COMPLETE — pair is ABSENT."""
         encoded_dir = tmp_path / "encoded" / _SAFE_STRAT
         encoded_dir.mkdir(parents=True, exist_ok=True)
-        stem = f"{_CHUNK_ID}.{_RESOLUTION}.q{_CRF:4.1f}"
+        stem = f"{_CHUNK_ID}.{_RESOLUTION}.q{_QUALITY:4.1f}"
         (encoded_dir / f"{stem}.mkv").write_bytes(b"\x00" * 512)
         # no .yaml written
 
@@ -155,7 +155,7 @@ from pyqenc.quality import QualityLogs as _QL
 from pyqenc.quality import QualityMeasurement as _QE
 from pyqenc.stream_model import VideoStreamChunk as _VSC
 from pyqenc.utils.ffmpeg_runner import FFmpegRunResult as _FFR
-from pyqenc.utils.visualization import QualityMeasurer as _QEvaluator
+from pyqenc.utils.visualization import QualityMeasurer as _QMeasurer
 
 
 def _fixed_strategy() -> _Strategy:
@@ -211,23 +211,23 @@ def _run_encode(
     fake_eval.metrics      = {_MetricType.VMAF: {"min": 95.0, "median": 96.5}}
     fake_eval.frame_count  = 120
 
-    evaluator = _MM(spec=_QEvaluator)
+    evaluator = _MM(spec=_QMeasurer)
     evaluator.work_dir = tmp_path
     evaluator.measure_chunk.return_value = fake_eval
 
     if measure_attempts is None:
         encoder = _ChunkEncoder(
-            quality_evaluator = evaluator,
+            quality_measurer  = evaluator,
             work_dir          = tmp_path,
             collector         = _MM(spec=_MetricsCollector),
-            metrics_sampling  = 10,
+            sampling           = 10,
         )
     else:
         encoder = _ChunkEncoder(
-            quality_evaluator = evaluator,
+            quality_measurer  = evaluator,
             work_dir          = tmp_path,
             collector         = _MM(spec=_MetricsCollector),
-            metrics_sampling  = 10,
+            sampling           = 10,
             measure_attempts  = measure_attempts,
         )
 
@@ -244,7 +244,7 @@ def _run_encode(
             chunk           = chunk,
             strategy        = strategy,
             quality_targets = [],
-            initial_crf     = _D("18.0"),
+            initial_quality     = _D("18.0"),
             force           = False,
         )
     return result, evaluator
@@ -260,8 +260,8 @@ class TestMeasureAttemptsSeam:
         evaluator.measure_chunk.assert_called_once()
 
     def test_off_path_skips_evaluation_and_accepts_single_point(self, tmp_path: Path) -> None:
-        """measure_attempts=False: no evaluation, empty sidecar metrics, one
-        accepted attempt at the pinned value.
+        """measure_attempts=False: no measurement, empty sidecar metrics, one
+        accepted attempt at the fixed value.
 
         Documents the seam (TODO §83 owns default-flipping and the
         metrics-absence tolerance): the attempt sidecar metric-keys
@@ -272,7 +272,7 @@ class TestMeasureAttemptsSeam:
         evaluator.measure_chunk.assert_not_called()
         assert result.success is True
         assert result.targets_met is True
-        assert result.final_crf == _D("18.0")
+        assert result.final_quality == _D("18.0")
         assert result.attempts == 1
 
         sidecar_path = (
@@ -288,7 +288,7 @@ class TestMeasureAttemptsSeam:
         assert winner_sidecar.exists()
 
     def test_on_path_measures_and_persists_all_metrics(self, tmp_path: Path) -> None:
-        """measure_attempts=True: evaluation runs and all metrics persist."""
+        """measure_attempts=True: measurement runs and all metrics persist."""
         result, evaluator = _run_encode(tmp_path, measure_attempts=True)
         evaluator.measure_chunk.assert_called_once()
         assert result.success is True
@@ -310,7 +310,7 @@ class TestMeasureAttemptsSeam:
 
 
 # ---------------------------------------------------------------------------
-# Fixed-mode encoding: degenerate single-point path + presentation ruler
+# Fixed-mode encoding: degenerate single-point path + presentation anchor
 # (fixed-quality spec Req 9.1, 9.4, 9.5, 9.7)
 # ---------------------------------------------------------------------------
 
@@ -336,8 +336,8 @@ class TestFixedDegenerateSinglePoint:
     """Exactly one accepted attempt per pair via the existing degenerate path (Req 9.1)."""
 
     def test_single_attempt_accepted_with_measurement(self, tmp_path: Path) -> None:
-        """Uncompared ruler (empty targets): one measured attempt, vacuous
-        pass, winner promoted at the pinned value."""
+        """Uncompared (empty targets): one measured attempt, vacuous
+        pass, winner promoted at the fixed value."""
         result, evaluator = _run_encode_with_targets(
             tmp_path, targets=[], measure_attempts=True,
         )
@@ -345,10 +345,10 @@ class TestFixedDegenerateSinglePoint:
         assert result.success is True
         assert result.targets_met is True
         assert result.attempts == 1
-        assert result.final_crf == _D("18.0")
+        assert result.final_quality == _D("18.0")
 
-    def test_single_attempt_accepted_when_ruler_misses(self, tmp_path: Path) -> None:
-        """Compared-run ruler miss: the single-point domain cannot produce a
+    def test_single_attempt_accepted_when_anchor_targets_miss(self, tmp_path: Path) -> None:
+        """Compared-run anchor-targets miss: the single-point domain cannot produce a
         second candidate — the attempt is accepted unconditionally with a
         presentation-only targets_met=False verdict (Req 9.7), and the
         acceptance line still logs in the uniform success shape (INFO for a
@@ -361,7 +361,7 @@ class TestFixedDegenerateSinglePoint:
         assert result.success is True
         assert result.targets_met is False
         assert result.attempts == 1
-        assert result.final_crf == _D("18.0")
+        assert result.final_quality == _D("18.0")
         # The winner is still promoted.
         assert (tmp_path / "encoded" / "test_strategy" / "chunk_001.yaml").exists()
         # Every accepted winner logs its acceptance, uniform with the success
@@ -429,15 +429,15 @@ def _run_encode_with_targets(
     fake_eval.metrics = {_MetricType.VMAF: {"min": 95.0, "median": 96.5}}
     fake_eval.frame_count = 120
 
-    evaluator = _MM(spec=_QEvaluator)
+    evaluator = _MM(spec=_QMeasurer)
     evaluator.work_dir = tmp_path
     evaluator.measure_chunk.return_value = fake_eval
 
     encoder = _ChunkEncoder(
-        quality_evaluator = evaluator,
+        quality_measurer  = evaluator,
         work_dir          = tmp_path,
         collector         = _MM(spec=_MetricsCollector),
-        metrics_sampling  = 10,
+        sampling           = 10,
         measure_attempts  = measure_attempts,
     )
 
@@ -452,7 +452,7 @@ def _run_encode_with_targets(
     ):
         result = encoder.encode_chunk(
             chunk=chunk, strategy=strategy, quality_targets=targets,
-            initial_crf=_D("18.0"), force=False,
+            initial_quality=_D("18.0"), force=False,
         )
     return result, evaluator
 
@@ -485,10 +485,10 @@ class TestAttemptFrameCountSourcing:
 
     def _encoder(self, tmp_path: Path, evaluator) -> _ChunkEncoder:
         return _ChunkEncoder(
-            quality_evaluator = evaluator,
+            quality_measurer  = evaluator,
             work_dir          = tmp_path,
             collector         = _MM(spec=_MetricsCollector),
-            metrics_sampling  = 10,
+            sampling           = 10,
         )
 
     def _target(self):
@@ -506,7 +506,7 @@ class TestAttemptFrameCountSourcing:
         fake_eval.logs         = _QL()
         fake_eval.metrics      = {_MetricType.VMAF: {"min": 95.0, "median": 96.5}}
         fake_eval.frame_count  = 120
-        evaluator = _MM(spec=_QEvaluator)
+        evaluator = _MM(spec=_QMeasurer)
         evaluator.work_dir = tmp_path
         evaluator.measure_chunk.return_value = fake_eval
         encoder = self._encoder(tmp_path, evaluator)
@@ -516,7 +516,7 @@ class TestAttemptFrameCountSourcing:
                 chunk           = _chunk_mock(tmp_path),
                 strategy        = _fixed_strategy(),
                 quality_targets = self._target(),
-                initial_crf     = _D("18.0"),
+                initial_quality     = _D("18.0"),
                 force           = False,
             )
 
@@ -530,7 +530,7 @@ class TestAttemptFrameCountSourcing:
         """Metrics + a real count = complete: no encode, no measure."""
         attempt = self._seed_attempt(tmp_path, frame_count=120)
 
-        evaluator = _MM(spec=_QEvaluator)
+        evaluator = _MM(spec=_QMeasurer)
         evaluator.work_dir = tmp_path
         encoder = self._encoder(tmp_path, evaluator)
 
@@ -541,7 +541,7 @@ class TestAttemptFrameCountSourcing:
                 chunk           = _chunk_mock(tmp_path),
                 strategy        = _fixed_strategy(),
                 quality_targets = self._target(),
-                initial_crf     = _D("18.0"),
+                initial_quality     = _D("18.0"),
                 force           = False,
             )
 
@@ -561,7 +561,7 @@ class TestEncodingPresentationTargets:
         monkeypatch,
         *,
         quality_range_override: tuple[_D, _D] | None,
-        synthetic_targets: list[QualityTarget],
+        anchor_targets: list[QualityTarget],
     ) -> list[QualityTarget]:
         """Run EncodingPhase through run() with a stubbed encode pool.
 
@@ -630,7 +630,7 @@ class TestEncodingPresentationTargets:
         optimization.result = OptimizationPhaseResult(
             outcome=PhaseOutcome.COMPLETED, message="stub",
             selected_strategies=[strategy],
-            synthetic_targets=synthetic_targets,
+            anchor_targets=anchor_targets,
         )
 
         registry: PhaseRegistry = {
@@ -666,23 +666,23 @@ class TestEncodingPresentationTargets:
         received = _cast(list[QualityTarget], captured["quality_targets"])
         return received
 
-    def test_fixed_compared_uses_synthetic_set(self, tmp_path: Path, monkeypatch) -> None:
-        synthetic = [
+    def test_fixed_compared_uses_anchor_targets(self, tmp_path: Path, monkeypatch) -> None:
+        anchor_targets_fixture = [
             QualityTarget(metric="vmaf", statistic="median", value=91.0),
             QualityTarget(metric="vif", statistic="median", value=84.0),
         ]
         received = self._run_phase(
             tmp_path, monkeypatch,
             quality_range_override=(_D("18"), _D("18")),
-            synthetic_targets=synthetic,
+            anchor_targets=anchor_targets_fixture,
         )
-        assert received == synthetic
+        assert received == anchor_targets_fixture
 
-    def test_fixed_uncompared_uses_no_ruler(self, tmp_path: Path, monkeypatch) -> None:
+    def test_fixed_uncompared_uses_no_anchor_targets(self, tmp_path: Path, monkeypatch) -> None:
         received = self._run_phase(
             tmp_path, monkeypatch,
             quality_range_override=(_D("18"), _D("18")),
-            synthetic_targets=[],
+            anchor_targets=[],
         )
         assert received == []
 
@@ -690,7 +690,7 @@ class TestEncodingPresentationTargets:
         received = self._run_phase(
             tmp_path, monkeypatch,
             quality_range_override=None,
-            synthetic_targets=[],
+            anchor_targets=[],
         )
         # The config targets flow through verbatim — searched behavior is
         # byte-identical to before the spec.

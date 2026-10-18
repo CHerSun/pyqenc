@@ -207,8 +207,8 @@ class TestSearchedRunsUnchanged:
             (s.codec.quality_better, s.codec.quality_worse)
             for s in config.resolve_encoding().strategies
         ]
-        pinned = config.resolve_encoding(quality=(Decimal("18"), Decimal("18")))
-        assert pinned.fixed_quality is True
+        plan = config.resolve_encoding(quality=(Decimal("18"), Decimal("18")))
+        assert plan.fixed_quality is True
         restored = config.resolve_encoding()
         assert [
             (s.codec.quality_better, s.codec.quality_worse)
@@ -297,7 +297,7 @@ def _build_args(**overrides: object) -> argparse.Namespace:
         "scene_threshold": None, "min_scene_length": None,
         "targets": None, "strategies": None, "quality": None,
         "no_optimize": False, "concurrency": None,
-        "metrics_sampling": None, "no_visual_hash": False,
+        "sampling": None, "no_visual_hash": False,
     }
     defaults.update(overrides)
     return argparse.Namespace(**defaults)
@@ -392,7 +392,7 @@ class TestPlanConstructionInvariants:
             config.resolve_encoding(targets=[])
 
     def test_fixed_run_without_targets_allowed(self) -> None:
-        """Fixed runs legitimately omit targets: the pinned knob is the bar
+        """Fixed runs legitimately omit targets: the fixed knob is the reference
         and config targets drive nothing there."""
         config = _config_with_strategies("h265-aq")
         plan = config.resolve_encoding(

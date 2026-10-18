@@ -29,7 +29,7 @@ _STRATEGY_OBJ = next(
 _CHUNK_ID   = "00꞉00꞉00․000-00꞉00꞉13․330"
 _STRATEGY   = _STRATEGY_OBJ.display_name()
 _SAFE_STRAT = _STRATEGY_OBJ.safe_name()
-_CRF        = Decimal("20.5")
+_QUALITY     = Decimal("20.5")
 
 
 def _encoded_dir(work_dir: Path) -> Path:
@@ -39,7 +39,7 @@ def _encoded_dir(work_dir: Path) -> Path:
 def _make_complete_pair(
     encoded_dir: Path,
     chunk_id:    str     = _CHUNK_ID,
-    crf:         Decimal = _CRF,
+    quality:     Decimal = _QUALITY,
 ) -> Path:
     """Write a winner .mkv + result sidecar into encoded_dir.
 
@@ -52,7 +52,7 @@ def _make_complete_pair(
     sidecar = encoded_dir / EncodedChunk.format_winner_sidecar_name(chunk_id)
     mkv.write_bytes(b"\x00" * 64)
     sidecar.write_text(
-        yaml.dump({"crf": str(crf), "targets_met": True, "metrics": {"vmaf_min": 95.0}}),
+        yaml.dump({"quality": str(quality), "targets_met": True, "metrics": {"vmaf_min": 95.0}}),
         encoding="utf-8",
     )
     return mkv
@@ -92,7 +92,7 @@ class TestRecoverAttemptsAbsent:
         attempts are the substrate, never classified."""
         enc_dir = tmp_path / "encoding" / _SAFE_STRAT
         enc_dir.mkdir(parents=True, exist_ok=True)
-        (enc_dir / EncodedChunk.format_attempt_file_name(_CHUNK_ID, _CRF)).write_bytes(b"\x00" * 64)
+        (enc_dir / EncodedChunk.format_attempt_file_name(_CHUNK_ID, _QUALITY)).write_bytes(b"\x00" * 64)
 
         result = recover_attempts(tmp_path, [_CHUNK_ID], [_STRATEGY_OBJ])
         pair = result.pairs[(_CHUNK_ID, _STRATEGY)]
@@ -132,9 +132,9 @@ class TestRecoverAttemptsComplete:
         workdir matches NO static expected name — the pair re-derives."""
         out_dir = _encoded_dir(tmp_path)
         out_dir.mkdir(parents=True, exist_ok=True)
-        (out_dir / EncodedChunk.format_attempt_file_name(_CHUNK_ID, _CRF)).write_bytes(b"\x00" * 64)
-        (out_dir / EncodedChunk.format_attempt_sidecar_name(_CHUNK_ID, _CRF)).write_text(
-            yaml.dump({"crf": str(_CRF)}), encoding="utf-8",
+        (out_dir / EncodedChunk.format_attempt_file_name(_CHUNK_ID, _QUALITY)).write_bytes(b"\x00" * 64)
+        (out_dir / EncodedChunk.format_attempt_sidecar_name(_CHUNK_ID, _QUALITY)).write_text(
+            yaml.dump({"quality": str(_QUALITY)}), encoding="utf-8",
         )
 
         result = recover_attempts(tmp_path, [_CHUNK_ID], [_STRATEGY_OBJ])

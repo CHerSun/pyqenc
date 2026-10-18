@@ -1,4 +1,4 @@
-"""Property-based tests for CRF search refactor.
+"""Property-based tests for the quality search.
 
 # Feature: crf-search-refactor
 """

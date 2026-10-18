@@ -28,7 +28,7 @@ from pyqenc.models import CropParams, Resolution
 from pyqenc.phases.extraction import _probe_streams_json
 from pyqenc.phases.job import JobSidecar
 from pyqenc.phases.probe import ProbeSidecar
-from pyqenc.quality import ChunkQualityStats, MetricType, flatten_metric_stats
+from pyqenc.quality import MetricType, PerMetricStats, flatten_metric_stats
 from pyqenc.stream_model import File, LongPathYaml, VideoStream, VideoStreamInfo
 from pyqenc.utils.ffmpeg_runner import FFmpegInput, FFmpegRequest, run_ffmpeg_async
 from pyqenc.utils.fs import remove_stale_tmp_files
@@ -41,10 +41,10 @@ from pyqenc.utils.yaml_utils import load_model, save_model
 # ---------------------------------------------------------------------------
 
 class MeasureSidecar(BaseModel):
-    """Standalone measure sidecar (``<target_stem>.yaml``).
+    """Standalone measure sidecar (``<distorted_stem>.yaml``).
 
     Written by the ``measure`` command alongside the quality graph and
-    screenshots.  Records source/target paths, durations, crop parameters,
+    screenshots.  Records source/distorted paths, durations, crop parameters,
     the frame subsampling factor, and per-metric statistics.
 
     The ``metrics`` field uses the same flat ``{metric_stat: value}`` format
@@ -54,11 +54,11 @@ class MeasureSidecar(BaseModel):
     """
 
     source_video:               LongPathYaml
-    target_video:               LongPathYaml
+    distorted_video:               LongPathYaml
     sampling:                   int
     crop_params:                dict[str, int] | None = None
     source_duration_seconds:    float | None          = None
-    target_duration_seconds:    float | None          = None
+    distorted_duration_seconds:    float | None          = None
     effective_duration_seconds: float | None          = None
     metrics:                    dict[str, float]      = Field(default_factory=dict)
 
@@ -71,14 +71,14 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
-class TargetMeasureResult:
-    """Artifacts produced for a single target video."""
+class DistortedMeasureResult:
+    """Artifacts produced for a single distorted video."""
 
-    target_video:    Path
-    graph:           Path | None       # <target_stem>.png in measure_dir
-    sidecar:         Path | None       # <target_stem>.yaml in measure_dir
-    screenshots_dir: Path              # <target_stem>.screenshots/ in measure_dir
-    metrics:         ChunkQualityStats # parsed metric statistics
+    distorted_video:    Path
+    graph:           Path | None       # <distorted_stem>.png in measure_dir
+    sidecar:         Path | None       # <distorted_stem>.yaml in measure_dir
+    screenshots_dir: Path              # <distorted_stem>.screenshots/ in measure_dir
+    metrics:         PerMetricStats # parsed metric statistics
 
 
 @dataclass
@@ -86,7 +86,7 @@ class MeasureResult:
     """All artifacts produced by a measure run."""
 
     source_screenshots_dir: Path                      # <source_stem>.screenshots/ in measure_dir
-    targets:                list[TargetMeasureResult] # one entry per target video
+    distorted:              list[DistortedMeasureResult] # one entry per distorted video
 
 
 @dataclass(frozen=True)
@@ -334,52 +334,52 @@ def _load_job_source_path(job_yaml: Path) -> Path | None:
 
 async def _run_metrics(
     source_video:     Path,
-    target_video:     Path,
+    distorted_video:     Path,
     crop_params:      CropParams,
     width:            int | None,
     metrics_dir:      Path,
     graph_path:       Path,
-    subsample_factor: int,
+    sampling:         int,
     bar_title:        str,
     duration_seconds: float,
     fps_value:        Fraction | None,
-) -> ChunkQualityStats:
-    """Run quality metric computation for one source/target pair.
+) -> PerMetricStats:
+    """Run quality metric computation for one source/distorted pair.
 
     Delegates to ``QualityMeasurer.measure_chunk_async`` (measurement only —
-    the evaluator takes no targets, Req 51-53); metric statistics are returned.
+    the measurer takes no target set, Req 51-53); metric statistics are returned.
 
     Args:
-        source_video:     Reference (original) video path.
-        target_video:     Encoded/distorted video path.
+        source_video:     The reference (original) video path.
+        distorted_video:     The distorted (encoded) video path.
         crop_params:      Crop applied to the source during metric computation.
         width:            Scale both inputs to this width after cropping
                           (``None`` or ``0`` = no scaling).
         metrics_dir:      Directory for raw metric log files (PSNR/SSIM/VMAF).
         graph_path:       Destination path for the quality metrics PNG plot.
-        subsample_factor: Frame subsampling factor (≥1).
+        sampling:         Frame subsampling factor (≥1).
         duration_seconds: The comparison duration (progress/plot extent).
         fps_value:        Average fps for plot x-axis conversion.
 
     Returns:
-        ``ChunkQualityStats`` mapping each ``MetricType`` to its key statistics.
+        ``PerMetricStats`` mapping each ``MetricType`` to its key statistics.
     """
 
-    evaluator  = QualityMeasurer(metrics_dir)
-    evaluation = await evaluator.measure_chunk_async(
-        encoded          = target_video,
+    measurer    = QualityMeasurer(metrics_dir)
+    measurement = await measurer.measure_chunk_async(
+        encoded          = distorted_video,
         reference        = FFmpegInput(path=source_video),
         ref_crop         = crop_params,
         output_dir       = metrics_dir,
         duration_seconds = duration_seconds,
         fps_value        = fps_value,
-        subsample_factor = subsample_factor,
+        sampling         = sampling,
         show_progress    = True,
         plot_path        = graph_path,
         width            = width or 0,
         bar_title        = bar_title,
     )
-    return evaluation.metrics
+    return measurement.metrics
 
 
 
@@ -422,7 +422,7 @@ def _effective_resolution(
     Args:
         stream:      Video stream with a probed ``resolution`` string.
         crop_params: Crop to apply (may be empty/no-op).
-        width:       Target scale width, or ``None`` for no scaling.
+        width:       Scale-to width, or ``None`` for no scaling.
 
     Returns:
         ``(effective_width, effective_height)`` as integers.
@@ -447,19 +447,19 @@ def _effective_resolution(
 
 def _check_resolution_match(
     source_stream: VideoStream,
-    target_stream: VideoStream,
+    distorted_stream: VideoStream,
     crop_params:   CropParams,
     width:         int | None,
 ) -> None:
-    """Verify source and target have matching effective resolution after crop and scale.
+    """Verify source and distorted video have matching effective resolution after crop and scale.
 
-    Called once per target, upfront before any processing begins.  Effective
+    Called once per distorted video, upfront before any processing begins.  Effective
     resolution = raw resolution minus crop pixels (source only), then scaled
     to *width* if provided.
 
     Args:
         source_stream: The source (reference) video stream.
-        target_meta: Metadata for the target (encoded) video.
+        target_meta: Metadata for the distorted (encoded) video.
         crop_params: Crop applied to the source.
         width:       Optional scale width applied to both after cropping.
 
@@ -469,7 +469,7 @@ def _check_resolution_match(
     """
     src_w, src_h = _effective_resolution(source_stream, crop_params, width)
     # Target is never cropped — pass empty CropParams
-    tgt_w, tgt_h = _effective_resolution(target_stream, CropParams(), width)
+    tgt_w, tgt_h = _effective_resolution(distorted_stream, CropParams(), width)
 
     if src_w == tgt_w and src_h == tgt_h:
         return  # match — nothing to do
@@ -477,7 +477,7 @@ def _check_resolution_match(
     # Build an actionable suggestion.
     # Raw dimensions (before any crop/scale applied here)
     src_parts = (source_stream.info.resolution or "?x?").split("x")
-    tgt_parts = (target_stream.info.resolution or "?x?").split("x")
+    tgt_parts = (distorted_stream.info.resolution or "?x?").split("x")
     src_raw_w = int(src_parts[0]) if src_parts[0].isdigit() else 0
     src_raw_h = int(src_parts[1]) if src_parts[1].isdigit() else 0
     tgt_raw_w = int(tgt_parts[0]) if tgt_parts[0].isdigit() else 0
@@ -491,7 +491,7 @@ def _check_resolution_match(
 
     raise ValueError(
         f"Resolution mismatch: source effective {src_w}x{src_h} "
-        f"vs target effective {tgt_w}x{tgt_h}. {suggestion}"
+        f"vs distorted-video effective {tgt_w}x{tgt_h}. {suggestion}"
     )
 
 
@@ -504,14 +504,14 @@ def _build_resolution_suggestion(
 ) -> str:
     """Build a human-readable ``--crop`` / ``--width`` suggestion string.
 
-    Computes the vertical crop needed to align source height to target height,
+    Computes the vertical crop needed to align source height to the distorted video's height,
     then determines whether ``--width`` is also needed.
 
     Args:
         src_raw_w: Raw source width (before any crop/scale).
         src_raw_h: Raw source height (before any crop/scale).
-        tgt_raw_w: Raw target width.
-        tgt_raw_h: Raw target height.
+        tgt_raw_w: Raw width of the distorted video.
+        tgt_raw_h: Raw height of the distorted video.
         width:     Currently requested scale width (may be ``None``).
 
     Returns:
@@ -520,7 +520,7 @@ def _build_resolution_suggestion(
     if src_raw_h < tgt_raw_h:
         return (
             "Target is taller than source — vertical crop cannot fix this. "
-            "Re-encode the target at the correct resolution."
+            "Re-encode the distorted video at the correct resolution."
         )
 
     height_diff = src_raw_h - tgt_raw_h
@@ -557,17 +557,17 @@ def _build_resolution_suggestion(
 def _write_sidecar(
     path:                       Path,
     source_video:               Path,
-    target_video:               Path,
-    subsample_factor:           int,
+    distorted_video:            Path,
+    sampling:                   int,
     crop_params:                CropParams,
-    metrics:                    ChunkQualityStats,
+    metrics:                    PerMetricStats,
     source_duration_seconds:    float | None,
-    target_duration_seconds:    float | None,
+    distorted_duration_seconds: float | None,
     effective_duration_seconds: float | None,
 ) -> None:
     """Write a metrics sidecar YAML file using the ``.tmp``-then-rename protocol.
 
-    Records source/target paths, durations, sampling factor, crop parameters,
+    Records source/distorted paths, durations, sampling factor, crop parameters,
     and all computed metric statistics in the flat ``{metric_stat: value}``
     format consistent with ``AttemptSidecar`` (e.g. ``vmaf_min``, ``ssim_median``).
     On write failure logs a warning and returns without raising so that the
@@ -576,13 +576,13 @@ def _write_sidecar(
     Args:
         path:                       Destination path for the sidecar YAML.
         source_video:               Reference video path.
-        target_video:               Encoded/distorted video path.
-        subsample_factor:           Frame subsampling factor used during computation.
+        distorted_video:            The distorted (encoded) video path.
+        sampling:                   Frame subsampling factor used during computation.
         crop_params:                Resolved crop parameters applied to the source.
         metrics:                    Computed quality statistics per metric type.
         source_duration_seconds:    Source video duration in seconds, or ``None``.
-        target_duration_seconds:    Target video duration in seconds, or ``None``.
-        effective_duration_seconds: ``min(source, target)`` duration, or ``None``.
+        distorted_duration_seconds: Distorted video duration in seconds, or ``None``.
+        effective_duration_seconds: ``min(source, distorted)`` duration, or ``None``.
     """
     crop_dict: dict[str, int] | None = {
         "top":    crop_params.top,
@@ -595,11 +595,11 @@ def _write_sidecar(
 
     sidecar = MeasureSidecar(
         source_video               = source_video,
-        target_video               = target_video,
+        distorted_video            = distorted_video,
         source_duration_seconds    = source_duration_seconds,
-        target_duration_seconds    = target_duration_seconds,
+        distorted_duration_seconds = distorted_duration_seconds,
         effective_duration_seconds = effective_duration_seconds,
-        sampling                   = subsample_factor,
+        sampling                   = sampling,
         crop_params                = crop_dict,
         metrics                    = flat_metrics,
     )
@@ -732,7 +732,7 @@ async def make_screenshots(
     back to Strategy A2 (single-pass frame-number select) and then Strategy A4
     (single-pass mod select) if the primary strategy yields zero output.
 
-    Partial results (fewer screenshots than positions, e.g. target shorter than
+    Partial results (fewer screenshots than positions, e.g. the distorted video shorter than
     source) are acceptable and do NOT trigger fallback — only total failure
     (zero output) triggers the fallback chain.
 
@@ -831,24 +831,24 @@ async def make_screenshots(
 # ---------------------------------------------------------------------------
 
 
-def _log_measure_summary(targets: list[TargetMeasureResult]) -> None:
+def _log_measure_summary(distorted: list[DistortedMeasureResult]) -> None:
     """Emit a summary table at INFO level after all metric computations complete.
 
-    One row per target showing: stem (truncated to 30 chars), file size in MB,
+    One row per distorted video showing: stem (truncated to 30 chars), file size in MB,
     and each metric's ``min…med`` pair for every MetricType that appears in
-    any target's metrics.  Missing metrics display as ``N/A``.
+    any distorted video's metrics.  Missing metrics display as ``N/A``.
 
     Args:
-        targets: List of completed target measure results.
+        distorted: List of completed per-distorted-video results.
     """
 
-    if not targets:
+    if not distorted:
         return
 
-    # Collect all metric types that appear across any target
+    # Collect all metric types that appear across any distorted video
     all_metric_types: list[MetricType] = []
     seen: set[MetricType] = set()
-    for t in targets:
+    for t in distorted:
         for mt in t.metrics:
             if mt not in seen:
                 all_metric_types.append(mt)
@@ -865,15 +865,15 @@ def _log_measure_summary(targets: list[TargetMeasureResult]) -> None:
         f"{mt.value.upper()[:METRIC_WIDTH - len(range_suffix)]}{range_suffix}".rjust(METRIC_WIDTH)
         for mt in all_metric_types
     )
-    header = f"{'Target':<{STEM_WIDTH}}   {'Size (MB)':>{SIZE_WIDTH}}   {metric_headers}"
+    header = f"{'Distorted':<{STEM_WIDTH}}   {'Size (MB)':>{SIZE_WIDTH}}   {metric_headers}"
     sep    = "─" * STEM_WIDTH + "   " + "─" * SIZE_WIDTH + "   " + ("─" * METRIC_WIDTH + "   ") * len(all_metric_types)
 
     logger.info(header)
     logger.info(sep.rstrip())
 
-    for t in targets:
-        stem      = t.target_video.stem[:STEM_WIDTH]
-        size_str  = fmt_size_mb(t.target_video.stat().st_size) if t.target_video.exists() else "N/A"
+    for t in distorted:
+        stem      = t.distorted_video.stem[:STEM_WIDTH]
+        size_str  = fmt_size_mb(t.distorted_video.stat().st_size) if t.distorted_video.exists() else "N/A"
         row_parts = [f"{stem:<{STEM_WIDTH}}", f"{size_str:>{SIZE_WIDTH}}"]
         for mt in all_metric_types:
             stats = t.metrics.get(mt, {})
@@ -891,10 +891,10 @@ def _log_measure_summary(targets: list[TargetMeasureResult]) -> None:
 
 async def run_measure(
     source_video:             Path,
-    target_videos:            list[Path],
+    distorted_videos:         list[Path],
     work_dir:                 Path,
     crop_params:              CropParams | None,
-    sampling:                int,
+    sampling:                 int,
     width:                    int | None,
     screenshot_count:         int | None,
     screenshot_interval:      float | None      = None,
@@ -903,12 +903,12 @@ async def run_measure(
     """Execute a standalone quality measurement run.
 
     Execution order: (1) compute screenshot positions from source, (2) capture
-    source screenshots, (3) capture all target screenshots, (4) run metrics for
-    each target, (5) emit summary table.
+    source screenshots, (3) capture all distorted-video screenshots, (4) run metrics for
+    each distorted video, (5) emit summary table.
 
     Args:
         source_video:             Reference video path.
-        target_videos:            Encoded videos to evaluate.  Pass an empty list to
+        distorted_videos:         Encoded videos to measure.  Pass an empty list to
                                   run in screenshots-only mode (no metrics, graph, or
                                   sidecar).
         work_dir:                 Working directory; outputs go under
@@ -916,7 +916,7 @@ async def run_measure(
         crop_params:              Explicit crop (or empty ``CropParams`` for no-crop).
                                   Pass ``None`` to auto-load from ``job.yaml`` if
                                   present.
-        sampling:                Frame subsampling factor (≥1).  Ignored in
+        sampling:                 Frame subsampling factor (≥1).  Ignored in
                                   screenshots-only mode.
         width:                    Scale both inputs to this width during metric
                                   computation (after cropping).  ``None`` = no
@@ -933,11 +933,11 @@ async def run_measure(
                                   Only applies in count mode (ignored in interval mode).
 
     Returns:
-        ``MeasureResult`` with source screenshots directory and per-target
+        ``MeasureResult`` with source screenshots directory and per-distorted-video
         results.
 
     Raises:
-        FileNotFoundError: If ``source_video`` or any path in ``target_videos``
+        FileNotFoundError: If ``source_video`` or any path in ``distorted_videos``
                            does not exist.
         ValueError:        If ``sampling < 1``, ``screenshot_count < 1``,
                            or any resolution mismatch is detected.
@@ -950,9 +950,9 @@ async def run_measure(
     if not source_video.exists():
         raise FileNotFoundError(f"Source video not found: {source_video}")
 
-    for target in target_videos:
-        if not target.exists():
-            raise FileNotFoundError(f"Target video not found: {target}")
+    for distorted in distorted_videos:
+        if not distorted.exists():
+            raise FileNotFoundError(f"Distorted video not found: {distorted}")
 
     if sampling < 1:
         raise ValueError(f"sampling must be ≥ 1, got {sampling}")
@@ -962,7 +962,7 @@ async def run_measure(
         raise ValueError(f"screenshot_count must be ≥ 1, got {effective_screenshot_count}")
 
     resolved_crop    = _resolve_crop(crop_params, work_dir, source_video)
-    screenshots_only = len(target_videos) == 0
+    screenshots_only = len(distorted_videos) == 0
 
     # ------------------------------------------------------------------
     # Resolution validation and parameter summary logging
@@ -971,21 +971,21 @@ async def run_measure(
     source_stream = _load_video_stream(source_video)
 
     if not screenshots_only:
-        target_streams: list[VideoStream] = [_load_video_stream(t) for t in target_videos]
+        distorted_streams: list[VideoStream] = [_load_video_stream(t) for t in distorted_videos]
 
-        for target_video, target_stream in zip(target_videos, target_streams):
+        for distorted_video, distorted_stream in zip(distorted_videos, distorted_streams):
             try:
-                _check_resolution_match(source_stream, target_stream, resolved_crop, width)
+                _check_resolution_match(source_stream, distorted_stream, resolved_crop, width)
             except ValueError as exc:
                 raise ValueError(
-                    f"Resolution check failed for {target_video.name}: {exc}"
+                    f"Resolution check failed for {distorted_video.name}: {exc}"
                 ) from exc
     else:
-        target_streams = []
+        distorted_streams = []
 
     fmt_key_value_table({
         "source":      str(source_video),
-        "targets":     [f"{i+1:>2} - {t.name}" for i, t in enumerate(target_videos)] if target_videos else ["(none — screenshots only)"],
+        "distorted":  [f"{i+1:>2} - {t.name}" for i, t in enumerate(distorted_videos)] if distorted_videos else ["(none — screenshots only)"],
         "crop":        str(resolved_crop) if not resolved_crop.is_empty() else "none",
         "width":       str(width) if width else "none",
         "sampling":    str(sampling),
@@ -999,15 +999,15 @@ async def run_measure(
     measure_dir            = work_dir / MEASURE_DIR
     source_screenshots_dir = measure_dir / source_video.stem
 
-    target_screenshots_dirs: dict[Path, Path] = {}
+    distorted_screenshots_dirs: dict[Path, Path] = {}
     graph_paths:             dict[Path, Path] = {}
     sidecar_paths:           dict[Path, Path] = {}
 
-    for target_video in target_videos:
-        stem = target_video.stem
-        target_screenshots_dirs[target_video] = measure_dir / stem
-        graph_paths[target_video]             = measure_dir / f"{stem}.png"
-        sidecar_paths[target_video]           = measure_dir / f"{stem}.yaml"
+    for distorted_video in distorted_videos:
+        stem = distorted_video.stem
+        distorted_screenshots_dirs[distorted_video] = measure_dir / stem
+        graph_paths[distorted_video]             = measure_dir / f"{stem}.png"
+        sidecar_paths[distorted_video]           = measure_dir / f"{stem}.yaml"
 
     measure_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1022,33 +1022,33 @@ async def run_measure(
     if source_duration is None:
         logger.warning("Duration unavailable for source video: %s", source_video.name)
 
-    target_durations: dict[Path, float | None] = {}
-    for target_video, target_stream in zip(target_videos, target_streams):
-        dur = target_stream.info.duration_seconds
+    distorted_durations: dict[Path, float | None] = {}
+    for distorted_video, distorted_stream in zip(distorted_videos, distorted_streams):
+        dur = distorted_stream.info.duration_seconds
         if dur is None:
-            logger.warning("Duration unavailable for target video: %s", target_video.name)
-        target_durations[target_video] = dur
+            logger.warning("Duration unavailable for distorted video: %s", distorted_video.name)
+        distorted_durations[distorted_video] = dur
 
     effective_durations: dict[Path, float | None] = {}
-    for target_video in target_videos:
-        t_dur = target_durations[target_video]
+    for distorted_video in distorted_videos:
+        t_dur = distorted_durations[distorted_video]
         if source_duration is not None and t_dur is not None:
             eff = min(source_duration, t_dur)
             if abs(source_duration - t_dur) > 1.0:
                 logger.warning(
-                    "Duration mismatch for %s: source=%.2fs, target=%.2fs — using effective=%.2fs",
-                    target_video.name, source_duration, t_dur, eff,
+                    "Duration mismatch for %s: source=%.2fs, distorted=%.2fs — using effective=%.2fs",
+                    distorted_video.name, source_duration, t_dur, eff,
                 )
-            effective_durations[target_video] = eff
+            effective_durations[distorted_video] = eff
         else:
-            effective_durations[target_video] = None
+            effective_durations[distorted_video] = None
 
     # ------------------------------------------------------------------
     # (1) Compute screenshot positions from source
     # ------------------------------------------------------------------
 
     if screenshots_only:
-        logger.info("Running in screenshots-only mode (no target videos provided)")
+        logger.info("Running in screenshots-only mode (no distorted videos provided)")
 
     positions: ScreenshotPositions | None = None
 
@@ -1122,33 +1122,33 @@ async def run_measure(
             logger.error("Screenshots failed for %s — skipping: %s", source_video.stem, exc)
 
     # ------------------------------------------------------------------
-    # (3) Capture all target screenshots
+    # (3) Capture all distorted-video screenshots
     # ------------------------------------------------------------------
 
-    target_screenshots_map: dict[Path, list[Path]] = {}
-    for target_video in target_videos:
+    distorted_screenshots_map: dict[Path, list[Path]] = {}
+    for distorted_video in distorted_videos:
         if positions is not None:
-            logger.info("Taking %d screenshots of %s...", len(positions.frame_nums), target_video.stem)
+            logger.info("Taking %d screenshots of %s...", len(positions.frame_nums), distorted_video.stem)
             try:
                 shots = await make_screenshots(
-                    video_path      = target_video,
+                    video_path      = distorted_video,
                     positions       = positions,
-                    screenshots_dir = target_screenshots_dirs[target_video],
+                    screenshots_dir = distorted_screenshots_dirs[distorted_video],
                     crop_params     = None,
                 )
             except OSError as exc:
-                logger.error("Screenshots failed for %s — skipping: %s", target_video.stem, exc)
+                logger.error("Screenshots failed for %s — skipping: %s", distorted_video.stem, exc)
                 shots = []
-            target_screenshots_map[target_video] = shots
+            distorted_screenshots_map[distorted_video] = shots
         else:
-            target_screenshots_map[target_video] = []
+            distorted_screenshots_map[distorted_video] = []
 
     # Summary log after all screenshot captures
     if positions is not None:
         expected_per_video = len(positions.frame_nums)
-        all_videos         = [source_video] + list(target_videos)
+        all_videos         = [source_video] + list(distorted_videos)
         total_expected     = expected_per_video * len(all_videos)
-        total_taken        = len(source_screenshots) + sum(len(s) for s in target_screenshots_map.values())
+        total_taken        = len(source_screenshots) + sum(len(s) for s in distorted_screenshots_map.values())
         symbol             = "✅" if total_taken == total_expected else "⚠"
         logger.info(
             "Screenshots taken: %d out of %d %s",
@@ -1156,45 +1156,45 @@ async def run_measure(
         )
 
     # ------------------------------------------------------------------
-    # (4) Run metrics for each target
+    # (4) Run metrics for each distorted video
     # ------------------------------------------------------------------
 
-    target_results: list[TargetMeasureResult] = []
+    distorted_results: list[DistortedMeasureResult] = []
 
-    for idx, target_video in enumerate(target_videos, start=1):
-        eff_dur = effective_durations[target_video]
+    for idx, distorted_video in enumerate(distorted_videos, start=1):
+        eff_dur = effective_durations[distorted_video]
 
-        logger.info("Measuring target %d of %d: %s", idx, len(target_videos), target_video.stem)
+        logger.info("Measuring distorted video %d of %d: %s", idx, len(distorted_videos), distorted_video.stem)
         metrics = await _run_metrics(
             source_video     = source_video,
-            target_video     = target_video,
+            distorted_video  = distorted_video,
             crop_params      = resolved_crop,
             width            = width,
             metrics_dir      = measure_dir,
-            graph_path       = graph_paths[target_video],
-            subsample_factor = sampling,
-            bar_title        = f"measuring target {idx:>2}",
+            graph_path       = graph_paths[distorted_video],
+            sampling         = sampling,
+            bar_title        = f"measuring distorted {idx:>2}",
             duration_seconds = eff_dur or 0.0,
             fps_value        = source_stream.info.fps_fraction,
         )
 
         _write_sidecar(
-            path                       = sidecar_paths[target_video],
+            path                       = sidecar_paths[distorted_video],
             source_video               = source_video,
-            target_video               = target_video,
-            subsample_factor           = sampling,
+            distorted_video            = distorted_video,
+            sampling                   = sampling,
             crop_params                = resolved_crop,
             metrics                    = metrics,
             source_duration_seconds    = source_duration,
-            target_duration_seconds    = target_durations[target_video],
+            distorted_duration_seconds    = distorted_durations[distorted_video],
             effective_duration_seconds = eff_dur,
         )
 
-        target_results.append(TargetMeasureResult(
-            target_video    = target_video,
-            graph           = graph_paths[target_video],
-            sidecar         = sidecar_paths[target_video],
-            screenshots_dir = target_screenshots_dirs[target_video],
+        distorted_results.append(DistortedMeasureResult(
+            distorted_video    = distorted_video,
+            graph           = graph_paths[distorted_video],
+            sidecar         = sidecar_paths[distorted_video],
+            screenshots_dir = distorted_screenshots_dirs[distorted_video],
             metrics         = metrics,
         ))
 
@@ -1202,10 +1202,10 @@ async def run_measure(
     # (5) Summary table
     # ------------------------------------------------------------------
 
-    if target_results:
-        _log_measure_summary(target_results)
+    if distorted_results:
+        _log_measure_summary(distorted_results)
 
     return MeasureResult(
         source_screenshots_dir = source_screenshots_dir,
-        targets                = target_results,
+        distorted              = distorted_results,
     )

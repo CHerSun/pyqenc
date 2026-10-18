@@ -65,7 +65,6 @@ from pyqenc.summary_tables import (
     ComparisonTable,
     Mark,
     MetricStatMap,
-    Ruler,
     StrategyRow,
     render_comparison_table,
 )
@@ -120,15 +119,15 @@ class SearchOptimizationSidecar(_OptimizationSidecarBase):
 
 
 class FixedOptimizationSidecar(_OptimizationSidecarBase):
-    """The fixed variant: the per-strategy pinned-quality map is the mode key.
+    """The fixed variant: the per-strategy fixed-quality map is the mode key.
 
-    Keyed by strategy display name, valued by the strategy's quantized pinned
+    Keyed by strategy display name, valued by the strategy's quantized fixed
     quality — an equal map performs no invalidation (the pending gate alone
     decides reuse or resume, Req 40).
     """
 
-    mode:   Literal["fixed"]        = "fixed"
-    pinned: dict[str, DecimalYaml]  = Field(default_factory=dict)
+    mode:    Literal["fixed"]       = "fixed"
+    quality: dict[str, DecimalYaml] = Field(default_factory=dict)
 
 
 OptimizationSidecar = SearchOptimizationSidecar | FixedOptimizationSidecar
@@ -188,7 +187,7 @@ def current_optimization_sidecar(
             sampling    = sampling,
             test_chunks = test_chunks,
             summary     = summary,
-            pinned = {
+            quality = {
                 s.display_name(): s.codec.quality_better.quantize(
                     s.codec.quality_granularity,
                 )
@@ -243,7 +242,7 @@ class OptimizationPhaseResult(PhaseResult):
         selected_strategies: The settings subset — strategies selected as
                              optimal (or all strategies in all-strategies
                              mode); consumed by Encoding and Merge.
-        synthetic_targets: The fixed-mode presentation ruler — the anchor's
+        anchor_targets: The fixed-mode presentation targets — the anchor's
                            min-aggregated metrics as quality targets. Empty
                            in searched runs and uncompared fixed runs;
                            presentation data only, never selection data.
@@ -254,7 +253,7 @@ class OptimizationPhaseResult(PhaseResult):
 
     winners:             list[Artifact[EncodedChunk]] = field(default_factory=list)
     selected_strategies: list[Strategy]              = field(default_factory=list)
-    synthetic_targets:   list[QualityTarget]         = field(default_factory=list)
+    anchor_targets:   list[QualityTarget]         = field(default_factory=list)
     anchor:              str | None                  = None
 
 
@@ -310,8 +309,8 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         self._anchor_name:       str | None                        = None
         """The fixed-mode measurement anchor's display name (fixed compared
         runs only; ``None`` in searched and uncompared runs)."""
-        self._synthetic_targets: list[QualityTarget]               = []
-        """The anchor-derived presentation ruler (fixed compared runs only)."""
+        self._anchor_targets: list[QualityTarget]              = []
+        """The anchor-derived presentation targets (fixed compared runs only)."""
 
     # ------------------------------------------------------------------
     # Phase hooks
@@ -324,7 +323,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         resolves them before the skip check). The fixed-mode entry is
         PRESENTATION only now: the cleanup guard moved to the run boundary
         (plan-boundary construction validation, Req 55) and the unconditional
-        winner wipe is replaced by the pinned-quality map key (an equal map
+        winner wipe is replaced by the fixed-quality map key (an equal map
         performs no invalidation — the pending gate decides, Req 40/O-2).
 
         Args:
@@ -342,7 +341,8 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
             # §123: fixed runs always run the test population — single-
             # strategy and `--no-optimize` included (the latter with
             # dominance pruning disabled at selection); the anchor mechanics
-            # and the ruler behave identically to any compared fixed run.
+            # and its anchor targets behave identically to any compared
+            # fixed run.
             return None
 
         # All-strategies mode: triggered by the optimize flag being off or a
@@ -364,10 +364,10 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         logger.warning("")
         logger.warning(
             "%s FIXED QUALITY MODE — knob pinned (%s)",
-            WARNING_SYMBOL, self._pinned_knob_description(strategies),
+            WARNING_SYMBOL, self._fixed_knob_description(strategies),
         )
         logger.warning(
-            "  - per-chunk quality search disabled: every chunk encodes once at the pinned value"
+            "  - per-chunk quality search disabled: every chunk encodes once at the fixed value"
         )
         logger.warning(
             "  - strategy sizes are compared at *nominally* equal knob; knob scales "
@@ -383,12 +383,12 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         logger.warning("")
 
     @staticmethod
-    def _pinned_knob_description(strategies: list[Strategy]) -> str:
-        """The pinned knob as ``"CRF=18"``, or a per-strategy listing.
+    def _fixed_knob_description(strategies: list[Strategy]) -> str:
+        """The fixed knob as ``"CRF=18"``, or a per-strategy listing.
 
         Uniform label and value collapse to the compact form; anything else
         (possible without ``-q`` via collapsed config profiles of different
-        codec families) lists each strategy's own pinned knob.
+        codec families) lists each strategy's own fixed knob.
         """
         labels = {s.codec.quality_label for s in strategies}
         values = {s.codec.quality_better for s in strategies}
@@ -503,7 +503,8 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
             if plan.fixed_quality:
                 # Re-select live (pruning under the current tolerance — or
                 # all measured rows for `--no-optimize` fixed runs, §123) and
-                # re-derive the anchor ruler from the persisted measurements.
+                # re-derive the anchor and its targets from the persisted
+                # measurements.
                 if self._config.encoding.optimize:
                     self._selected_names = self._dominance_survivors(table_rows, tolerance)
                 else:
@@ -515,7 +516,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
                     (r for r in table_rows if r.strategy == self._anchor_name),
                     None,
                 )
-                self._synthetic_targets = self._synthetic_targets_from(anchor_result)
+                self._anchor_targets = self._anchor_targets_from(anchor_result)
             else:
                 self._selected_names = self._apply_tolerance(
                     sorted(table_rows, key=lambda r: r.size_bytes), tolerance,
@@ -655,8 +656,8 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
 
         # Step 4 — winner-band keys: automatic wipe-winners + sidecar rewrite
         # (a disk effect — no in-memory table clearing, Req 37-42). Mode,
-        # chunk-set, mode-key (targets / pinned map), and sampling all fire
-        # here; an equal fixed map performs NO invalidation (O-2) — the
+        # chunk-set, mode-key (targets / fixed quality map), and sampling all
+        # fire here; an equal fixed map performs NO invalidation (O-2) — the
         # pending gate alone decides.
         if persisted is not None:
             reasons = self._winner_band_reasons(persisted, current)
@@ -694,7 +695,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
 
         The key block is required on both sides (a sidecar missing keys
         never loaded); per-key unknown semantics remain for the
-        ``strategies`` map only. An equal fixed pinned map contributes
+        ``strategies`` map only. An equal fixed quality map contributes
         nothing (O-2).
         """
         reasons: list[str] = []
@@ -714,9 +715,9 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         if (
             persisted.mode == "fixed"
             and current.mode == "fixed"
-            and persisted.pinned != current.pinned
+            and persisted.quality != current.quality
         ):
-            reasons.append("pinned quality map changed")
+            reasons.append("fixed quality map changed")
         if persisted.sampling != current.sampling:
             reasons.append(
                 f"metrics sampling changed ({persisted.sampling} → {current.sampling})"
@@ -832,7 +833,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
                 collector        = self._collector,
                 crop_params      = crop,
                 visual_hash      = self._config.encoding.visual_hash,
-                metrics_sampling = self._config.measurement.sampling,
+                sampling = self._config.measurement.sampling,
                 cleanup_level    = job_result.cleanup,
                 metric_prefix    = MetricKey.OPTIMIZATION,
             )
@@ -862,9 +863,10 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
                         encoder           = encoder,
                         chunks            = test_chunks,
                         strategies        = strategies_to_test,
-                        # Fixed mode presents the test encodes no ruler: config
-                        # targets drive no verdict there, and the anchor's
-                        # synthetic set does not exist until these results do.
+                        # Fixed mode presents the test encodes no comparison
+                        # basis: config targets drive no verdict there, and
+                        # the anchor's target set does not exist until these
+                        # results do.
                         quality_targets   = [] if fixed else plan.targets,
                         max_parallel      = self._config.encoding.concurrency,
                         force             = False,
@@ -903,10 +905,11 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
             # Selection = tolerance-epsilon dominance pruning — disabled for
             # `--no-optimize` fixed runs (§123: every strategy is selected;
             # anchoring, not dominance, is the point); anchor = smallest
-            # survivor (or smallest measured row unpruned); synthetic set =
+            # survivor (or smallest measured row unpruned); anchor targets =
             # the anchor's worst-chunk metrics. The sidecar persists facts
-            # only — the ruler re-derives on read, so a changed comparison
-            # stat set re-projects old measurements correctly.
+            # only — the anchor and its targets re-derive on read, so a
+            # changed comparison stat set re-projects old measurements
+            # correctly.
             resolved_names = [s.display_name() for s in plan.strategies]
             if self._config.encoding.optimize:
                 selected = self._dominance_survivors(final_results, tolerance)
@@ -916,7 +919,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
             anchor_result = next(
                 (r for r in final_results if r.strategy == self._anchor_name), None,
             )
-            self._synthetic_targets = self._synthetic_targets_from(anchor_result)
+            self._anchor_targets = self._anchor_targets_from(anchor_result)
 
             save_optimization_sidecar(
                 opt_yaml,
@@ -1036,7 +1039,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
                 if isinstance(r.payload, EncodedChunk) and r.state == ArtifactState.COMPLETE
             ],
             selected_strategies = selected,
-            synthetic_targets   = list(self._synthetic_targets),
+            anchor_targets   = list(self._anchor_targets),
             anchor              = self._anchor_name,
         )
 
@@ -1212,11 +1215,11 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
     ) -> str | None:
         """The measurement anchor: smallest-size survivor with metrics.
 
-        Chosen strictly AFTER pruning — the ruler must never be a dominated
+        Chosen strictly AFTER pruning — the anchor must never be a dominated
         (or about-to-be-pruned) size-tied duplicate. The anchor is the only
         front member selectable without a quality opinion; ties break
         deterministically by resolved-strategy order. Survivors without
-        compared statistics cannot anchor (the ruler would be empty).
+        compared statistics cannot anchor (the anchor targets would be empty).
 
         Args:
             results:        Per-strategy test results.
@@ -1240,14 +1243,15 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         ).strategy
 
     @staticmethod
-    def _synthetic_targets_from(anchor: StrategyRow | None) -> list[QualityTarget]:
-        """The anchor's aggregated metrics as the synthetic target set.
+    def _anchor_targets_from(anchor: StrategyRow | None) -> list[QualityTarget]:
+        """The anchor's aggregated metrics as the anchor target set.
 
-        Restricted to the fixed-mode comparison statistics — the ruler pipes
-        straight into the presentation machinery, so its breadth also bounds
-        the chunk log lines and the winner-limiter table. Worst-chunk values
-        match search-mode per-chunk strictness. Presentation data only —
-        never search goals, pass/fail gates, or selection thresholds.
+        Restricted to the fixed-mode comparison statistics — the anchor
+        targets pipe straight into the presentation machinery, so their
+        breadth also bounds the chunk log lines and the winner-limiter
+        table. Worst-chunk values match search-mode per-chunk strictness.
+        Presentation data only — never search goals, pass/fail gates, or
+        selection thresholds.
 
         Args:
             anchor: The anchor's test result, or ``None`` (empty set).
@@ -1366,20 +1370,21 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         tolerance = self._config.encoding.optimize_tolerance
         all_rows  = list(results)
         if plan.fixed_quality:
-            ruler: Ruler | None = (
-                Ruler(kind="anchor", anchor=anchor_name)
-                if anchor_name is not None else None
+            table = ComparisonTable(
+                rows               = all_rows,
+                anchor             = anchor_name,
+                marks              = {name: Mark(selected=True) for name in selected},
+                mark_legend        = "selected",
+                size_tolerance_pct = tolerance,
             )
         else:
-            ruler = Ruler(kind="targets", targets=tuple(plan.targets))
-
-        table = ComparisonTable(
-            rows               = all_rows,
-            ruler              = ruler,
-            marks              = {name: Mark(selected=True) for name in selected},
-            mark_legend        = "selected",
-            size_tolerance_pct = tolerance,
-        )
+            table = ComparisonTable(
+                rows               = all_rows,
+                targets            = tuple(plan.targets),
+                marks              = {name: Mark(selected=True) for name in selected},
+                mark_legend        = "selected",
+                size_tolerance_pct = tolerance,
+            )
         for line in render_comparison_table(table):
             logger.info(line)
 
@@ -1432,7 +1437,7 @@ def _wipe_encoded_dir(work_dir: Path, strategies: list[Strategy]) -> None:
     unique data lives here.  ``EncodingPhase._recover()`` will re-discover
     attempts from ``encoding/`` and re-evaluate them from scratch.
 
-    Called when quality targets or ``metrics_sampling`` change, since both
+    Called when quality targets or ``sampling`` change, since both
     invalidate the selected winners and their recorded metrics.
 
     If the strategy list does not cover all subdirs present (e.g. strategies
@@ -1521,7 +1526,7 @@ def _make_encoder(
     collector:        MetricsCollector,
     crop_params:      CropParams | None,
     visual_hash:      bool = True,
-    metrics_sampling: int  = 3,
+    sampling:        int  = 3,
     cleanup_level:    CleanupLevel = CleanupLevel.NONE,
     metric_prefix:    MetricKey = MetricKey.OPTIMIZATION,
 ) -> ChunkEncoder:
@@ -1531,7 +1536,7 @@ def _make_encoder(
     subset: dotted timing keys are prefixed by ``metric_prefix``
     (``optimization.<strategy>``, ``optimization.quality_measure``) and the
     run's ``cleanup_level`` enables rolling attempt cleanup after each pair
-    converges. Test encodes are always measured — the anchor's synthetic
+    converges. Test encodes are always measured — the anchor's anchor
     target set is derived from them (fixed-quality spec Req 8.1), regardless
     of the encoding phase's measurement control.
 
@@ -1539,7 +1544,7 @@ def _make_encoder(
         work_dir:         Pipeline working directory.
         crop_params:      Crop parameters to apply.
         visual_hash:      Whether to prepend emoji hash to chunk log lines.
-        metrics_sampling: Frame subsampling factor for quality metric generation.
+        sampling:        Frame subsampling factor for quality metric generation.
         cleanup_level:    Run cleanup level for rolling attempt cleanup.
         metric_prefix:    Top-level key prefixing the encoder's dotted keys.
 
@@ -1548,13 +1553,13 @@ def _make_encoder(
     """
     from pyqenc.phases.encoding import ChunkEncoder
     return ChunkEncoder(
-        quality_evaluator = QualityMeasurer(work_dir),
+        quality_measurer = QualityMeasurer(work_dir),
         work_dir          = work_dir,
         collector         = collector,
         crop_params       = crop_params,
         cleanup_level     = cleanup_level,
         visual_hash       = visual_hash,
-        metrics_sampling  = metrics_sampling,
+        sampling         = sampling,
         metric_prefix     = metric_prefix,
         measure_attempts  = True,
     )

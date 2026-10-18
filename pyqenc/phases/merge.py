@@ -80,7 +80,6 @@ from pyqenc.summary_tables import (
     ComparisonTable,
     Mark,
     MetricStatMap,
-    Ruler,
     SourceInfo,
     StrategyRow,
     render_comparison_table,
@@ -90,7 +89,7 @@ from pyqenc.utils.ffmpeg_runner import FrameCountError, get_frame_count
 from pyqenc.utils.fs import remove_stale_tmp_files, safe_stat_size
 from pyqenc.utils.log_format import fmt_key_value_table, fmt_metric_value
 from pyqenc.utils.long_path import LongPath
-from pyqenc.utils.visualization import QualityMeasurer, create_crf_plot
+from pyqenc.utils.visualization import QualityMeasurer, create_quality_plot
 from pyqenc.utils.yaml_utils import load_model, save_model
 
 # ---------------------------------------------------------------------------
@@ -139,7 +138,7 @@ class FixedMergedOutputSidecar(_MergedSidecarBase):
     A quality change re-merges automatically — the collapsed range puts
     the value in the output's own name (``<LABEL>=<q>``), so a different
     quality means a different expected file. Fixed runs carry NO targets:
-    the judging ruler is the anchor-derived synthetic set, computed live.
+    the judging reference is the anchor-derived anchor target set, computed live.
     """
 
     mode:    Literal["fixed"] = "fixed"
@@ -188,7 +187,7 @@ class MergeSidecar(BaseModel):
     The per-output sidecars are the acceptance records (Req 28): this file
     carries no identity and no invalidation keys; its absence costs summary
     replay only, never correctness. The rows are ``StrategyRow`` — THE
-    shared row shape — carrying the rendered basis (the presentation bar's
+    shared row shape — carrying the rendered basis (the presentation
     keys: target statistics in search, the fixed comparison statistics);
     full retention lives on the per-video sidecars, and discrepancies
     re-actualize through the invalidation ladder.
@@ -381,10 +380,10 @@ class MergePhase(Phase[MergePhaseResult]):
 
     _OUTPUT_SUFFIX       = ".mkv"
     # Optimization is a declared (direct) dependency because the fixed-run
-    # ruler and anchor flow from its result; it is transitively guaranteed
-    # via Encoding anyway. Audio is NOT a dependency: merge is video-only and
-    # never reads the audio result — `auto` schedules audio via its terminal
-    # position, not via this tuple.
+    # anchor and its anchor targets flow from its result; it is transitively
+    # guaranteed via Encoding anyway. Audio is NOT a dependency: merge is
+    # video-only and never reads the audio result — `auto` schedules audio
+    # via its terminal position, not via this tuple.
     DEPENDS_ON:  ClassVar[tuple[type[Phase], ...]] = (
         JobPhase, ExtractionPhase, ProbePhase, OptimizationPhase,
         EncodingPhase,
@@ -628,10 +627,10 @@ class MergePhase(Phase[MergePhaseResult]):
 
         return Recovery.from_artifacts(rows)
 
-    def _presentation_bar(self) -> list[QualityTarget]:
-        """The live verdict bar for SEARCH runs: the configured targets.
+    def _verdict_targets(self) -> list[QualityTarget]:
+        """The live verdict targets for SEARCH runs: the configured targets.
 
-        Fixed runs carry no interim bar — the merge ruler (the merge anchor)
+        Fixed runs carry no interim verdict targets — the merge anchor
         exists only once the full-movie population completes, and the test
         anchor's values participate nowhere at merge (Req 3.2); the table is
         the fixed verdict surface.
@@ -642,12 +641,12 @@ class MergePhase(Phase[MergePhaseResult]):
         return list(plan.targets)
 
     def _live_verdict(self, metrics: dict[str, float]) -> bool:
-        """The live pass/fail against the presentation bar (Req 51).
+        """The live pass/fail against the verdict targets (Req 51).
 
-        Fixed runs without a bar carry no verdict basis — ``True`` with
+        Fixed runs carry no verdict reference — ``True`` with
         empty targets is the vacuous truth.
         """
-        return not QualitySearchBase.failed_targets(metrics, self._presentation_bar())
+        return not QualitySearchBase.failed_targets(metrics, self._verdict_targets())
 
     def _sidecar_builder(self) -> _SidecarBuilder:
         """The current run's acceptance inputs for per-file record checks."""
@@ -665,7 +664,7 @@ class MergePhase(Phase[MergePhaseResult]):
     def _rendered_basis(self, measured: dict[str, float]) -> MetricStatMap:
         """The rendered basis of one output's measurement — what rows persist.
 
-        The presentation bar's keys: the configured target statistics in
+        The presentation reference's keys: the configured target statistics in
         search, the fixed comparison statistics in fixed mode (the merge
         anchor election and the table both consume them; full retention
         stays on the per-video sidecars).
@@ -690,9 +689,10 @@ class MergePhase(Phase[MergePhaseResult]):
         merge_yaml = job_result.work_dir / MergePhase.SIDECAR_NAME
         persisted  = load_model(merge_yaml, MergeSidecar)
         if persisted is not None:
-            # The replay re-derives ruler and marks live from the persisted
-            # rows (byte-identical to the producing run's table; a changed
-            # verdict bar re-renders old rows correctly, Req 6.7).
+            # The replay re-derives the comparison basis and marks live from
+            # the persisted rows (byte-identical to the producing run's
+            # table; a changed verdict reference re-renders old rows
+            # correctly, Req 6.7).
             self._render_merge_summary(persisted.summary, persisted.output_dir)
         else:
             logger.info("  No summary data saved — re-run to generate.")
@@ -869,27 +869,27 @@ class MergePhase(Phase[MergePhaseResult]):
                     except (OSError, ValueError) as exc:
                         logger.warning("  Could not measure quality: %s", exc)
 
-                    # CRF distribution plot — reads the typed winners field
-                    crf_data = MergePhase._collect_crf_data(
+                    # Quality distribution plot — reads the typed winners field
+                    quality_data = MergePhase._collect_quality_data(
                         self._deps[JobPhase].work_dir,
                         self._deps[EncodingPhase].winners,
                         strategy_name,
                     )
-                    if crf_data:
-                        crf_plot_path = merged_dir / f"{output_file.stem}.crf.png"
+                    if quality_data:
+                        quality_plot_path = merged_dir / f"{output_file.stem}.quality.png"
                         try:
-                            qlabel = self._deps[EncodingPhase].quality_labels.get(strategy_name, "CRF")
-                            create_crf_plot(
-                                chunks        = crf_data,
-                                output_path   = crf_plot_path,
+                            qlabel = self._deps[EncodingPhase].quality_labels.get(strategy_name, "quality")
+                            create_quality_plot(
+                                chunks        = quality_data,
+                                output_path   = quality_plot_path,
                                 title         = f"{qlabel}\n{output_file.stem.replace(TIME_SEPARATOR_MS, ".").replace(TIME_SEPARATOR_SAFE, ":")}",
                                 quality_label = qlabel,
                             )
-                            logger.debug("  CRF plot saved: %s", crf_plot_path.name)
+                            logger.debug("  Quality plot saved: %s", quality_plot_path.name)
                         except (OSError, ValueError) as exc:
-                            logger.warning("  Could not generate CRF plot: %s", exc)
+                            logger.warning("  Could not generate quality plot: %s", exc)
                     else:
-                        logger.warning("No CRF data available for strategy %s — skipping CRF plot", strategy_name)
+                        logger.warning("No quality data available for strategy %s — skipping quality plot", strategy_name)
 
                     # Write the per-output acceptance record (facts + identity,
                     # no verdict — Req 27).
@@ -955,8 +955,8 @@ class MergePhase(Phase[MergePhaseResult]):
         if output_dir is not None:
             self._render_merge_summary(strategy_summaries, output_dir)
             # Persist merge.yaml: the summary replay aggregate ONLY (Req 28)
-            # — the per-output sidecars are the acceptance records; ruler and
-            # marks re-derive live at replay.
+            # — the per-output sidecars are the acceptance records; the
+            # comparison basis and marks re-derive live at replay.
             save_model(
                 self._deps[JobPhase].work_dir / MergePhase.SIDECAR_NAME,
                 MergeSidecar(output_dir=output_dir, summary=strategy_summaries),
@@ -1138,7 +1138,7 @@ class MergePhase(Phase[MergePhaseResult]):
 
         Sizes are recorded at merge time (persisted sizes drive the table and
         the replay — no live re-stat, Req 6.7); metrics carry ONLY the
-        rendered basis (the presentation bar's keys) — full measured stats
+        rendered basis (the verdict reference's keys) — full measured stats
         live on the per-video sidecars, the re-measure-avoidance record.
 
         Args:
@@ -1169,7 +1169,7 @@ class MergePhase(Phase[MergePhaseResult]):
     ) -> tuple[dict[str, float], Path | None]:
         """Measure the final output against the source (measurement only).
 
-        The evaluator takes no target set (Req 52): measurement requires the
+        The measurer takes no target set (Req 52): measurement requires the
         file, the reference, and the sampling — nothing else. Verdicts are
         applied by the caller as pure functions over the returned facts
         (Req 53). Raw metric ``.tmp`` files are written to ``output_dir``
@@ -1184,10 +1184,10 @@ class MergePhase(Phase[MergePhaseResult]):
         Returns:
             Tuple of ``(metrics_dict, plot_path)``.
         """
-        evaluator = QualityMeasurer(output_dir)
+        measurer   = QualityMeasurer(output_dir)
         plot_path = output_dir / f"{final_result.stem}.png"
 
-        evaluation = evaluator.measure_chunk(
+        measurement = measurer.measure_chunk(
             encoded            = final_result,
             reference          = source_stream.stream.as_input(),
             ref_crop           = ref_crop,
@@ -1195,13 +1195,13 @@ class MergePhase(Phase[MergePhaseResult]):
             duration_seconds   = source_stream.stream.info.duration_seconds or 0.0,
             fps_value          = source_stream.stream.info.fps_fraction,
             metrics_output_dir = output_dir,
-            subsample_factor   = self._config.measurement.sampling,
+            sampling           = self._config.measurement.sampling,
             show_progress      = show_progress,
             plot_path          = plot_path,
         )
 
-        metrics_dict = flatten_metric_stats(evaluation.metrics)
-        return metrics_dict, evaluation.logs.plot if evaluation.logs.plot else None
+        metrics_dict = flatten_metric_stats(measurement.metrics)
+        return metrics_dict, measurement.logs.plot if measurement.logs.plot else None
 
     def _fmt_inline_metrics(
         self,
@@ -1210,10 +1210,11 @@ class MergePhase(Phase[MergePhaseResult]):
         """Return a compact single-line metrics string for the completion log line.
 
         Search runs mark ``✔``/``✘`` per target (the configured targets are
-        the bar — available upfront). Fixed runs show the comparison values
-        WITHOUT verdicts: the merge ruler exists only after the full-movie
-        population completes (the test anchor's values participate nowhere,
-        Req 3.2) — the table is the fixed verdict surface.
+        the judging reference — available upfront). Fixed runs show the
+        comparison values WITHOUT verdicts: the merge anchor exists only
+        after the full-movie population completes (the test anchor's values
+        participate nowhere, Req 3.2) — the table is the fixed verdict
+        surface.
 
         Args:
             metrics_dict: Measured metric values keyed by ``"{metric}_{statistic}"``.
@@ -1257,12 +1258,12 @@ class MergePhase(Phase[MergePhaseResult]):
         immediately visible where the merge happened.
 
         Suppressed on fixed-quality runs: the config targets are search-tuned
-        vocabulary and would read as all-miss noise at a pinned knob — the
+        vocabulary and would read as all-miss noise at a fixed knob — the
         merged-output measurement itself remains the final check.
 
         Args:
             quality_targets: The run's resolved quality targets (the plan's).
-            fixed_quality:   Whether the run pins the quality knob.
+            fixed_quality:   Whether the run fixes the quality knob.
             strategy_name:   The merged strategy.
             metrics_dict:    Measured metrics keyed by ``"{metric}_{statistic}"``.
         """
@@ -1286,8 +1287,8 @@ class MergePhase(Phase[MergePhaseResult]):
         """Render the unified merge comparison table from persisted rows.
 
         The single rendering path for processing and replay alike (Req 6):
-        rows + a live-derived ruler and marks. Fixed mode elects the MERGE
-        anchor over the full-movie rows (the test anchor's values
+        rows + a live-derived comparison basis and marks. Fixed mode elects
+        the MERGE anchor over the full-movie rows (the test anchor's values
         participate nowhere, Req 3.2) and the below-table anchor-audit line
         compares the two elections; search mode rules by the configured
         targets with live all-targets-pass verdicts. Below the table: the
@@ -1309,16 +1310,15 @@ class MergePhase(Phase[MergePhaseResult]):
             size_bytes = safe_stat_size(job_result.file.payload.path) or 0,
         )
 
-        marks: dict[str, Mark] = {}
-        ruler:  Ruler | None
+        marks:  dict[str, Mark] = {}
+        anchor: str | None      = None
         if plan.fixed_quality:
-            tolerance     = self._config.encoding.optimize_tolerance
-            names         = [r.strategy for r in summaries]
-            survivors     = OptimizationPhase._dominance_survivors(summaries, tolerance)
-            merge_anchor  = OptimizationPhase._select_anchor(summaries, names, survivors)
-            ruler         = Ruler(kind="anchor", anchor=merge_anchor) if merge_anchor else None
+            tolerance    = self._config.encoding.optimize_tolerance
+            names        = [r.strategy for r in summaries]
+            survivors    = OptimizationPhase._dominance_survivors(summaries, tolerance)
+            merge_anchor = OptimizationPhase._select_anchor(summaries, names, survivors)
+            anchor       = merge_anchor
         else:
-            ruler = Ruler(kind="targets", targets=tuple(plan.targets))
             for row in summaries:
                 verdict = all(
                     (value := row.metrics.get(target.key())) is not None and value >= target.value
@@ -1334,7 +1334,8 @@ class MergePhase(Phase[MergePhaseResult]):
 
         table = ComparisonTable(
             rows        = list(summaries),
-            ruler       = ruler,
+            targets     = None if plan.fixed_quality else tuple(plan.targets),
+            anchor      = anchor,
             source      = source,
             marks       = marks,
             mark_legend = "recommended",
@@ -1342,14 +1343,14 @@ class MergePhase(Phase[MergePhaseResult]):
         for line in render_comparison_table(table):
             logger.info(line)
 
-        if plan.fixed_quality and ruler is not None:
+        if plan.fixed_quality and anchor is not None:
             test_anchor = self._deps[OptimizationPhase].anchor
-            if test_anchor == ruler.anchor:
-                logger.info("Anchor stayed the same: %s", ruler.anchor)
+            if test_anchor == anchor:
+                logger.info("Anchor stayed the same: %s", anchor)
             elif test_anchor is not None:
                 logger.warning(
                     "Anchor has shifted since optimization: %s (test) → %s (full)",
-                    test_anchor, ruler.anchor,
+                    test_anchor, anchor,
                 )
 
         logger.info("")
@@ -1362,12 +1363,12 @@ class MergePhase(Phase[MergePhaseResult]):
             )
 
     @staticmethod
-    def _collect_crf_data(
+    def _collect_quality_data(
         work_dir: Path,
         winners:  list[Artifact[EncodedChunk]],
         strategy: str,
     ) -> list[tuple[float, float, Decimal]]:
-        """Extract ``(start_seconds, end_seconds, crf)`` tuples for a strategy's winners.
+        """Extract ``(start_seconds, end_seconds, quality)`` tuples for a strategy's winners.
 
         The winning quality is a fact of the winner result sidecar (Req 3/4) —
         read here on this rare re-merge processing path, never at recovery.
@@ -1379,7 +1380,7 @@ class MergePhase(Phase[MergePhaseResult]):
             strategy: Strategy display name to filter by.
 
         Returns:
-            List of ``(start_s, end_s, crf)`` sorted by start time.
+            List of ``(start_s, end_s, quality)`` sorted by start time.
         """
         result: list[tuple[float, float, Decimal]] = []
         for row in winners:
@@ -1390,14 +1391,14 @@ class MergePhase(Phase[MergePhaseResult]):
             if sidecar is None:
                 logger.warning(
                     "Winner %s has no readable sidecar — excluded "
-                    "from the CRF plot",
+                    "from the quality plot",
                     payload.chunk.safe_name(),
                 )
                 continue
             result.append((
                 payload.chunk.start_timestamp,
                 payload.chunk.end_timestamp,
-                sidecar.crf,
+                sidecar.quality,
             ))
         result.sort(key=lambda t: t[0])
         return result

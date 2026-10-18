@@ -167,7 +167,7 @@ def _format_duration(seconds: int) -> str:
 @dataclass
 class ConvergenceUpdate:
     """Passed by phases to :meth:`MetricsCollector.step` when a chunk's
-    CRF search converges.
+    quality search converges.
     """
 
     strategy:      str  # display name (with + separators)
@@ -190,7 +190,7 @@ class AttemptStats(BaseModel):
 
 
 class ConvergenceStats(BaseModel):
-    """CRF convergence statistics for a single encoding strategy."""
+    """Quality convergence statistics for a single encoding strategy."""
 
     strategy: str
     chunks:   int
@@ -515,7 +515,7 @@ def _compute_dotted_groups(store: MetricsStore) -> dict[str, DottedGroup]:
 class YamlMetricsCollector(MetricsCollector):
     """Concrete YAML-backed implementation of :class:`MetricsCollector`.
 
-    Accumulates wall-clock timing and CRF convergence data throughout a
+    Accumulates wall-clock timing and quality convergence data throughout a
     pipeline run and persists them incrementally to ``metrics.yaml`` in the
     work directory root using the `.tmp`-then-rename atomic write protocol.
 

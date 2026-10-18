@@ -938,7 +938,7 @@ class TestMissedTargetsWarning:
         assert not [r for r in caplog.records if r.levelno == _logging.WARNING]
 
     def test_warning_suppressed_on_fixed_quality_runs(self, caplog) -> None:
-        """Config targets are search-tuned vocabulary — at a pinned knob they
+        """Config targets are search-tuned vocabulary — at a fixed knob they
         would read as all-miss noise, so the warning stays silent (Req 9.6)."""
         import logging as _logging
 
@@ -977,15 +977,15 @@ class TestMissedTargetsWarning:
 # Fixed-run merged-output naming (TODO §86 quick fix)
 # ---------------------------------------------------------------------------
 
-def _fixed_strategy_fixture(pinned: str, granularity: str = "0.5", label: str = "CRF") -> Strategy:
-    """A strategy whose codec range is collapsed at *pinned*."""
+def _fixed_strategy_fixture(fixed: str, granularity: str = "0.5", label: str = "CRF") -> Strategy:
+    """A strategy whose codec range is collapsed at the *fixed* value."""
     from decimal import Decimal
 
     from pyqenc.models import CodecConfig
 
     codec = CodecConfig(
-        name="h265-10bit", default_quality=Decimal(pinned), default_preset="slow",
-        quality_range=(Decimal(pinned), Decimal(pinned)),
+        name="h265-10bit", default_quality=Decimal(fixed), default_preset="slow",
+        quality_range=(Decimal(fixed), Decimal(fixed)),
         quality_granularity=Decimal(granularity),
         quality_label=label, presets=["slow"],
     )
@@ -1001,22 +1001,22 @@ class TestPinnedQualitySuffix:
     def test_quantized_to_strategy_granularity(self) -> None:
         """-q 18 at 0.5 granularity renders 18.0 — uniform with 17.5-style
         siblings, never 'CRF=18' next to 'CRF=17.5'."""
-        assert MergedVideo.pinned_quality_suffix(_fixed_strategy_fixture("18")) == " CRF=18.0"
-        assert MergedVideo.pinned_quality_suffix(_fixed_strategy_fixture("17.5")) == " CRF=17.5"
+        assert MergedVideo.fixed_quality_suffix(_fixed_strategy_fixture("18")) == " CRF=18.0"
+        assert MergedVideo.fixed_quality_suffix(_fixed_strategy_fixture("17.5")) == " CRF=17.5"
 
     def test_integer_granularity_stays_integral(self) -> None:
         strategy = _fixed_strategy_fixture("18", granularity="1", label="QP")
-        assert MergedVideo.pinned_quality_suffix(strategy) == " QP=18"
+        assert MergedVideo.fixed_quality_suffix(strategy) == " QP=18"
 
     def test_spelling_independent(self) -> None:
         """CLI '18' and profile '18.0' quantize to the identical name form."""
-        assert MergedVideo.pinned_quality_suffix(_fixed_strategy_fixture("18")) == " CRF=18.0"
-        assert MergedVideo.pinned_quality_suffix(_fixed_strategy_fixture("18.0")) == " CRF=18.0"
+        assert MergedVideo.fixed_quality_suffix(_fixed_strategy_fixture("18")) == " CRF=18.0"
+        assert MergedVideo.fixed_quality_suffix(_fixed_strategy_fixture("18.0")) == " CRF=18.0"
 
     def test_label_sanitized_filesystem_safe(self) -> None:
         """VBR labels like Mbit/s land filesystem-safe in the name."""
         strategy = _fixed_strategy_fixture("20", granularity="0.5", label="Mbit/s")
-        assert MergedVideo.pinned_quality_suffix(strategy) == " Mbit_s=20.0"
+        assert MergedVideo.fixed_quality_suffix(strategy) == " Mbit_s=20.0"
 
     def test_ranged_strategy_carries_no_suffix(self) -> None:
         """Search-mode outputs get no quality distinguisher (Req 7)."""
@@ -1030,7 +1030,7 @@ class TestPinnedQualitySuffix:
             quality_range=(Decimal("6"), Decimal("30")), presets=["slow"],
         )
         strategy = Strategy(preset="slow", profile="h265-aq", codec=codec, profile_args=[])
-        assert MergedVideo.pinned_quality_suffix(strategy) == ""
+        assert MergedVideo.fixed_quality_suffix(strategy) == ""
         assert MergedVideo.output_file_name("test", strategy) == "test h265-aq+slow.mkv"
 
     def test_non_uniform_fixed_run_each_output_suffixed(self, tmp_path: Path) -> None:
@@ -1246,7 +1246,7 @@ class TestMergeYamlReplayAggregate:
     """merge.yaml = the summary replay rows only (Req 28/61)."""
 
     def test_summary_only_no_basis(self, tmp_path: Path) -> None:
-        """No basis marker exists: replay re-renders ruler and marks live from
+        """No basis marker exists: replay re-renders the basis and marks live from
         the rows, so nothing downstream needs the rendering basis. The rows
         are the shared StrategyRow shape (sizes recorded at merge time — no
         output paths on rows; the outputs' directory persists once)."""
@@ -1287,9 +1287,9 @@ class TestUnifiedMergeSummary:
     def test_fixed_table_rules_by_merge_anchor_and_holds(
         self, tmp_path: Path, caplog,
     ) -> None:
-        """Fixed mode: the ruler is the MERGE anchor row; the audit line
+        """Fixed mode: the basis is the MERGE anchor row; the audit line
         reports the two elections agreeing; the inline completion line shows
-        the comparison values WITHOUT verdicts (no interim ruler exists)."""
+        the comparison values WITHOUT verdicts (no interim reference exists)."""
         import logging as _logging
 
         with caplog.at_level(_logging.INFO, logger="pyqenc.phases.merge"):
@@ -1313,7 +1313,7 @@ class TestUnifiedMergeSummary:
     def test_search_table_targets_ride_the_source_row(
         self, tmp_path: Path, caplog,
     ) -> None:
-        """Search mode: the configured targets are the ruler, riding the
+        """Search mode: the configured targets are the basis, riding the
         source row; strategy rows carry live verdicts (all-targets-pass —
         the vif target is unmeasured here, so the row misses)."""
         import logging as _logging

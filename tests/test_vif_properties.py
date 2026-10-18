@@ -285,7 +285,7 @@ def test_generate_metrics_vif_shares_vmaf_path(tmp_path: Path) -> None:
                 reference        = FFmpegInput(path=tmp_path / "reference.mkv"),
                 ref_crop         = __import__("pyqenc.models", fromlist=["CropParams"]).CropParams(),
                 output_prefix    = str(tmp_path / "test."),
-                metrics_sampling = 1,
+                sampling         = 1,
                 cwd              = tmp_path,
             )
         )
@@ -424,7 +424,7 @@ def test_passes_direction_higher_is_better(actual: float, target: float) -> None
 
 
 # ---------------------------------------------------------------------------
-# Property 13: Target evaluation direction-awareness
+# Property 13: Target judging direction-awareness
 # ---------------------------------------------------------------------------
 
 
@@ -434,7 +434,7 @@ def test_vif_target_evaluation_direction(actual: float, target_val: float) -> No
     """Property 13: VIF target met iff actual >= target_val.
 
     Validates: Requirements 7.4
-    # Feature: vif-metric-support, Property 13: Target evaluation direction-awareness
+    # Feature: vif-metric-support, Property 13: Target judging direction-awareness
     """
     assert MetricType.VIF.info.passes(actual, target_val) == (actual >= target_val)
 
@@ -465,10 +465,10 @@ def test_sidecar_vif_keys(vif_stats: dict[str, float]) -> None:
     Validates: Requirements 9.1
     # Feature: vif-metric-support, Property 14: Sidecar YAML VIF key generation
     """
-    from pyqenc.quality import ChunkQualityStats, MetricStats
+    from pyqenc.quality import MetricStats, PerMetricStats
 
     # hypothesis-generated dict — runtime shape is the test's own strategy
-    stats: ChunkQualityStats = {MetricType.VIF: cast(MetricStats, vif_stats)}
+    stats: PerMetricStats = {MetricType.VIF: cast(MetricStats, vif_stats)}
     flat: dict[str, float] = {
         f"{mt.value}_{stat}": value
         for mt, ms in stats.items()

@@ -21,10 +21,10 @@ from pyqenc.constants import (
 )
 from pyqenc.models import CropParams
 from pyqenc.quality import (
-    ChunkQualityStats,
     FullMetricStatistics,
     MetricStats,
     MetricType,
+    PerMetricStats,
     QualityLogs,
     QualityMeasurement,
     run_metrics,
@@ -116,12 +116,12 @@ _MARKER_SIZE:      int   = 10
 _MARKER_ALPHA:     float = 0.9
 _TIGHT_LAYOUT_PAD: float = 0.0   # outer padding for tight_layout (default ~1.08 is too large)
 
-# CRF plot
-_CRF_COLOR:       str   = "#8B0000"   # dark red
-_CRF_Y_MIN:       float = 0.0
-_CRF_Y_MAX:       float = 42.0        # assuming 40 is max sane CRF for the plot + a little spacing
-_CRF_Y_MAJOR_TICK: float = 5.0
-_CRF_Y_MINOR_TICK: float = 1.0
+# Quality plot
+_QUALITY_COLOR:       str   = "#8B0000"   # dark red
+_QUALITY_Y_MIN:       float = 0.0
+_QUALITY_Y_MAX:       float = 42.0        # assuming 40 is max sane quality value for the plot + a little spacing
+_QUALITY_Y_MAJOR_TICK: float = 5.0
+_QUALITY_Y_MINOR_TICK: float = 1.0
 
 # VIF metric colors
 _VIF_COLOR:      str = "#7B2D8B"   # purple
@@ -584,7 +584,7 @@ def create_unified_plot(
         # Capture total_frames before converting index to seconds
         total_frames_for_summary: int = int(max(idx.max() for idx in frame_index.values()) + frame_offset) + 1
 
-        # Convert x-axis to seconds so tick positions align with the CRF plot.
+        # Convert x-axis to seconds so tick positions align with the quality plot.
         # frame_index values are frame numbers; divide by fps to get seconds.
         for mt in list(frame_index.keys()):
             frame_index[mt] = frame_index[mt] / fps_val
@@ -917,7 +917,7 @@ def normalize_metrics(df_raw: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
-def compute_metric_stats(df_norm: pd.DataFrame) -> ChunkQualityStats:
+def compute_metric_stats(df_norm: pd.DataFrame) -> PerMetricStats:
     """Compute key statistics for each metric column in a normalized DataFrame.
 
     For each column whose name matches a ``MetricType.value``, calls
@@ -928,10 +928,10 @@ def compute_metric_stats(df_norm: pd.DataFrame) -> ChunkQualityStats:
         df_norm: Normalized DataFrame (output of ``normalize_metrics``).
 
     Returns:
-        ``ChunkQualityStats`` mapping each recognized ``MetricType`` to its
+        ``PerMetricStats`` mapping each recognized ``MetricType`` to its
         ``MetricStats``.
     """
-    result: ChunkQualityStats = {}
+    result: PerMetricStats = {}
     for col in df_norm.columns:
         try:
             mt = MetricType(col)
@@ -948,14 +948,14 @@ def compute_metric_stats(df_norm: pd.DataFrame) -> ChunkQualityStats:
 
 
 # ---------------------------------------------------------------------------
-# CRF distribution plot
+# Quality distribution plot
 # ---------------------------------------------------------------------------
 
-def create_crf_plot(
+def create_quality_plot(
     chunks:        list[tuple[float, float, Decimal]],
     output_path:   Path,
-    title:         str = "CRF Distribution",
-    quality_label: str = "CRF",
+    quality_label: str,
+    title:         str = "Quality Distribution",
 ) -> None:
     """Create a quality-parameter-over-time plot and save it to disk.
 
@@ -965,9 +965,9 @@ def create_crf_plot(
         chunks:        List of ``(start_seconds, end_seconds, quality_value)`` tuples,
                        one per winning chunk, in timeline order.
         output_path:   Destination path for the saved PNG.
-        title:         Plot title.
         quality_label: Human-readable label for the quality axis (e.g. ``"CRF"``,
-                       ``"CQ"``).  Defaults to ``"CRF"``.
+                       ``"CQ"``).
+        title:         Plot title.
 
     Raises:
         ValueError: If ``chunks`` is empty.
@@ -977,7 +977,7 @@ def create_crf_plot(
 
     starts = np.array([c[0] for c in chunks])
     ends   = np.array([c[1] for c in chunks])
-    crfs   = np.array([float(c[2]) for c in chunks])
+    qualities   = np.array([float(c[2]) for c in chunks])
 
     plt.style.use("seaborn-v0_8")
     plt.rcParams["axes.grid"] = False
@@ -998,18 +998,18 @@ def create_crf_plot(
     ax_left.set_axisbelow(True)
     ax_right.set_axisbelow(True)
 
-    def _configure_crf_axis(ax: plt.Axes) -> None:
-        ax.set_ylabel(quality_label, color=_CRF_COLOR, fontsize=_FONT_AXIS_LABEL, fontweight="bold")
-        ax.set_ylim(_CRF_Y_MIN, _CRF_Y_MAX)
-        ax.tick_params(axis="y", labelcolor=_CRF_COLOR, labelsize=_FONT_AXIS_TICKS)
-        ax.yaxis.set_major_locator(plt.MultipleLocator(_CRF_Y_MAJOR_TICK))
-        ax.yaxis.set_minor_locator(plt.MultipleLocator(_CRF_Y_MINOR_TICK))
+    def _configure_quality_axis(ax: plt.Axes) -> None:
+        ax.set_ylabel(quality_label, color=_QUALITY_COLOR, fontsize=_FONT_AXIS_LABEL, fontweight="bold")
+        ax.set_ylim(_QUALITY_Y_MIN, _QUALITY_Y_MAX)
+        ax.tick_params(axis="y", labelcolor=_QUALITY_COLOR, labelsize=_FONT_AXIS_TICKS)
+        ax.yaxis.set_major_locator(plt.MultipleLocator(_QUALITY_Y_MAJOR_TICK))
+        ax.yaxis.set_minor_locator(plt.MultipleLocator(_QUALITY_Y_MINOR_TICK))
         ax.set_axisbelow(True)
         ax.grid(True, which="major", alpha=_GRID_ALPHA_MAJOR, zorder=0)
         ax.grid(True, which="minor", alpha=_GRID_ALPHA_MINOR, zorder=0)
 
-    _configure_crf_axis(ax_left)
-    _configure_crf_axis(ax_right)
+    _configure_quality_axis(ax_left)
+    _configure_quality_axis(ax_right)
 
     ax_left.set_title(title, fontsize=_FONT_TITLE, fontweight="bold", pad=20)
     ax_left.tick_params(axis="x", labelsize=_FONT_AXIS_TICKS_X)
@@ -1037,11 +1037,11 @@ def create_crf_plot(
     # Main plot: step line on left axis — append sentinel at ends[-1] so last chunk reaches right edge
     order  = np.argsort(starts)
     step_x = np.append(starts[order], ends[order[-1]])
-    step_y = np.append(crfs[order],   crfs[order[-1]])
+    step_y = np.append(qualities[order],   qualities[order[-1]])
     line, = ax_left.step(
         step_x, step_y,
         where     = "post",
-        color     = _CRF_COLOR,
+        color     = _QUALITY_COLOR,
         linewidth = _LINE_WIDTH_DEFAULT,
         alpha     = _LINE_ALPHA,
         label     = quality_label,
@@ -1050,17 +1050,17 @@ def create_crf_plot(
     ax_left.legend([line], [quality_label], loc="lower right", fontsize=_FONT_LEGEND, framealpha=_LEGEND_ALPHA)
 
     # Stats subplot
-    crf_series  = pd.Series(crfs)
-    crf_stats   = compute_statistics(crf_series, std_cutoff_max=_CRF_Y_MAX)
+    quality_series  = pd.Series(qualities)
+    quality_stats   = compute_statistics(quality_series, std_cutoff_max=_QUALITY_Y_MAX)
 
     bar_labels  = ["Min", "5%", "25%", "50%", "75%", "95%", "Max"]
     stat_keys   = ["min", "p5", "p25", "p50", "p75", "p95", "max"]
-    stat_view   = cast(dict[str, float], crf_stats)
+    stat_view   = cast(dict[str, float], quality_stats)
     stat_values = [stat_view[k] for k in stat_keys]
 
     ax_stats    = fig.add_subplot(gs[1, :])
     y_positions: np.ndarray                 = np.arange(len(bar_labels))
-    base_rgb:    tuple[float, float, float] = mcolors.to_rgb(_CRF_COLOR)
+    base_rgb:    tuple[float, float, float] = mcolors.to_rgb(_QUALITY_COLOR)
     colors: list[tuple[float, ...]] = [
         tuple(c * (1 - mix) + mix for c in base_rgb)
         for mix in [0.15 + 0.40 * i / (len(bar_labels) - 1) for i in range(len(bar_labels))]
@@ -1070,15 +1070,15 @@ def create_crf_plot(
         if not (np.isnan(val) or np.isinf(val)):
             ax_stats.barh(pos, val, color=colors[i], alpha=_BAR_ALPHA, height=_BAR_HEIGHT)
             ax_stats.text(val, pos, f" {val:.1f}",
-                          va="center", ha="left", fontsize=_FONT_BAR_LABEL, color=_CRF_COLOR)
+                          va="center", ha="left", fontsize=_FONT_BAR_LABEL, color=_QUALITY_COLOR)
 
     ax_stats.set_yticks(y_positions)
     ax_stats.set_yticklabels(bar_labels, fontsize=_FONT_AXIS_TICKS)
-    ax_stats.set_xlabel(quality_label, fontsize=_FONT_SUBPLOT_XLABEL, fontweight="bold", color=_CRF_COLOR)
-    ax_stats.set_title(f"{quality_label} Distribution", fontsize=_FONT_SUBPLOT_TITLE, fontweight="bold", color=_CRF_COLOR)
-    ax_stats.tick_params(axis="x", labelcolor=_CRF_COLOR, labelsize=_FONT_AXIS_TICKS_X)
+    ax_stats.set_xlabel(quality_label, fontsize=_FONT_SUBPLOT_XLABEL, fontweight="bold", color=_QUALITY_COLOR)
+    ax_stats.set_title(f"{quality_label} Distribution", fontsize=_FONT_SUBPLOT_TITLE, fontweight="bold", color=_QUALITY_COLOR)
+    ax_stats.tick_params(axis="x", labelcolor=_QUALITY_COLOR, labelsize=_FONT_AXIS_TICKS_X)
     ax_stats.tick_params(axis="y", labelsize=_FONT_AXIS_TICKS)
-    ax_stats.set_xlim(_CRF_Y_MIN, _CRF_Y_MAX)
+    ax_stats.set_xlim(_QUALITY_Y_MIN, _QUALITY_Y_MAX)
     ax_stats.grid(True, axis="x", alpha=_GRID_ALPHA_MAJOR, zorder=0)
     ax_stats.set_axisbelow(True)
 
@@ -1086,10 +1086,10 @@ def create_crf_plot(
     summary_text = (
         f"{quality_label}:\n"
         f"  Chunks: {len(chunks)}\n"
-        f"  Min: {crf_stats['min']:>5.1f}\n"
-        f"  Med: {crf_stats['p50']:>5.1f}\n"
-        f"  Max: {crf_stats['max']:>5.1f}\n"
-        f"  Std: {crf_stats['std']:>5.1f}"
+        f"  Min: {quality_stats['min']:>5.1f}\n"
+        f"  Med: {quality_stats['p50']:>5.1f}\n"
+        f"  Max: {quality_stats['max']:>5.1f}\n"
+        f"  Std: {quality_stats['std']:>5.1f}"
     )
 
     with warnings.catch_warnings():
@@ -1104,14 +1104,14 @@ def create_crf_plot(
         transform         = fig.transFigure,
         fontsize          = _FONT_SUMMARY_BOX,
         verticalalignment = "bottom",
-        bbox              = {"boxstyle": "round", "facecolor": _CRF_COLOR, "alpha": _SUMMARY_BOX_METRIC_ALPHA},
+        bbox              = {"boxstyle": "round", "facecolor": _QUALITY_COLOR, "alpha": _SUMMARY_BOX_METRIC_ALPHA},
         family            = "monospace",
     )
 
     fig.set_size_inches(_FIG_WIDTH, _FIG_HEIGHT)
     fig.savefig(output_path, dpi=_PLOT_DPI)
     plt.close(fig)
-    logger.debug("CRF plot saved to %s", output_path)
+    logger.debug("Quality plot saved to %s", output_path)
 
 
 class QualityMeasurer:
@@ -1122,7 +1122,7 @@ class QualityMeasurer:
     """
 
     def __init__(self, work_dir: Path) -> None:
-        """Initialize quality evaluator.
+        """Initialize quality measurer.
 
         Args:
             work_dir: Working directory for metric artifacts
@@ -1135,7 +1135,7 @@ class QualityMeasurer:
         reference:        FFmpegInput,
         ref_crop:         CropParams,
         output_prefix:    str,
-        metrics_sampling: int                            = 3,
+        sampling:          int                            = 3,
         bar_advance:      BarAdvance | None = None,
         duration_seconds: float                          = 0.0,
         width:            int                            = 0,
@@ -1157,7 +1157,7 @@ class QualityMeasurer:
             ref_crop:         Crop parameters for the reference input.
             output_prefix:    Full path prefix for metric files (unused for path
                               derivation — ``cwd`` and a UUID prefix are used instead).
-            metrics_sampling: Frame subsampling factor (applied to VMAF via
+            sampling:          Frame subsampling factor (applied to VMAF via
                               ``n_subsample`` and to PSNR/SSIM via ``select``).
             bar_advance:      Optional callable that advances the progress bar.
             duration_seconds: Duration of the comparison window in seconds.
@@ -1205,7 +1205,7 @@ class QualityMeasurer:
             crop_reference   = ref_crop,
             width            = width,
             use_gpu          = False,
-            subsample        = metrics_sampling,
+            sampling         = sampling,
             output_prefix    = tmp_prefix,
             cwd              = output_dir,
             progress_callback = _progress_callback if bar_advance is not None else None,
@@ -1250,7 +1250,7 @@ class QualityMeasurer:
         output_dir:          Path,
         duration_seconds:    float,
         fps_value:           Fraction | None,
-        subsample_factor:    int               = 10,
+        sampling:            int               = 10,
         show_progress:       bool | BarAdvance = False,
         plot_path:           Path | None       = None,
         chunk_start_seconds: float             = 0.0,
@@ -1287,7 +1287,7 @@ class QualityMeasurer:
                 artifacts, run_frames = await self._generate_metrics(
                     encoded, reference, ref_crop,
                     output_prefix    = str(cwd / f"{encoded.stem}."),
-                    metrics_sampling = subsample_factor,
+                    sampling        = sampling,
                     bar_advance      = advance,
                     duration_seconds = duration_seconds or 0.0,
                     width            = width,
@@ -1301,7 +1301,7 @@ class QualityMeasurer:
             artifacts, run_frames = await self._generate_metrics(
                 encoded, reference, ref_crop,
                 output_prefix    = str(cwd / f"{encoded.stem}."),
-                metrics_sampling = subsample_factor,
+                sampling        = sampling,
                 bar_advance      = show_progress,
                 duration_seconds = duration_seconds or 0.0,
                 width            = width,
@@ -1312,7 +1312,7 @@ class QualityMeasurer:
             artifacts, run_frames = await self._generate_metrics(
                 encoded, reference, ref_crop,
                 output_prefix    = str(cwd / f"{encoded.stem}."),
-                metrics_sampling = subsample_factor,
+                sampling        = sampling,
                 bar_advance      = None,
                 duration_seconds = duration_seconds or 0.0,
                 width            = width,
@@ -1324,7 +1324,7 @@ class QualityMeasurer:
             encoded             = encoded,
             artifacts           = artifacts,
             output_dir          = output_dir,
-            subsample_factor    = subsample_factor,
+            sampling            = sampling,
             plot_path           = plot_path,
             fps_value           = fps_value,
             chunk_start_seconds = chunk_start_seconds,
@@ -1339,7 +1339,7 @@ class QualityMeasurer:
         output_dir:          Path,
         duration_seconds:    float,
         fps_value:           Fraction | None,
-        subsample_factor:    int               = 10,
+        sampling:            int               = 10,
         show_progress:       bool | BarAdvance = False,
         plot_path:           Path | None       = None,
         chunk_start_seconds: float             = 0.0,
@@ -1363,7 +1363,7 @@ class QualityMeasurer:
                                  the caller from the chunk window, never probed.
             fps_value:           Average fps for plot x-axis conversion
                                  (``fps_fraction`` of the source stream).
-            subsample_factor:    Frame subsampling factor for metrics.
+            sampling:             Frame subsampling factor for metrics.
             show_progress:       ``True`` — open an inner progress bar;
                                  ``BarAdvance`` callable — feed an outer bar
                                  supplied by the caller (no inner bar created);
@@ -1387,7 +1387,7 @@ class QualityMeasurer:
                 output_dir          = output_dir,
                 duration_seconds    = duration_seconds,
                 fps_value           = fps_value,
-                subsample_factor    = subsample_factor,
+                sampling            = sampling,
                 show_progress       = show_progress,
                 plot_path           = plot_path,
                 chunk_start_seconds = chunk_start_seconds,
@@ -1401,7 +1401,7 @@ class QualityMeasurer:
         encoded:             Path,
         artifacts:           QualityLogs,
         output_dir:          Path,
-        subsample_factor:    int,
+        sampling:            int,
         plot_path:           Path | None,
         fps_value:           Fraction | None,
         chunk_start_seconds: float,
@@ -1416,7 +1416,7 @@ class QualityMeasurer:
             encoded:             Path to the encoded video (used for plot title/path).
             artifacts:           ``QualityLogs`` returned by ``_generate_metrics``.
             output_dir:          Directory for the plot PNG.
-            subsample_factor:    Frame subsampling factor.
+            sampling:            Frame subsampling factor.
             plot_path:           Explicit path override; auto-derived when ``None``.
             fps_value:           Frames per second for x-axis labelling.
             chunk_start_seconds: Chunk start offset for x-axis.
@@ -1436,7 +1436,7 @@ class QualityMeasurer:
             vif_log   = artifacts.vif_log   if artifacts.vif_log   is not None and artifacts.vif_log.exists()   else None,
         )
 
-        df_raw  = parse_metrics(artifacts_for_parse, subsample_factor)
+        df_raw  = parse_metrics(artifacts_for_parse, sampling)
         df_norm = normalize_metrics(df_raw)
         metrics = compute_metric_stats(df_norm)
 
@@ -1446,7 +1446,7 @@ class QualityMeasurer:
         )
         create_unified_plot(
             df_norm             = df_norm,
-            factor              = subsample_factor,
+            factor              = sampling,
             output_path         = resolved_plot_path,
             title               = plot_title,
             fps                 = fps_value,

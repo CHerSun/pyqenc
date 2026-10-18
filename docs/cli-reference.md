@@ -256,18 +256,18 @@ Use `--no-optimize` to skip optimization and produce one output per strategy.
 Measure quality metrics between a source and one or more encoded videos.
 
 ```sh
-pyqenc measure <source_video> [<target_video> ...] [options]
+pyqenc measure <source_video> [<distorted_video> ...] [options]
 ```
 
-> NOTE: ORDER MATTERS — swapping source and target produces incorrect metrics (VMAF is not symmetric).
+> NOTE: ORDER MATTERS — swapping source and distorted produces incorrect metrics (VMAF is not symmetric).
 
-With no target videos the command runs in screenshots-only mode (no metric computation).
+With no distorted videos the command runs in screenshots-only mode (no metric computation).
 
 Outputs go under `<work-dir>/measure/`:
 
-- Per-target metrics YAML sidecar
-- Per-target quality plot
-- Screenshots from source and each target
+- Per-distorted-video measurement YAML sidecar
+- Per-distorted-video quality plot
+- Screenshots from source and each distorted video
 
 | Option             | Description                                                                  | Default              |
 | ------------------ | ---------------------------------------------------------------------------- | -------------------- |

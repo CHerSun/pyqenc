@@ -2,7 +2,7 @@
 
 Bug guarded: the ``measure`` subcommand crashed with ``TypeError`` before any
 work — parameter names drifted apart across the cli/api/run_measure boundaries
-(``sampling`` vs ``metrics_sampling``), and no test covered the chain.
+(the ``sampling`` parameter threading), uncovered by other tests.
 """
 
 from pathlib import Path
@@ -26,15 +26,15 @@ class TestMeasureQualityWiring:
             result = measure_quality(
                 source_video     = source,
                 work_dir         = tmp_path,
-                metrics_sampling = 5,
-                target_videos    = [],
+                sampling         = 5,
+                distorted_videos = [],
             )
 
         assert result == "measure-result"
         assert captured["sampling"] == 5
         assert captured["source_video"] == source
         assert captured["work_dir"] == tmp_path
-        assert captured["target_videos"] == []
+        assert captured["distorted_videos"] == []
 
     def test_interval_mode_parses_before_dispatch(self, tmp_path: Path) -> None:
         """A screenshot interval string is parsed to seconds before run_measure."""
@@ -50,8 +50,8 @@ class TestMeasureQualityWiring:
             measure_quality(
                 source_video        = source,
                 work_dir            = tmp_path,
-                metrics_sampling    = 1,
-                target_videos       = [],
+                sampling            = 1,
+                distorted_videos    = [],
                 screenshot_interval = "30s",
             )
 

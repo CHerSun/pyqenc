@@ -413,7 +413,7 @@ class Strategy(BaseModel):
     proposals produced it (the quality value is the attempt's cache key),
     so a proposal-domain change — notably the ``-q`` CLI override, which
     rewrites the effective range — must not flip the fingerprint into the
-    fatal band; the pinned-quality map (fixed mode's key) and the mode tag
+    fatal band; the fixed-quality map (fixed mode's key) and the mode tag
     own quality-change invalidation. Found live 2026-10-09: a search→fixed
     ``-q`` toggle fired the per-strategy catastrophic fatal and demanded
     ``--force`` to wipe attempts that were perfectly valid products. The
@@ -699,9 +699,10 @@ class EncodingPlan(BaseModel):
           empty strategy set is a configuration error, failed loudly at
           the run boundary instead of minutes into the pipeline.
         - A searched (ranged) run must carry quality targets — without a
-          bar the search degenerates into a single default-quality encode.
-          Fixed runs legitimately omit targets: the pinned knob is the
-          bar and config targets drive nothing there.
+          judging reference the search degenerates into a single
+          default-quality encode. Fixed runs legitimately omit targets: the
+          fixed knob is the reference and config targets drive nothing
+          there.
         """
         if not self.strategies:
             raise ValueError(
@@ -915,14 +916,14 @@ class AttemptMetadata(BaseModel):
         path:            Path to the encoded attempt file.
         chunk_id:        Chunk identifier (the composed name's identity part).
         strategy:        Encoding strategy display name.
-        crf:             Quality value used for this attempt.
+        quality:         Quality value used for this attempt.
         file_size_bytes: File size in bytes.
     """
 
     path:            Path
     chunk_id:        str
     strategy:        str
-    crf:             Decimal
+    quality:         Decimal
     file_size_bytes: int
 
 

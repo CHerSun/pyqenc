@@ -80,7 +80,7 @@ def _make_winner(
     work_dir: Path,
     chunk:    VideoStreamChunk,
     strategy,
-    crf:      Decimal,
+    quality: Decimal,
     frames:   int,
 ) -> EncodedChunk:
     """Materialize a winner on disk (mkv + result sidecar) and compose it.
@@ -94,7 +94,7 @@ def _make_winner(
     winner = strategy_dir / EncodedChunk.format_winner_file_name(chunk.safe_name())
     winner.write_bytes(b"x" * 16)
     sidecar: dict = {
-        "crf": str(crf),
+        "quality": str(quality),
         "metrics": {"vmaf_min": 94.5},
         "targets_met": True,
         "frame_count": frames,
@@ -135,7 +135,7 @@ class TestSidecarFrameCount:
 
 class TestWinnerTargetedSubset:
     """The winner sidecar's metrics subset is mode-aware (Req 25; found empty
-    in fixed mode on the 2026-10-09 real run — "ruler: none")."""
+    in fixed mode on the 2026-10-09 real run — the anchor never elected)."""
 
     _FULL: ClassVar[dict[str, float]] = {
         "vmaf_min": 91.0, "vmaf_p10": 95.0, "vmaf_median": 96.5, "vmaf_max": 99.0,
@@ -153,9 +153,9 @@ class TestWinnerTargetedSubset:
         assert sorted(subset) == ["psnr_p10", "vmaf_median"]
 
     def test_fixed_persists_the_comparison_stat_set(self) -> None:
-        """Bug guarded: fixed mode judges with no target set (the ruler is
+        """Bug guarded: fixed mode judges with no target set (the anchor is
         derived FROM winner metrics) — the old filter wrote ``{}`` and the
-        whole fixed chain ran dataless (no ruler, no Pareto data, no
+        whole fixed chain ran dataless (no anchor, no Pareto data, no
         limiter table)."""
         from pyqenc.phases.encoding import _winner_targeted_metrics
 
@@ -302,11 +302,11 @@ class TestScanWinnerSidecars:
             rows     = [
                 LimiterSummaryRow(
                     limiter="ssim_median", passed=97, missed=2,
-                    med_deficit=-0.1, med_surplus=1.4, med_crf=_Decimal("18.0"),
+                    med_deficit=-0.1, med_surplus=1.4, med_quality=_Decimal("18.0"),
                 ),
                 LimiterSummaryRow(
                     limiter="ssim_p10", passed=3, missed=5,
-                    med_deficit=-0.2, med_surplus=0.9, med_crf=_Decimal("18.0"),
+                    med_deficit=-0.2, med_surplus=0.9, med_quality=_Decimal("18.0"),
                 ),
             ],
         )]
