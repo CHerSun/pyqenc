@@ -836,10 +836,18 @@ def _cmd_measure(args: argparse.Namespace) -> int:
         return 1
 
     _config  = load_app_config()
+    # One flag, every knob (Req 5) — validated assignments; the measure run
+    # consumes only the measurement domain's value.
+    cli_concurrency = getattr(args, "concurrency", None)
+    if cli_concurrency is not None:
+        _config.encoding.concurrency    = cli_concurrency
+        _config.audio.concurrency       = cli_concurrency
+        _config.measurement.concurrency = cli_concurrency
     sampling = (
         args.sampling if args.sampling is not None
         else _config.measurement.sampling
     )
+    concurrency = _config.measurement.concurrency
 
     try:
         measure_quality(
@@ -848,6 +856,7 @@ def _cmd_measure(args: argparse.Namespace) -> int:
             distorted_videos         = args.distorted,
             crop_params              = crop_params,
             sampling                 = sampling,
+            concurrency              = concurrency,
             screenshot_count         = args.screenshots,
             screenshot_interval      = args.every,
             screenshot_include_edges = args.screenshot_include_edges,

@@ -27,11 +27,13 @@ class TestMeasureQualityWiring:
                 source_video     = source,
                 work_dir         = tmp_path,
                 sampling         = 5,
+                concurrency      = 1,
                 distorted_videos = [],
             )
 
         assert result == "measure-result"
         assert captured["sampling"] == 5
+        assert captured["concurrency"] == 1
         assert captured["source_video"] == source
         assert captured["work_dir"] == tmp_path
         assert captured["distorted_videos"] == []
@@ -51,6 +53,7 @@ class TestMeasureQualityWiring:
                 source_video        = source,
                 work_dir            = tmp_path,
                 sampling            = 1,
+                concurrency         = 1,
                 distorted_videos    = [],
                 screenshot_interval = "30s",
             )

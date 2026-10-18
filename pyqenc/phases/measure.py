@@ -5,6 +5,7 @@ crop resolution, resolution validation, duration parsing, screenshot
 timestamp generation, and screenshot filename formatting.
 """
 
+import asyncio
 import hashlib
 import logging
 import re
@@ -30,6 +31,8 @@ from pyqenc.phases.job import JobSidecar
 from pyqenc.phases.probe import ProbeSidecar
 from pyqenc.quality import MetricType, PerMetricStats, flatten_metric_stats
 from pyqenc.stream_model import File, LongPathYaml, VideoStream, VideoStreamInfo
+from pyqenc.utils.alive import AdvanceState, BarAdvance, ProgressBar
+from pyqenc.utils.concurrency import run_bounded
 from pyqenc.utils.ffmpeg_runner import FFmpegInput, FFmpegRequest, run_ffmpeg_async
 from pyqenc.utils.fs import remove_stale_tmp_files
 from pyqenc.utils.log_format import fmt_key_value_table, fmt_metric_value, fmt_size_mb
@@ -79,6 +82,7 @@ class DistortedMeasureResult:
     sidecar:         Path | None       # <distorted_stem>.yaml in measure_dir
     screenshots_dir: Path              # <distorted_stem>.screenshots/ in measure_dir
     metrics:         PerMetricStats # parsed metric statistics
+    failed:          bool = False      # measurement failed (contained; empty metrics)
 
 
 @dataclass
@@ -340,14 +344,16 @@ async def _run_metrics(
     metrics_dir:      Path,
     graph_path:       Path,
     sampling:         int,
-    bar_title:        str,
+    show_progress:    BarAdvance,
     duration_seconds: float,
     fps_value:        Fraction | None,
 ) -> PerMetricStats:
     """Run quality metric computation for one source/distorted pair.
 
     Delegates to ``QualityMeasurer.measure_chunk_async`` (measurement only —
-    the measurer takes no target set, Req 51-53); metric statistics are returned.
+    the measurer takes no target set, Req 51-53); metric statistics are
+    returned. Progress feeds the caller's shared bar through *show_progress*
+    (weighted ``PROGRESS`` ticks during the run).
 
     Args:
         source_video:     The reference (original) video path.
@@ -358,6 +364,7 @@ async def _run_metrics(
         metrics_dir:      Directory for raw metric log files (PSNR/SSIM/VMAF).
         graph_path:       Destination path for the quality metrics PNG plot.
         sampling:         Frame subsampling factor (≥1).
+        show_progress:    The run's shared bar advance callable.
         duration_seconds: The comparison duration (progress/plot extent).
         fps_value:        Average fps for plot x-axis conversion.
 
@@ -374,10 +381,9 @@ async def _run_metrics(
         duration_seconds = duration_seconds,
         fps_value        = fps_value,
         sampling         = sampling,
-        show_progress    = True,
+        show_progress    = show_progress,
         plot_path        = graph_path,
         width            = width or 0,
-        bar_title        = bar_title,
     )
     return measurement.metrics
 
@@ -873,6 +879,9 @@ def _log_measure_summary(distorted: list[DistortedMeasureResult]) -> None:
 
     for t in distorted:
         stem      = t.distorted_video.stem[:STEM_WIDTH]
+        if t.failed:
+            logger.info("   ".join([f"✘ {stem:<{STEM_WIDTH - 2}}", f"{'FAILED':>{SIZE_WIDTH}}"]))
+            continue
         size_str  = fmt_size_mb(t.distorted_video.stat().st_size) if t.distorted_video.exists() else "N/A"
         row_parts = [f"{stem:<{STEM_WIDTH}}", f"{size_str:>{SIZE_WIDTH}}"]
         for mt in all_metric_types:
@@ -895,6 +904,7 @@ async def run_measure(
     work_dir:                 Path,
     crop_params:              CropParams | None,
     sampling:                 int,
+    concurrency:              int,
     width:                    int | None,
     screenshot_count:         int | None,
     screenshot_interval:      float | None      = None,
@@ -902,9 +912,12 @@ async def run_measure(
 ) -> MeasureResult:
     """Execute a standalone quality measurement run.
 
-    Execution order: (1) compute screenshot positions from source, (2) capture
-    source screenshots, (3) capture all distorted-video screenshots, (4) run metrics for
-    each distorted video, (5) emit summary table.
+    Execution order: (1) compute screenshot positions from source, (2) one
+    task per video through the bounded runner at *concurrency* — the source
+    task takes its screenshots; each distorted task takes that video's
+    screenshots, then measures and writes the sidecar — (3) emit the summary
+    table. A per-video measurement failure is contained (the video gets a
+    failed result row; the run continues) and surfaces in the summary.
 
     Args:
         source_video:             Reference video path.
@@ -918,6 +931,7 @@ async def run_measure(
                                   present.
         sampling:                 Frame subsampling factor (≥1).  Ignored in
                                   screenshots-only mode.
+        concurrency:              Maximum videos processed simultaneously (≥1).
         width:                    Scale both inputs to this width during metric
                                   computation (after cropping).  ``None`` = no
                                   scaling.  Does not affect screenshots.  Ignored in
@@ -939,8 +953,9 @@ async def run_measure(
     Raises:
         FileNotFoundError: If ``source_video`` or any path in ``distorted_videos``
                            does not exist.
-        ValueError:        If ``sampling < 1``, ``screenshot_count < 1``,
-                           or any resolution mismatch is detected.
+        ValueError:        If ``sampling`` < 1, ``concurrency`` < 1,
+                           ``screenshot_count`` < 1, or any resolution mismatch is
+                           detected.
     """
 
     # ------------------------------------------------------------------
@@ -956,6 +971,9 @@ async def run_measure(
 
     if sampling < 1:
         raise ValueError(f"sampling must be ≥ 1, got {sampling}")
+
+    if concurrency < 1:
+        raise ValueError(f"concurrency must be ≥ 1, got {concurrency}")
 
     effective_screenshot_count = screenshot_count if screenshot_count is not None else DEFAULT_SCREENSHOT_COUNT
     if effective_screenshot_count < 1:
@@ -1044,7 +1062,9 @@ async def run_measure(
             effective_durations[distorted_video] = None
 
     # ------------------------------------------------------------------
-    # (1) Compute screenshot positions from source
+    # (2) One task per video through the bounded runner — the source task
+    #     takes its screenshots; each distorted task takes that video's
+    #     screenshots, then measures and writes the sidecar.
     # ------------------------------------------------------------------
 
     if screenshots_only:
@@ -1104,46 +1124,99 @@ async def run_measure(
             source_video.name,
         )
 
-    # ------------------------------------------------------------------
-    # (2) Capture source screenshots
-    # ------------------------------------------------------------------
-
     source_screenshots: list[Path] = []
-    if positions is not None:
-        logger.info("Taking %d screenshots of %s...", len(positions.frame_nums), source_video.stem)
-        try:
-            source_screenshots = await make_screenshots(
-                video_path      = source_video,
-                positions       = positions,
-                screenshots_dir = source_screenshots_dir,
-                crop_params     = resolved_crop if not resolved_crop.is_empty() else None,
-            )
-        except OSError as exc:
-            logger.error("Screenshots failed for %s — skipping: %s", source_video.stem, exc)
-
-    # ------------------------------------------------------------------
-    # (3) Capture all distorted-video screenshots
-    # ------------------------------------------------------------------
-
     distorted_screenshots_map: dict[Path, list[Path]] = {}
-    for distorted_video in distorted_videos:
-        if positions is not None:
-            logger.info("Taking %d screenshots of %s...", len(positions.frame_nums), distorted_video.stem)
-            try:
-                shots = await make_screenshots(
-                    video_path      = distorted_video,
-                    positions       = positions,
-                    screenshots_dir = distorted_screenshots_dirs[distorted_video],
-                    crop_params     = None,
-                )
-            except OSError as exc:
-                logger.error("Screenshots failed for %s — skipping: %s", distorted_video.stem, exc)
-                shots = []
-            distorted_screenshots_map[distorted_video] = shots
-        else:
-            distorted_screenshots_map[distorted_video] = []
+    results_by_video: dict[Path, DistortedMeasureResult] = {}
 
-    # Summary log after all screenshot captures
+    # Duration-based shared bar over the distorted videos' effective
+    # durations (screenshots-only mode: zero total → indeterminate spinner).
+    bar_total = sum(d for d in effective_durations.values() if d is not None)
+    jobs: list[tuple[Path, bool]] = [(source_video, False)] + [
+        (video, True) for video in distorted_videos
+    ]
+
+    with ProgressBar(bar_total, title="Measure", total_count=len(jobs)) as advance:
+
+        async def process(job: tuple[Path, bool]) -> None:
+            """One video's task: screenshots, then (distorted) metrics + sidecar."""
+            video, is_distorted = job
+
+            # Screenshots — shared positions, per-video directory.
+            shots: list[Path] = []
+            if positions is not None:
+                logger.info("Taking %d screenshots of %s...", len(positions.frame_nums), video.stem)
+                try:
+                    shots = await make_screenshots(
+                        video_path      = video,
+                        positions       = positions,
+                        screenshots_dir = (
+                            distorted_screenshots_dirs[video] if is_distorted
+                            else source_screenshots_dir
+                        ),
+                        crop_params     = (
+                            None if is_distorted
+                            else (resolved_crop if not resolved_crop.is_empty() else None)
+                        ),
+                    )
+                except OSError as exc:
+                    logger.error("Screenshots failed for %s — skipping: %s", video.stem, exc)
+
+            if not is_distorted:
+                nonlocal source_screenshots
+                source_screenshots = shots
+                advance(0, AdvanceState.SUCCESS)
+                return
+
+            distorted_screenshots_map[video] = shots
+
+            # Measurement + sidecar — contained per video (Req 10): a failure
+            # yields a failed result row, never an aborted run.
+            eff_dur = effective_durations[video]
+            logger.info("Measuring %s", video.stem)
+            metrics: PerMetricStats = {}
+            failed  = False
+            try:
+                metrics = await _run_metrics(
+                    source_video     = source_video,
+                    distorted_video  = video,
+                    crop_params      = resolved_crop,
+                    width            = width,
+                    metrics_dir      = measure_dir,
+                    graph_path       = graph_paths[video],
+                    sampling         = sampling,
+                    show_progress    = advance,
+                    duration_seconds = eff_dur or 0.0,
+                    fps_value        = source_stream.info.fps_fraction,
+                )
+                _write_sidecar(
+                    path                       = sidecar_paths[video],
+                    source_video               = source_video,
+                    distorted_video            = video,
+                    sampling                   = sampling,
+                    crop_params                = resolved_crop,
+                    metrics                    = metrics,
+                    source_duration_seconds    = source_duration,
+                    distorted_duration_seconds    = distorted_durations[video],
+                    effective_duration_seconds = eff_dur,
+                )
+            except (OSError, ValueError) as exc:
+                failed = True
+                logger.error("Measurement failed for %s — skipping: %s", video.stem, exc)
+
+            results_by_video[video] = DistortedMeasureResult(
+                distorted_video    = video,
+                graph           = graph_paths[video],
+                sidecar         = sidecar_paths[video],
+                screenshots_dir = distorted_screenshots_dirs[video],
+                metrics         = metrics,
+                failed          = failed,
+            )
+            advance(eff_dur or 0, AdvanceState.FAILED if failed else AdvanceState.SUCCESS)
+
+        asyncio.run(run_bounded(jobs, concurrency, process))
+        advance(0, AdvanceState.COMPLETE)
+
+    # Summary log after the task run (all screenshots and results are in)
     if positions is not None:
         expected_per_video = len(positions.frame_nums)
         all_videos         = [source_video] + list(distorted_videos)
@@ -1156,51 +1229,10 @@ async def run_measure(
         )
 
     # ------------------------------------------------------------------
-    # (4) Run metrics for each distorted video
+    # (3) Summary table
     # ------------------------------------------------------------------
 
-    distorted_results: list[DistortedMeasureResult] = []
-
-    for idx, distorted_video in enumerate(distorted_videos, start=1):
-        eff_dur = effective_durations[distorted_video]
-
-        logger.info("Measuring distorted video %d of %d: %s", idx, len(distorted_videos), distorted_video.stem)
-        metrics = await _run_metrics(
-            source_video     = source_video,
-            distorted_video  = distorted_video,
-            crop_params      = resolved_crop,
-            width            = width,
-            metrics_dir      = measure_dir,
-            graph_path       = graph_paths[distorted_video],
-            sampling         = sampling,
-            bar_title        = f"measuring distorted {idx:>2}",
-            duration_seconds = eff_dur or 0.0,
-            fps_value        = source_stream.info.fps_fraction,
-        )
-
-        _write_sidecar(
-            path                       = sidecar_paths[distorted_video],
-            source_video               = source_video,
-            distorted_video            = distorted_video,
-            sampling                   = sampling,
-            crop_params                = resolved_crop,
-            metrics                    = metrics,
-            source_duration_seconds    = source_duration,
-            distorted_duration_seconds    = distorted_durations[distorted_video],
-            effective_duration_seconds = eff_dur,
-        )
-
-        distorted_results.append(DistortedMeasureResult(
-            distorted_video    = distorted_video,
-            graph           = graph_paths[distorted_video],
-            sidecar         = sidecar_paths[distorted_video],
-            screenshots_dir = distorted_screenshots_dirs[distorted_video],
-            metrics         = metrics,
-        ))
-
-    # ------------------------------------------------------------------
-    # (5) Summary table
-    # ------------------------------------------------------------------
+    distorted_results = [results_by_video[v] for v in distorted_videos]
 
     if distorted_results:
         _log_measure_summary(distorted_results)
