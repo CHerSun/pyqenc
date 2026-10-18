@@ -837,8 +837,13 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
                 cleanup_level    = job_result.cleanup,
                 metric_prefix    = MetricKey.OPTIMIZATION,
             )
-            # Count-based bar: progress is completed (chunk, strategy) pairs.
+            # Duration-weighted bar (Σ test-chunk durations × strategies),
+            # advanced once per completed pair by that pair's duration.
             total_count = len(test_chunks) * len(strategies_to_test)
+            total_seconds = (
+                sum(c.end_timestamp - c.start_timestamp for c in test_chunks)
+                * len(strategies_to_test)
+            )
 
             test_chunk_ids = [c.safe_name() for c in test_chunks]
             phase_recovery = _recover_encoding_attempts(work_dir, test_chunk_ids, strategies_to_test)
@@ -850,11 +855,13 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
                 pending_pairs, complete_pairs,
             )
 
-            with ProgressBar(total_count, title="Optimization", total_count=total_count) as advance:
-                # Pre-advance the bar for already-complete pairs (count-based: one tick each)
+            with ProgressBar(total_seconds, title="Optimization", total_count=total_count) as advance:
+                # Pre-advance the bar for already-complete pairs (their full duration)
+                chunks_by_id = {c.safe_name(): c for c in test_chunks}
                 for r in phase_recovery.pairs.values():
                     if r.state == ArtifactState.COMPLETE:
-                        advance(1, AdvanceState.SKIPPED)
+                        c = chunks_by_id[r.chunk_id]
+                        advance(c.end_timestamp - c.start_timestamp, AdvanceState.SKIPPED)
 
                 asyncio.run(
                     _encode_pairs(

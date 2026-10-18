@@ -7,15 +7,16 @@
 
 ## Cross-Spec Notes
 
-**Superseded in part by `2026-10-18 concurrency`.** The encoding and
-optimization bars' fraction basis moved from duration-weighted
-(Σ chunk durations × strategies) to completed-pair counting — the bar-mode
-doctrine: count-based where items are many and substeps non-deterministic;
-duration-based with in-job `PROGRESS` ticks where steps are few and
-deterministic (merge, measure). The `measure` command's per-video inner bars
-are gone, replaced by one shared duration-based bar fed through the same
-`show_progress` pass-down merge already used. Bar mechanics (`ProgressBar`,
-`AdvanceState`, advance callables) are unchanged.
+**Superseded in part by `2026-10-18 concurrency`.** The bar-mode doctrine
+landed there: count-based means one advance per item finalization,
+weighted by the item's duration (NOT unweighted counting — the
+encoding/optimization duration-weighted basis, Σ chunk durations ×
+strategies, is kept, with per-completion duration advances); duration-based
+means fine-grained in-job `PROGRESS` ticks (merge, measure). The `measure`
+command's per-video inner bars are gone, replaced by one shared
+duration-based bar fed through the same `show_progress` pass-down merge
+already uses. Bar mechanics (`ProgressBar`, `AdvanceState`, advance
+callables) are unchanged.
 
 ## Introduction
 

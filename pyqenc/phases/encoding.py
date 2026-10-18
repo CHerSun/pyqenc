@@ -1510,8 +1510,8 @@ async def _encode_pairs(
     ``COMPLETE`` pairs from *phase_recovery* seed the result and are
     skipped; every remaining pair runs as one job — the sync quality search
     in an executor thread (``_encode_chunk_async``), then the pair's
-    bookkeeping (result append, counters, count-based bar advance,
-    convergence step). A failed pair is recorded and the batch continues
+    bookkeeping (result append, counters, bar advance, convergence step).
+    A failed pair is recorded and the batch continues
     (per-job error containment).
 
     No top-level timing span here: the owning phase's template run() wraps
@@ -1532,8 +1532,10 @@ async def _encode_pairs(
                         provided, ``COMPLETE`` pairs are skipped and ``PARTIAL``
                         pairs resume from their recovered ``QualitySearch`` state.
         advance:        Optional advance callable from ``ProgressBar``; called
-                        with ``(1, AdvanceState)`` on each pair completion —
-                        the count-based bar measures completed pairs.
+                        once per pair completion with the pair's chunk
+                        duration — the bar is duration-weighted (Σ chunk
+                        durations × strategies), advanced at item
+                        finalization only.
         metric_prefix:  Metric prefix for the encoder's dotted spans.
 
     Returns:
@@ -1605,14 +1607,15 @@ async def _encode_pairs(
                 frame_count  = chunk_result.frame_count,
             ))
 
+            duration = chunk.end_timestamp - chunk.start_timestamp
             if chunk_result.reused:
                 result.reused_count += 1
                 if advance is not None:
-                    advance(1, AdvanceState.SKIPPED)
+                    advance(duration, AdvanceState.SKIPPED)
             else:
                 result.encoded_count += 1
                 if advance is not None:
-                    advance(1, AdvanceState.SUCCESS)
+                    advance(duration, AdvanceState.SUCCESS)
                 # Record convergence for this chunk/strategy pair
                 collector.step(
                     metric_prefix,
@@ -1624,7 +1627,7 @@ async def _encode_pairs(
         else:
             result.failed_chunks.append(chunk.safe_name())
             if advance is not None:
-                advance(1, AdvanceState.FAILED)
+                advance(0, AdvanceState.FAILED)
 
     await run_bounded(pending, concurrency, process)
 
@@ -1906,12 +1909,17 @@ def encode_all_chunks(
         pending_count, complete_count,
     )
     logger.debug("Starting bounded encoding with concurrency %d", concurrency)
-    pair_count = len(chunks) * len(strategies)
-    with ProgressBar(pair_count, title="Encoding", total_count=pair_count) as advance:
-        # Update the bar for already-complete pairs (count-based: one tick each)
+    # Duration-weighted bar (Σ chunk durations × strategies): the fraction
+    # and ETA track content duration; progress advances once per completed
+    # pair, by that pair's duration (count-based reporting, weighted basis).
+    chunks_by_id = {c.safe_name(): c for c in chunks}
+    total_seconds = sum(c.end_timestamp - c.start_timestamp for c in chunks) * len(strategies)
+    with ProgressBar(total_seconds, title="Encoding", total_count=len(chunks) * len(strategies)) as advance:
+        # Pre-advance the bar for already-complete pairs (their full duration)
         for r in phase_recovery.pairs.values():
             if r.state == ArtifactState.COMPLETE:
-                advance(1, AdvanceState.SKIPPED)
+                c = chunks_by_id[r.chunk_id]
+                advance(c.end_timestamp - c.start_timestamp, AdvanceState.SKIPPED)
 
         # Run bounded encoding
         result = asyncio.run(

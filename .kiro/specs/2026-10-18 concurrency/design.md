@@ -26,9 +26,9 @@
 - Bar feed today: merge threads its outer bar into measurements
   (`show_progress=advance`, `merge.py:867` → weighted `PROGRESS` ticks,
   `visualization.py:1194`) — the pass-down seam the measure metrics sweep
-  will reuse. Encoding/optimization fraction is currently duration-weighted
-  (Σ chunk durations × strategies) with no in-job feed; the doctrine moves
-  them to completed-pair counting.
+  will reuse. Encoding/optimization fraction is duration-weighted
+  (Σ chunk durations × strategies) with no in-job feed — the doctrine KEEPS
+  that basis; only the update cadence stays one advance per completed pair.
 - App metrics: `PipelineMetrics` with a `pipeline_metrics` root wrapper
   (`metrics.py:235,733`) — both terminology leftovers; dotted key
   `quality_measure` (`constants.py:91`); the spec's `parallelism` field was
@@ -64,10 +64,11 @@
   strategies ≈ 10k+ pairs; fan-out gather would materialize every wrapper
   as a live Task upfront — works, but pays bookkeeping memory for nothing).
 - Bar-mode doctrine: count-based bars for domains with many small items
-  and non-deterministic internal steps (encoding, optimization, audio —
-  progress = completed items); duration-based bars for domains with few
-  deterministic long-running steps (merge, measure — in-job `PROGRESS`
-  ticks are honest there).
+  and non-deterministic internal steps (encoding, optimization, audio) —
+  one advance per item finalization, weighted by the item's duration, NOT
+  unweighted counting; duration-based bars for domains with few
+  deterministic long-running steps (merge, measure — fine-grained in-job
+  `PROGRESS` ticks are honest there).
 - Measure task shape: screenshots and measurement are ONE task per video
   (the source included — screenshots only); progress comes solely from the
   measurements' fine-grained ticks. Merge's shape, not a two-sweep
@@ -177,10 +178,11 @@ run; it is the safety net, not a control-flow mechanism.
   advance, convergence `collector.step`. Post-call:
   `_assert_one_winner_per_chunk` unchanged. `ChunkQueue` is deleted; the
   pending list is the flattened (chunk, strategy) order — identical to the
-  1-worker order today. The bar is count-based over pairs (Req 11):
-  the wrapper advances on completion only; `advance` is received per the
-  uniform contract but not fed mid-job — non-deterministic substeps (search
-  attempts) make in-job weighting dishonest.
+  1-worker order today. The bar keeps its duration-weighted basis and
+  advances once per completed pair, by that pair's chunk duration (Req 11);
+  `advance` is received per the uniform contract but not fed mid-job —
+  non-deterministic substeps (search attempts) make in-job weighting
+  dishonest.
 - **Audio**: job = `execute_chain(...)` awaited directly. The per-job
   `asyncio.run` in `_produce_one` dissolves into one `asyncio.run` over the
   batch; wrapper bookkeeping = state flip, counters, count-bar advance,
@@ -203,14 +205,16 @@ run; it is the safety net, not a control-flow mechanism.
 ### Progress bars
 
 Bar-mode doctrine (Req 11): count-based where items are many/small with
-non-deterministic internal steps — encoding and optimization switch to
-completed-pair counting (today their fraction is duration-weighted over
-Σ chunk durations × strategies); audio stays count-based. Duration-based
-where steps are few and deterministic — merge (unchanged, already fed) and
-measure: one shared duration-based bar fed by the measurements' in-job
-`PROGRESS` ticks through `advance`; screenshot work rides unweighted.
-`alive_progress` renders from its monitor thread; `advance()` is safe from
-event-loop and worker contexts.
+non-deterministic internal steps — the bar is duration-weighted by the
+items (encoding/optimization keep Σ chunk durations × strategies; audio
+counts uniformly-weighted jobs) and advances once per item finalization,
+by that item's duration — precise fractions and ETA without pretending to
+know mid-item progress. Duration-based where steps are few and
+deterministic — merge (unchanged, already fed) and measure: one shared
+duration-based bar fed by the measurements' in-job `PROGRESS` ticks through
+`advance`; screenshot work rides unweighted. `alive_progress` renders from
+its monitor thread; `advance()` is safe from event-loop and worker
+contexts.
 
 ## App metrics alignment
 

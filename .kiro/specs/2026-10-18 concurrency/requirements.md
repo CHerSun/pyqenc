@@ -176,9 +176,12 @@ paragraphs are context, not requirements.
 - The phases shall use count-based bars for domains with many small items
   and non-deterministic internal steps (encoding, optimization, audio), and
   duration-based bars for domains with few deterministic long-running steps
-  (merge, measure).
-- The encoding and optimization bars shall measure progress by completed
-  (chunk, strategy) pairs.
+  (merge, measure). Count-based means one advance per item finalization,
+  weighted by the item's duration — not unweighted counting; duration-based
+  means fine-grained in-job `PROGRESS` ticks during the work.
+- The encoding and optimization bars shall keep their duration-weighted
+  basis (Σ chunk durations × strategies) and shall advance once per
+  completed (chunk, strategy) pair, by that pair's duration.
 - The `measure` command shall treat each video (source and distorted) as one
   task comprising that video's screenshots and, for distorted videos, its
   quality measurement and sidecar.

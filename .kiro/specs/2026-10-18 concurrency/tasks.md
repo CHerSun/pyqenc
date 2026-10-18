@@ -40,7 +40,9 @@
       bookkeeping); rename its parameter to `concurrency`.
 - [x] `OptimizationPhase._execute`: same runner call, reading
       `config.encoding.concurrency`.
-- [x] Bars become count-based over pairs (pre-advance skipped pairs).
+- [x] Bars keep the duration-weighted basis; advances happen once per
+      completed pair by that pair's duration (pre-advance skipped pairs
+      likewise).
 - [x] Retarget the `_encode_chunks_parallel` test mocks to the new seam or
       replace with behavior tests.
 
