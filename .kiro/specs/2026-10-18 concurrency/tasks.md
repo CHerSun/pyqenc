@@ -111,10 +111,14 @@
 
 - [x] Video A/B: `h264+ultrafast` fixed-quality e2e, `--concurrency 1` vs
       `2`, fresh work dirs under `D:\_encoding\pyqenc_parallel`.
-      (2026-10-18: encoding phase 13:13 → 10:36, 1.25×; measurement is 84%
-      of the ultrafast encoding wall; outputs byte-identical metrics.)
+      (2026-10-18: encoding phase 13:13 → 10:36 in single runs; RULING: no
+      benefit claim — the observation is contradicted by the measure-intent
+      regression (concurrent metric passes contend for the same cores) and
+      ffmpeg already saturates the CPU. The knob is for observed CPU
+      underutilization only.)
 - [x] Audio A/B: 2 streams × 2 chains, concurrency 1 vs 4.
-      (2026-10-18: 51.8s → 22.2s phase (2.3×), 55.5s → 26.0s wall (2.1×).)
+      (2026-10-18: 51.8s → 22.2s phase, 55.5s → 26.0s wall — real benefit,
+      exact effect machine-dependent.)
 - [x] Measure effect test: several distorted videos, 1 vs >1.
       (2026-10-18: 2 distorted videos, 889.7s at 1 vs 997.2s at 2 — ~12%
       REGRESSION; one metrics pass already saturates the CPU.)

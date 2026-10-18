@@ -48,9 +48,8 @@ Applies to all pipeline subcommands (`auto`, `video`, `audio`, `extract`).
 
 Every concurrency knob defaults to `1` — no concurrency.
 
-- **`audio.concurrency`** — scales well: audio filter chains are single-process, so parallel (track, chain) jobs put the extra cores to work (measured ~2× faster wall at 4 jobs).
-- **`encoding.concurrency`** (video chain: optimization + encoding) — ffmpeg already scales encoding and metric computation across the CPU, so raise it only if you observe CPU underutilization. The measured benefit is limited to measurement-bound runs (fast presets, where quality measurement dominates wall time) at ~1.25×.
-- **`measurement.concurrency`** (`measure` command) — keep at `1`: concurrent metric passes contend for the same cores and measured ~12% *slower* at 2.
+- **`audio.concurrency`** — benefits from concurrency: audio filter chains are single-process, so parallel (track, chain) jobs put the extra cores to work (measured ~2× faster wall at 4 jobs; the exact effect depends on the machine).
+- **`encoding.concurrency`** (video chain: optimization + encoding) and **`measurement.concurrency`** (`measure` command) — no measured benefit above `1`: ffmpeg already scales encoding and metric computation across the CPU. Raise only if you observe real CPU underutilization on your workload.
 
 ---
 

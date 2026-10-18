@@ -35,8 +35,8 @@ encoding:
   optimize: true          # false = encode all strategies, skip size-based selection
   optimize_tolerance: 5.0 # strategies within this % of the best size are all kept
   concurrency: 1          # max simultaneous (chunk, strategy) encode+measure jobs; clamped to CPU count
-                         # measured: ~1.25x faster at 2 for measurement-bound runs (fast presets, where
-                         # measurement is ~84% of wall); no gain for encode-bound (slow) presets
+                         # measured: no benefit above 1 (ffmpeg already scales across the CPU);
+                         # raise only under observed CPU underutilization
   visual_hash: true        # emoji prefix on chunk log lines for visual identification
 
 measurement:
@@ -44,11 +44,11 @@ measurement:
                # applies to quality checks during encoding, merge verification, and measure command
   concurrency: 1  # max videos 'pyqenc measure' processes simultaneously (one task per video:
                   # screenshots + measurement); clamped to CPU count
-                  # measured: SLOWER at 2 — one metrics pass already uses all cores; keep 1
+                  # measured: no benefit above 1 (slower at 2) — a metrics pass already uses all cores
 
 audio:
   concurrency: 1  # max simultaneous (track, chain) jobs; clamped to CPU count
-                  # measured: 2.1x faster wall at 4 (4 jobs) — audio filter chains are single-process
+                  # measured: ~2x faster wall at 4 (4 jobs) — audio filter chains are single-process
 
   # Audio processing is defined by three pieces:
   #   filters — a palette of named, reusable transformations (this section, dict-merged across layers)
