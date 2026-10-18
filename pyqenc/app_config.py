@@ -140,7 +140,7 @@ class MeasurementConfig(BaseModel):
 
     model_config = ConfigDict(validate_assignment=True)
 
-    sampling:    int
+    sampling:    Annotated[int, Field(ge=1)]
     concurrency: _Concurrency
 
 

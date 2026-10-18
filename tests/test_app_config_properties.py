@@ -961,6 +961,20 @@ class TestConcurrencyValidation:
         with pytest.raises(ValidationError):
             subconfig.concurrency = 0
 
+    def test_sampling_below_one_rejected_on_assignment(self) -> None:
+        """Assigning a non-positive sampling raises ValidationError.
+
+        Bug condition: a zero/negative sampling reaching ffmpeg's select
+        expression divides by zero inside the filter, surfacing as a cryptic
+        per-video failure instead of a config-time rejection — the config
+        layer is the single owner of the bound (run_measure no longer
+        re-checks it).
+        """
+        config = _BASE_CONFIG.model_copy(deep=True)
+
+        with pytest.raises(ValidationError):
+            config.measurement.sampling = 0
+
     @pytest.mark.parametrize("domain", ["encoding", "audio", "measurement"])
     def test_above_cpu_count_clamped_with_warning(
         self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, domain: str,

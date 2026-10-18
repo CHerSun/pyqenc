@@ -535,7 +535,7 @@ def measure_quality(
 
     Raises:
         FileNotFoundError: If ``source_video`` or any path in ``distorted_videos`` does not exist.
-        ValueError:        If ``sampling`` < 1 or ``screenshot_count`` < 1.
+        ValueError:        If ``screenshot_count`` < 1.
     """
 
     if not source_video.exists():

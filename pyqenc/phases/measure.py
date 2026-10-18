@@ -952,9 +952,8 @@ async def run_measure(
     Raises:
         FileNotFoundError: If ``source_video`` or any path in ``distorted_videos``
                            does not exist.
-        ValueError:        If ``sampling`` < 1, ``concurrency`` < 1,
-                           ``screenshot_count`` < 1, or any resolution mismatch is
-                           detected.
+        ValueError:        If ``screenshot_count`` < 1 or any resolution mismatch
+                           is detected.
     """
 
     # ------------------------------------------------------------------
@@ -967,12 +966,6 @@ async def run_measure(
     for distorted in distorted_videos:
         if not distorted.exists():
             raise FileNotFoundError(f"Distorted video not found: {distorted}")
-
-    if sampling < 1:
-        raise ValueError(f"sampling must be ≥ 1, got {sampling}")
-
-    if concurrency < 1:
-        raise ValueError(f"concurrency must be ≥ 1, got {concurrency}")
 
     effective_screenshot_count = screenshot_count if screenshot_count is not None else DEFAULT_SCREENSHOT_COUNT
     if effective_screenshot_count < 1:
