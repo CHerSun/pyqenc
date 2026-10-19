@@ -356,16 +356,21 @@ class PhaseOutcome(Enum):
 
     Attributes:
         COMPLETED: Phase did real work and succeeded.
+        SUBOPTIMAL: Phase did real work and every deliverable was produced,
+                   but at least one item sits below its quality bar (a
+                   search-mode winner accepted without meeting the targets).
+                   Counts as complete for every consumer.
         REUSED:    All artifacts existed; no work performed (valid in both modes).
         PENDING:   Wanted work remains (one or more artifacts are ``ABSENT`` or
                    ``PARTIAL``), independent of run mode.
         FAILED:    Phase failed (``error`` field populated).
     """
 
-    COMPLETED = "completed"
-    REUSED    = "reused"
-    PENDING   = "pending"
-    FAILED    = "failed"
+    COMPLETED  = "completed"
+    SUBOPTIMAL = "suboptimal"
+    REUSED     = "reused"
+    PENDING    = "pending"
+    FAILED     = "failed"
 
 
 # ---------------------------------------------------------------------------

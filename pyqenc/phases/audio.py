@@ -529,23 +529,17 @@ class AudioPhase(Phase[AudioPhaseResult]):
             asyncio.run(run_bounded(pending, audio_cfg.concurrency, process))
 
         reused = sum(1 for a in artifacts if a.state == ArtifactState.COMPLETE) - produced
-        logger.info(
-            "%s Audio complete: %d produced, %d reused, %d failed",
-            SUCCESS_SYMBOL_MINOR,
-            produced,
-            max(reused, 0),
-            failed,
-        )
 
-        if produced == 0 and failed > 0:
-            err = f"all {failed} audio chain output(s) failed"
-            return self._make_result(PhaseOutcome.FAILED, artifacts, err)
+        if failed > 0:
+            return self._make_result(
+                PhaseOutcome.FAILED, artifacts,
+                f"{failed} audio chain output(s) failed "
+                f"(produced {produced}, reused {max(reused, 0)})",
+            )
 
-        outcome = PhaseOutcome.COMPLETED
         return self._make_result(
-            outcome,
-            artifacts,
-            f"produced {produced}, reused {max(reused, 0)}, failed {failed}",
+            PhaseOutcome.COMPLETED, artifacts,
+            f"produced {produced}, reused {max(reused, 0)}",
         )
 
     def _make_result(

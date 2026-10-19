@@ -292,7 +292,6 @@ class JobPhase(Phase[JobPhaseResult]):
         # re-states the stash contract at the write).
         if not dry_run:
             self._write_record(job_yaml)
-            logger.info("Initialized job.yaml for new pipeline run")
         return self._make_result(
             PhaseOutcome.COMPLETED, [],
             "job.yaml initialised",

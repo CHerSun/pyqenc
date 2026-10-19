@@ -965,10 +965,6 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
             return self._make_result(outcome, artifacts, err_summary)
 
         complete_count = sum(1 for a in artifacts if a.state == ArtifactState.COMPLETE)
-        logger.info(
-            "%s Extraction complete: %d artifact(s) extracted",
-            SUCCESS_SYMBOL_MINOR, complete_count,
-        )
 
         return self._make_result(
             PhaseOutcome.COMPLETED, artifacts,

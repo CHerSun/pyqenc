@@ -322,6 +322,7 @@ from pyqenc.phases.chunking import ChunkingPhase as _CCP
 from pyqenc.phases.chunking import ChunkingPhaseResult
 from pyqenc.phases.encoding import (
     EncodingPhase,
+    EncodingPhaseResult,
     EncodingResult,
     build_encoded_chunk,
 )
@@ -562,10 +563,14 @@ class TestEncodingPresentationTargets:
         *,
         quality_range_override: tuple[_D, _D] | None,
         anchor_targets: list[QualityTarget],
-    ) -> list[QualityTarget]:
+        winner_metrics: dict[str, float] | None = None,
+        winner_targets_met: bool = True,
+    ) -> tuple[EncodingPhaseResult, list[QualityTarget]]:
         """Run EncodingPhase through run() with a stubbed encode pool.
 
-        Returns the ``quality_targets`` the pool received.
+        Returns the phase result and the ``quality_targets`` the pool
+        received. When *winner_metrics* is given, a winner result sidecar is
+        written next to the winner file so the real winner scan reads it.
         """
         from pyqenc.app_config import load_app_config
 
@@ -653,6 +658,17 @@ class TestEncodingPresentationTargets:
 
         def _fake_encode_all(**kwargs: object) -> EncodingResult:
             captured.update(kwargs)
+            # The winner sidecar materializes DURING the run (a pre-written
+            # one would make recovery classify the pair complete and skip
+            # execution entirely); the phase's winner scan then reads it.
+            if winner_metrics is not None:
+                write_yaml_atomic(
+                    winner_dir / _EC.format_winner_sidecar_name(chunk.safe_name()),
+                    {
+                        "quality": "20", "targets_met": winner_targets_met,
+                        "frame_count": 240, "metrics": winner_metrics,
+                    },
+                )
             result = EncodingResult()
             result.encoded_chunks = {strategy.display_name(): [winner]}
             result.encoded_count = 1
@@ -661,17 +677,17 @@ class TestEncodingPresentationTargets:
         monkeypatch.setattr(
             "pyqenc.phases.encoding.encode_all_chunks", _fake_encode_all,
         )
-        outcome = phase.run(dry_run=False)
-        assert outcome.outcome is PhaseOutcome.COMPLETED
+        result = phase.run(dry_run=False)
+        assert result.is_complete
         received = _cast(list[QualityTarget], captured["quality_targets"])
-        return received
+        return result, received
 
     def test_fixed_compared_uses_anchor_targets(self, tmp_path: Path, monkeypatch) -> None:
         anchor_targets_fixture = [
             QualityTarget(metric="vmaf", statistic="median", value=91.0),
             QualityTarget(metric="vif", statistic="median", value=84.0),
         ]
-        received = self._run_phase(
+        _, received = self._run_phase(
             tmp_path, monkeypatch,
             quality_range_override=(_D("18"), _D("18")),
             anchor_targets=anchor_targets_fixture,
@@ -679,7 +695,7 @@ class TestEncodingPresentationTargets:
         assert received == anchor_targets_fixture
 
     def test_fixed_uncompared_uses_no_anchor_targets(self, tmp_path: Path, monkeypatch) -> None:
-        received = self._run_phase(
+        _, received = self._run_phase(
             tmp_path, monkeypatch,
             quality_range_override=(_D("18"), _D("18")),
             anchor_targets=[],
@@ -687,17 +703,80 @@ class TestEncodingPresentationTargets:
         assert received == []
 
     def test_searched_uses_config_targets_unchanged(self, tmp_path: Path, monkeypatch) -> None:
-        received = self._run_phase(
+        result, received = self._run_phase(
             tmp_path, monkeypatch,
             quality_range_override=None,
             anchor_targets=[],
         )
+        assert result.outcome is PhaseOutcome.COMPLETED
         # The config targets flow through verbatim — searched behavior is
         # byte-identical to before the spec.
         from pyqenc.models import QualityTarget as _QT
         assert received == [
             _QT(metric="vmaf", statistic="min", value=93.0),
         ]
+
+
+class TestSuboptimalOutcome:
+    """``SUBOPTIMAL`` (2026-10-19 ruling): search mode + every pair won +
+    at least one winner below the targets. Fixed runs never qualify — an
+    anchor-target miss is a matter of fact about an approximate anchor, not
+    an unmet user target."""
+
+    def test_search_mode_missed_winner_is_suboptimal(self, tmp_path: Path, monkeypatch) -> None:
+        """Bug guarded: a search run that had to accept a winner below the
+        user's targets reported plain COMPLETED — indistinguishable from a
+        clean run in the outcome, the closer, and the run summary."""
+        result, _ = self._run_searched(tmp_path, monkeypatch, missed=True)
+
+        assert result.outcome is PhaseOutcome.SUBOPTIMAL
+        assert result.is_complete
+        assert "1 winner(s) below targets" in result.message
+
+    def test_fixed_mode_missed_winner_stays_completed(self, tmp_path: Path, monkeypatch) -> None:
+        """The fixed-mode anchor miss must NOT re-label the phase — the
+        quality was pinned by the user; the anchor comparison is
+        informational. The tallies still record the miss (the limiter table
+        shows it); only the outcome stays COMPLETED."""
+        result, _ = TestEncodingPresentationTargets()._run_phase(
+            tmp_path, monkeypatch,
+            quality_range_override=(_D("18"), _D("18")),
+            anchor_targets=[QualityTarget(metric="vmaf", statistic="median", value=91.0)],
+            winner_metrics={"vmaf_median": 80.0},
+            winner_targets_met=False,
+        )
+        assert result.outcome is PhaseOutcome.COMPLETED
+
+    def test_search_mode_clean_winner_stays_completed(self, tmp_path: Path, monkeypatch) -> None:
+        result, _ = self._run_searched(
+            tmp_path, monkeypatch, missed=False,
+            metrics={"vmaf_min": 95.0},
+        )
+        assert result.outcome is PhaseOutcome.COMPLETED
+
+    def test_search_mode_without_sidecar_stays_completed(self, tmp_path: Path, monkeypatch) -> None:
+        """No readable winner sidecar → no limiter tallies → nothing can be
+        judged suboptimal; the run stays COMPLETED."""
+        result, _ = self._run_searched(tmp_path, monkeypatch, missed=False, metrics=None)
+        assert result.outcome is PhaseOutcome.COMPLETED
+
+    @staticmethod
+    def _run_searched(
+        tmp_path: Path,
+        monkeypatch,
+        *,
+        missed: bool,
+        metrics: dict[str, float] | None = None,
+    ) -> tuple[EncodingPhaseResult, list[QualityTarget]]:
+        if metrics is None and missed:
+            metrics = {"vmaf_min": 80.0}
+        return TestEncodingPresentationTargets()._run_phase(
+            tmp_path, monkeypatch,
+            quality_range_override=None,
+            anchor_targets=[],
+            winner_metrics=metrics,
+            winner_targets_met=not missed,
+        )
 
 
 import logging

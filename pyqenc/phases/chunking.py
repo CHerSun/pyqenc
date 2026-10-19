@@ -154,7 +154,6 @@ def detect_scenes(
         SceneBoundary(frame=int(scene[0].get_frames()), timestamp_seconds=float(scene[0].get_seconds()))
         for scene in scene_list
     ]
-    logger.info("Scene detection: %d scene(s)", len(boundaries))
     return boundaries
 
 
@@ -419,11 +418,10 @@ class ChunkingPhase(Phase[ChunkingPhaseResult]):
         except RecoveryError as exc:
             return self._make_result(PhaseOutcome.FAILED, [], str(exc))
 
-        logger.info("%d chunk window(s) — no files produced (direct-from-source)", len(chunks))
         rows = [Artifact(payload=c, state=ArtifactState.COMPLETE) for c in chunks]
         return self._make_result(
             PhaseOutcome.COMPLETED, [],
-            f"chunked into {len(chunks)} window(s)",
+            f"{len(chunks)} window(s)",
             chunks=rows,
         )
 

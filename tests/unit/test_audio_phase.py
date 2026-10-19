@@ -407,6 +407,38 @@ class TestPassthrough:
         assert result.outcome == PhaseOutcome.FAILED
         assert not _chain_out(tmp_path, tracks[0], "copy").exists()
 
+    def test_partial_failure_fails_the_phase(self, tmp_path: Path) -> None:
+        """Bug guarded (2026-10-19): a run with ANY failed chain output used
+        to report COMPLETED as long as one output was produced — missing
+        deliverables hid behind a green outcome. A real failure must fail
+        the phase, however much else succeeded."""
+        from pyqenc.audio.chain import ChainExecutionError
+
+        config = _audio_config([ChainSpec(name="norm", filters=["peaknorm"])])
+        eng = _track(tmp_path, "t_eng", track_id=1)
+        rus = _track(tmp_path, "t_rus", track_id=2)
+        phase = _make_phase(tmp_path, config, [eng, rus])
+
+        async def _partial(
+            resolved: ResolvedChain, stream: AudioStream, output_dir: Path, **_kw
+        ) -> Path:
+            if stream.file.path.stem == "t_rus":
+                raise ChainExecutionError("simulated chain failure")
+            out = chain_output_path(
+                stream, resolved.name, resolved.encode.extension, output_dir,
+            )
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_bytes(b"\x00")
+            return out
+
+        with patch("pyqenc.phases.audio.execute_chain", _partial):
+            result = phase.run()
+
+        assert result.outcome is PhaseOutcome.FAILED
+        assert not result.is_complete
+        assert "1 audio chain output(s) failed" in result.message
+        assert _chain_out(tmp_path, eng, "norm").exists()
+
 
 class TestBoundedExecution:
     """The bounded runner integration: order, per-chain dotted timing, and

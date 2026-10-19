@@ -469,21 +469,6 @@ See also 89.
 
 ---
 
-## 108. (fast) Run-log polish — phase banners and uniform final status lines
-
-Every phase's LAST line should carry a status emoji; from the real run:
-
-- **Probe banner back on.** `BANNER = False` (probe.py:198) leaves the phase jumping in right after audio with only the soft separator — toggle back to the thick banner.
-- **Missing status emoji on final lines** (extraction/audio/merge/encoding already conform):
-  - job: `Initialized job.yaml for new pipeline run` (job.py:331) — prefix e.g. `✔ Job complete: ...`;
-  - probe: `Probe: done — frame_count=…, crop=…` (probe.py:394) — prefix `✔`;
-  - chunking: `107 chunk window(s) — no files produced (direct-from-source)` (chunking.py:426) — prefix `✔`. Also: the preceding `Scene detection: 107 scene(s)` (chunking.py:156) is now a duplicate — the two lines made sense when extraction wrote files, the final windows line alone suffices.
-- **Optimization has no concise final line** (summary table, then nothing). Add e.g. `✔ Tested {len(test_chunks)} chunk(s) for {len(strategies)} strategie(s), selected {len(selected)} strategie(s).` — the strategies list itself is already visible in the summary table.
-
-Extra human input: maybe make final lines uniform, like recovery line, based on phase result, its status and message?
-
----
-
 
 
 ## 114. e2e intent tests hang: ffmpeg 9.0.2 spins encoding the sample's chunk-3 region

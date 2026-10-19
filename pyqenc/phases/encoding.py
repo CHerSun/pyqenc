@@ -34,7 +34,6 @@ from pyqenc.constants import (
     SUCCESS_SYMBOL_MINOR,
     TEMP_SUFFIX,
     THRESHOLD_ATTEMPTS_WARNING,
-    WARNING_SYMBOL,
 )
 from pyqenc.metrics import ConvergenceUpdate, MetricKey, MetricsCollector
 from pyqenc.models import (
@@ -697,18 +696,13 @@ class EncodingResult:
                         the payload carries its own chunk + strategy identity).
         reused_count:   Number of chunks reused from previous runs.
         encoded_count:  Number of chunks newly encoded.
-        outcome:        Phase outcome.
         failed_chunks:  List of chunk IDs that failed.
-        error:          Error message if pipeline failed.
     """
 
     encoded_chunks: dict[str, list[EncodedChunk]] = field(default_factory=dict)
     reused_count:   int                         = 0
     encoded_count:  int                         = 0
-    outcome:        PhaseOutcome                = PhaseOutcome.COMPLETED
     failed_chunks:  list[str]                   = field(default_factory=list)
-    error:          str | None                  = None
-    winner_scan:    _WinnerScan | None          = None
 
 
 class ChunkEncoder:
@@ -1938,25 +1932,10 @@ def encode_all_chunks(
         )
         advance(0, AdvanceState.COMPLETE)
 
-    # Log summary
-    status_message = f"{SUCCESS_SYMBOL_MINOR} Encoding complete" if not result.failed_chunks and result.outcome == PhaseOutcome.COMPLETED else \
-                    f"{WARNING_SYMBOL} Encoding complete with {len(result.failed_chunks)} failures" if result.failed_chunks and result.outcome == PhaseOutcome.COMPLETED else \
-                    f"{FAILURE_SYMBOL_MINOR} Encoding failed with {len(result.failed_chunks)} failures"
-    logger.info(
-         status_message + ": %d newly encoded, %d reused, %d failed",
-        result.encoded_count, result.reused_count, len(result.failed_chunks),
-    )
-
     if result.failed_chunks:
-        # Duplicate to ERROR level on failed chunks
+        # Chunk names at ERROR severity; the phase-level closer carries the
+        # outcome verdict with the counts folded into its message.
         logger.error("Failed chunks: %s", ", ".join(result.failed_chunks))
-
-    result.winner_scan = _scan_winner_sidecars(
-        work_dir,
-        result.encoded_chunks,
-        [s.display_name() for s in strategies],
-        quality_targets,
-    )
 
     return result
 
@@ -2466,11 +2445,6 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
             measure_attempts = True,  # default-flipping is TODO §83's decision
         )
 
-        if enc_result.outcome == PhaseOutcome.FAILED:
-            err = enc_result.error or "Encoding failed"
-            logger.critical(err)
-            return self._make_result(PhaseOutcome.FAILED, [], err)
-
         # Winners come from the fresh encode result — every complete pair,
         # with freshly measured payloads (frame counts from the run itself).
         # Sorted by (chunk start, strategy) for a deterministic winners order —
@@ -2515,7 +2489,12 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
         # The dependency walk guarantees a completed probe with a resolved stream.
         assert probe_result.stream is not None, "probe guaranteed complete by the dependency walk"
         source_total = probe_result.stream.payload.frame_count
-        scan         = enc_result.winner_scan
+        scan         = _scan_winner_sidecars(
+            work_dir,
+            enc_result.encoded_chunks,
+            [s.display_name() for s in strategies],
+            presentation_targets,
+        )
         if source_total > 0 and scan is not None:
             if not scan.frames_known:
                 logger.warning(
@@ -2578,9 +2557,28 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
                 frames  = scan.frame_totals() if scan.frames_known else {},
             ))
 
-        outcome = PhaseOutcome.COMPLETED if enc_result.encoded_count > 0 else PhaseOutcome.REUSED
+        # Search-mode suboptimality: every pair won, but at least one winner
+        # sits below the targets (the limiter table's miss tallies). Fixed
+        # runs never qualify — their anchor-target misses are a matter of
+        # fact about an approximate anchor, not unmet user targets.
+        summaries      = scan.summaries if scan is not None else None
+        missed_winners = sum(
+            row.missed for group in (summaries or []) for row in group.rows
+        )
+        search_mode    = not self._deps[ProbePhase].plan.fixed_quality
+        if enc_result.encoded_count > 0:
+            outcome = (
+                PhaseOutcome.SUBOPTIMAL
+                if search_mode and missed_winners > 0
+                else PhaseOutcome.COMPLETED
+            )
+        else:
+            outcome = PhaseOutcome.REUSED
+        detail = f"{complete_count} pair(s) complete"
+        if outcome is PhaseOutcome.SUBOPTIMAL:
+            detail += f", {missed_winners} winner(s) below targets"
         return self._make_result(
-            outcome, winners, f"{complete_count} pair(s) complete",
+            outcome, winners, detail,
             presentation_anchor=presentation_anchor,
         )
 

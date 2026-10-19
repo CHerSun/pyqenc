@@ -18,8 +18,15 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+from hypothesis import given
+from hypothesis import strategies as st
 
 from pyqenc.app_config import AppConfig, load_app_config
+from pyqenc.constants import (
+    FAILURE_SYMBOL_MINOR,
+    SUCCESS_SYMBOL_MINOR,
+    WARNING_SYMBOL,
+)
 from pyqenc.metrics import (
     MetricKey,
     NoOpMetricsCollector,
@@ -337,6 +344,122 @@ class TestRecovery:
         assert result.outcome is PhaseOutcome.FAILED
         assert result.message == "fatal mismatch"
         assert phase.execute_calls == 0
+
+
+# ---------------------------------------------------------------------------
+# The closing status line — one uniform closer per execute run
+# ---------------------------------------------------------------------------
+
+
+class TestOutcomeCloser:
+    """The template's closing status line: every execute run ends with
+    exactly one ``{symbol} {Phase} {status}: {message}`` line built from the
+    result's outcome; the message is the phase-owned detail.
+
+    Bug guarded (2026-10-19): final lines were hand-rolled per phase, so
+    phases forgot them (job, probe, chunking, optimization) and the
+    helper-level verdict could silently disagree with the phase result —
+    the encoding inner helper logged "complete with failures" while the
+    phase result itself never completed with failures at all.
+    """
+
+    @staticmethod
+    def _messages(caplog: pytest.LogCaptureFixture) -> list[str]:
+        return [r.getMessage() for r in caplog.records]
+
+    @staticmethod
+    def _executed(outcome: PhaseOutcome, message: str) -> _StubPhase:
+        return _StubPhase(
+            NoOpMetricsCollector(), Recovery(pending=True),
+            execute_result=_StubResult(outcome=outcome, message=message, rows=[]),
+        )
+
+    def test_completed_closes_with_success_line(self, caplog: pytest.LogCaptureFixture) -> None:
+        with caplog.at_level(logging.INFO):
+            self._executed(PhaseOutcome.COMPLETED, "5 artifact(s)").run()
+        assert f"{SUCCESS_SYMBOL_MINOR} Stub complete: 5 artifact(s)" in self._messages(caplog)
+
+    def test_suboptimal_closes_with_warning_line(self, caplog: pytest.LogCaptureFixture) -> None:
+        """``SUBOPTIMAL`` is completed work under a quality caveat — the
+        warning symbol, the word ``complete``, and the caveat together."""
+        with caplog.at_level(logging.INFO):
+            self._executed(PhaseOutcome.SUBOPTIMAL, "9526 pair(s) complete").run()
+        assert (
+            f"{WARNING_SYMBOL} Stub complete (suboptimal): 9526 pair(s) complete"
+            in self._messages(caplog)
+        )
+
+    def test_failed_closes_with_failure_line(self, caplog: pytest.LogCaptureFixture) -> None:
+        with caplog.at_level(logging.INFO):
+            self._executed(PhaseOutcome.FAILED, "2 pair(s) failed").run()
+        assert f"{FAILURE_SYMBOL_MINOR} Stub failed: 2 pair(s) failed" in self._messages(caplog)
+
+    def test_reused_from_execute_closes_with_reused_line(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        with caplog.at_level(logging.INFO):
+            self._executed(PhaseOutcome.REUSED, "everything cached").run()
+        assert f"{SUCCESS_SYMBOL_MINOR} Stub reused: everything cached" in self._messages(caplog)
+
+    def test_closer_is_the_last_line_of_the_run(self, caplog: pytest.LogCaptureFixture) -> None:
+        with caplog.at_level(logging.INFO):
+            self._executed(PhaseOutcome.COMPLETED, "done").run()
+        assert self._messages(caplog)[-1] == f"{SUCCESS_SYMBOL_MINOR} Stub complete: done"
+
+    def test_reuse_fast_exit_has_no_closer(self, caplog: pytest.LogCaptureFixture) -> None:
+        """The recovery line closes reuse runs — a second status line one
+        row after "— all reused" would be noise."""
+        phase = _StubPhase(
+            NoOpMetricsCollector(),
+            Recovery.from_artifacts([_art(ArtifactState.COMPLETE)]),
+        )
+        with caplog.at_level(logging.INFO):
+            phase.run()
+        messages = self._messages(caplog)
+        assert not any(m.startswith((SUCCESS_SYMBOL_MINOR, WARNING_SYMBOL)) for m in messages)
+        assert messages[-1].startswith("Recovery:")
+
+    def test_dry_run_has_no_closer(self, caplog: pytest.LogCaptureFixture) -> None:
+        phase = _StubPhase(NoOpMetricsCollector(), Recovery(pending=True))
+        with caplog.at_level(logging.INFO):
+            phase.run(dry_run=True)
+        assert not any(
+            m.startswith((SUCCESS_SYMBOL_MINOR, WARNING_SYMBOL, FAILURE_SYMBOL_MINOR))
+            for m in self._messages(caplog)
+        )
+
+    @given(message=st.text(max_size=80))
+    def test_closer_carries_arbitrary_message_text_verbatim(self, message: str) -> None:
+        """Property: the closer is a faithful carrier — any message text
+        (percent signs included) reaches the log verbatim, never interpreted
+        as a format string and never truncated."""
+        class _Capture(logging.Handler):
+            def __init__(self) -> None:
+                super().__init__()
+                self.messages: list[str] = []
+
+            def emit(self, record: logging.LogRecord) -> None:
+                self.messages.append(record.getMessage())
+
+        handler = _Capture()
+        logger = logging.getLogger("tests.unit.test_phase")
+        saved_level = logger.level
+        logger.setLevel(logging.INFO)
+        logger.addHandler(handler)
+        try:
+            self._executed(PhaseOutcome.FAILED, message).run()
+        finally:
+            logger.removeHandler(handler)
+            logger.setLevel(saved_level)
+        assert handler.messages[-1] == f"{FAILURE_SYMBOL_MINOR} Stub failed: {message}"
+
+    def test_suboptimal_counts_as_complete(self) -> None:
+        """Downstream gating reads ``is_complete`` — a suboptimal phase
+        produced every deliverable and must never cascade as a failure."""
+        result = _StubResult(
+            outcome=PhaseOutcome.SUBOPTIMAL, message="below targets", rows=[],
+        )
+        assert result.is_complete
 
 
 # ---------------------------------------------------------------------------

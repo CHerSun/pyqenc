@@ -167,9 +167,9 @@ class ProbePhase(Phase[ProbePhaseResult]):
     current for the live inputs (absent or invalidated by a manual ``--crop``
     override → ``ABSENT``, with the unknown-sentinel composition as the
     payload: frame count 0, empty crop). ``probe.yaml`` remains phase STATE
-    (the sidecar), distinct from the artifact. The phase emits no banner — it
-    logs a concise INFO line when the slow probe starts and a result line with
-    the probed (or cached) details.
+    (the sidecar), distinct from the artifact. The phase logs a concise INFO
+    line when the slow probe starts; the resolved details surface through
+    the uniform phase closer.
 
     Args:
         config:      Full validated application configuration.
@@ -188,7 +188,6 @@ class ProbePhase(Phase[ProbePhaseResult]):
     name:        str       = "probe"
     SIDECAR_NAME = "probe.yaml"
     DEPENDS_ON:  ClassVar[tuple[type[Phase], ...]] = (JobPhase, ExtractionPhase)
-    BANNER:      bool      = False
     _METRIC_KEY: MetricKey = MetricKey.PROBE
 
     def __init__(
@@ -386,18 +385,17 @@ class ProbePhase(Phase[ProbePhaseResult]):
             max_strategies = max(1, n_strategies),
         )
 
-        logger.info(
-            "Probe: done — frame_count=%d, crop=%s, resolution=%s",
-            frame_count, crop.display(), resulting_resolution or "unknown",
+        return self._make_result(
+            PhaseOutcome.COMPLETED, [],
+            f"frame_count={frame_count}, crop={crop.display()}, "
+            f"resolution={resulting_resolution or 'unknown'}",
         )
-        return self._make_result(PhaseOutcome.COMPLETED, [], "probe resolved")
 
     def _reused_result(self, wanted: list[Artifact], message: str) -> ProbePhaseResult:
         """Build the reused result from the cached ``probe.yaml`` state."""
         assert self._probe_sidecar is not None  # current currency implies a loaded sidecar
         assert self._video_stream is not None  # recovery guarantees a video stream
         assert self._resolved is not None  # stashed by the current-currency path
-        logger.info("Probe: all values cached — reusing probe.yaml")
         return self._make_result(PhaseOutcome.REUSED, [], "probe.yaml reused")
 
     def _make_result(

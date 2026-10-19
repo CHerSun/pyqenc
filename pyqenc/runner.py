@@ -62,6 +62,9 @@ class RunResult:
                              from every phase that has a cached ``result``.
         phases_executed:     Names of phases whose outcome is ``COMPLETED``
                              (performed real work this run).
+        phases_suboptimal:   Names of phases whose outcome is ``SUBOPTIMAL``
+                             (performed real work, every deliverable produced,
+                             at least one item below its quality bar).
         phases_reused:       Names of phases whose outcome is ``REUSED`` (all
                              artifacts already present; no work performed).
         phases_needing_work: Names of phases whose outcome is ``PENDING`` (wanted
@@ -80,6 +83,7 @@ class RunResult:
     success:             bool
     outcomes:            dict[str, PhaseOutcome] = field(default_factory=dict)
     phases_executed:     list[str]               = field(default_factory=list)
+    phases_suboptimal:   list[str]               = field(default_factory=list)
     phases_reused:       list[str]               = field(default_factory=list)
     phases_needing_work: list[str]               = field(default_factory=list)
     phases_failed:       list[str]               = field(default_factory=list)
@@ -248,7 +252,7 @@ class Runner:
 
         Reads only ``phase.name`` and ``phase.result.outcome`` for every phase
         that has a cached result — the common ``PhaseResult`` surface, never a
-        phase-specific internal. Each outcome is bucketed across all four
+        phase-specific internal. Each outcome is bucketed across all five
         ``PhaseOutcome`` values with none silently dropped. Phases with no cached result (e.g. never reached because an earlier
         dependency failed) are simply absent from ``outcomes``.
 
@@ -263,6 +267,7 @@ class Runner:
         """
         outcomes:            dict[str, PhaseOutcome] = {}
         phases_executed:     list[str]               = []
+        phases_suboptimal:   list[str]               = []
         phases_reused:       list[str]               = []
         phases_needing_work: list[str]               = []
         phases_failed:       list[str]               = []
@@ -275,6 +280,8 @@ class Runner:
             match outcome:
                 case PhaseOutcome.COMPLETED:
                     phases_executed.append(phase.name)
+                case PhaseOutcome.SUBOPTIMAL:
+                    phases_suboptimal.append(phase.name)
                 case PhaseOutcome.REUSED:
                     phases_reused.append(phase.name)
                 case PhaseOutcome.PENDING:
@@ -297,6 +304,7 @@ class Runner:
             success             = run_ok,
             outcomes            = outcomes,
             phases_executed     = phases_executed,
+            phases_suboptimal   = phases_suboptimal,
             phases_reused       = phases_reused,
             phases_needing_work = phases_needing_work,
             phases_failed       = phases_failed,
@@ -327,6 +335,10 @@ class Runner:
             logger.info("Run completed")
             logger.info("Phases executed: %d", len(summary.phases_executed))
             logger.info("Phases reused:   %d", len(summary.phases_reused))
+            if summary.phases_suboptimal:
+                logger.warning(
+                    "Phases suboptimal: %s", ", ".join(summary.phases_suboptimal),
+                )
         else:
             logger.error("Run FAILED: %s", summary.error)
             logger.error(

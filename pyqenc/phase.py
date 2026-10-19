@@ -23,8 +23,9 @@ This module defines the structural backbone of the phase object model:
 
 Every phase inherits ``Phase``, whose single concrete ``run()`` owns the
 uniform footprint — memoization guard, skip check, dependency resolution,
-banner, timed recovery, recovery summary, dry-run / no-pending branches, and
-timed execution — so no phase can forget a step or drift from the contract.
+banner, timed recovery, recovery summary, dry-run / no-pending branches,
+timed execution, and the closing status line built from the result — so no
+phase can forget a step or drift from the contract.
 Status decisions stay with the concrete phases: ``_recover()`` declares what
 work is pending, and ``_execute()`` returns the outcome the phase chooses.
 A separate ``finalize(ctx)`` hook lets each phase perform end-of-run
@@ -40,6 +41,7 @@ from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, Self
 
+from pyqenc.constants import FAILURE_SYMBOL_MINOR, SUCCESS_SYMBOL_MINOR, WARNING_SYMBOL
 from pyqenc.metrics import MetricKey
 from pyqenc.models import CleanupLevel, CropParams, PhaseOutcome, Strategy
 from pyqenc.state import ArtifactState
@@ -170,11 +172,15 @@ class PhaseResult:
     def is_complete(self) -> bool:
         """``True`` when all expected artifacts are ``COMPLETE``.
 
-        Derived from ``outcome``: ``COMPLETED`` or ``REUSED`` both mean the
-        phase finished successfully with all artifacts in a usable state.
-        Downstream phases check this to decide whether to proceed.
+        Derived from ``outcome``: ``COMPLETED``, ``SUBOPTIMAL``, and ``REUSED``
+        all mean the phase finished successfully with all artifacts in a
+        usable state (``SUBOPTIMAL`` only qualifies the quality, never the
+        completeness). Downstream phases check this to decide whether to
+        proceed.
         """
-        return self.outcome in (PhaseOutcome.COMPLETED, PhaseOutcome.REUSED)
+        return self.outcome in (
+            PhaseOutcome.COMPLETED, PhaseOutcome.SUBOPTIMAL, PhaseOutcome.REUSED,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -415,8 +421,8 @@ class Phase[ResultT: PhaseResult](ABC):
                            incrementally, so construction time is too early).
         BANNER:            Whether ``run()`` emits the thick-line banner.
                            Phases whose work is not user-significant (job
-                           setup, probe) set ``False`` and get the soft
-                           separator instead — a blank line plus
+                           setup) set ``False`` and get the soft separator
+                           instead — a blank line plus
                            ``Starting <name>…`` — so their output stays
                            visually separate from the previous phase's.
         _METRIC_KEY:       Top-level metric key timing this phase's execution.
@@ -529,7 +535,7 @@ class Phase[ResultT: PhaseResult](ABC):
         except RecoveryError as exc:
             # Fatal invalidation — a hard stop (same severity the phases
             # already used for mode/probe/source mismatches).
-            self._logger.critical(exc.message)
+            self._logger.critical("%s %s", FAILURE_SYMBOL_MINOR, exc.message)
             self.result = self._make_result(PhaseOutcome.FAILED, [], exc.message)
             return self.result
 
@@ -558,11 +564,40 @@ class Phase[ResultT: PhaseResult](ABC):
             self.result = self._reused_result(wanted, message)
             return self.result
 
-        # 10. Timed execution — the phase alone decides COMPLETED / FAILED.
+        # 10. Timed execution — the phase alone decides its outcome; the
+        #     template owns the closing status line built from that outcome.
         with self._collector.time(self._METRIC_KEY):
             result = self._execute(wanted, dry_run=dry_run)
         self.result = result
+        self._log_result_line(result)
         return result
+
+    def _log_result_line(self, result: ResultT) -> None:
+        """Log the phase's single closing status line (execute runs only).
+
+        The line is built from the result alone: the outcome picks the symbol
+        and the status word, ``message`` carries the phase-owned detail
+        (counts fold into it per the ``PhaseResult.message`` contract). Reuse
+        fast-exits and dry-runs never reach here — the recovery line and the
+        run summary close those runs.
+
+        Args:
+            result: The execute-path result whose outcome is being closed.
+        """
+        match result.outcome:
+            case PhaseOutcome.COMPLETED:
+                symbol, status = SUCCESS_SYMBOL_MINOR, "complete"
+            case PhaseOutcome.SUBOPTIMAL:
+                symbol, status = WARNING_SYMBOL, "complete (suboptimal)"
+            case PhaseOutcome.REUSED:
+                symbol, status = SUCCESS_SYMBOL_MINOR, "reused"
+            case PhaseOutcome.FAILED:
+                symbol, status = FAILURE_SYMBOL_MINOR, "failed"
+            case PhaseOutcome.PENDING:
+                return  # execute-run PENDING is a contract violation; the runner reports it
+        self._logger.info(
+            "%s %s %s: %s", symbol, self.name.capitalize(), status, result.message,
+        )
 
     def finalize(self, ctx: FinalizeContext) -> None:
         """Default end-of-run housekeeping: nothing to do.
@@ -624,7 +659,7 @@ class Phase[ResultT: PhaseResult](ABC):
         if failed:
             names = ", ".join(n.capitalize() for n in failed)
             err = f"{self.name.capitalize()} cannot run — failed dependencies: {names}"
-            self._logger.error(err)
+            self._logger.error("%s %s", FAILURE_SYMBOL_MINOR, err)
             return self._make_result(PhaseOutcome.FAILED, [], err)
         if pending:
             names = ", ".join(n.capitalize() for n in pending)

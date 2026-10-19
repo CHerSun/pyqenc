@@ -940,7 +940,8 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
             return self._make_result(
                 PhaseOutcome.COMPLETED,
                 [r for r in rows if r.wanted],
-                f"{len(selected)} survivor(s) selected",
+                f"tested {len(test_chunks)} chunk(s) for {len(plan.strategies)} "
+                f"strategy(ies), {len(selected)} selected",
             )
 
         # Searched: rows derive from the live ledger — the winner files of
@@ -981,7 +982,8 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         return self._make_result(
             PhaseOutcome.COMPLETED,
             [r for r in rows if r.wanted],
-            f"{len(selected)} strategy(ies) selected",
+            f"tested {len(test_chunks)} chunk(s) for {len(plan.strategies)} "
+            f"strategy(ies), {len(selected)} selected",
         )
 
     def _reused_result(self, wanted: list[Artifact], message: str) -> OptimizationPhaseResult:
