@@ -742,6 +742,11 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         silently shrunk test basis. The fresh selection is stashed here
         (recovery) so ``_execute`` uses the same set that produced the
         ledger counts.
+
+        The basis rules (``optimization.basis``) are deliberately NOT
+        invalidation keys: a resumed run keeps its persisted selection even
+        when the config's rules changed — they shape fresh selections only
+        (work-dirs are run-once).
         """
         chunks: list[VideoStreamChunk] = [
             a.payload for a in self._deps[ChunkingPhase].chunks

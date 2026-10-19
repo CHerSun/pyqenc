@@ -212,6 +212,12 @@ invalidation over the shared attempt/winner namespace; encoding owns none
 by provenance (strategy fingerprint, mode/q or targets/anchor, probe facet,
 sampling, winner-set fingerprint) — verdicts are always computed live.
 
+The test-basis rules (`optimization.basis`) are deliberately not among
+optimization's keys: the persisted `test_chunks` selection is the recovery
+contract, so a resumed run keeps its basis even when the config's selection
+rules changed — basis knobs shape fresh selections only (work-dirs are
+run-once).
+
 ### Chunking
 
 Chunks are timestamp windows over the source's extended video stream
