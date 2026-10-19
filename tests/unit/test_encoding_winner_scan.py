@@ -291,10 +291,22 @@ class TestScanWinnerSidecars:
         from decimal import Decimal as _Decimal
 
         from pyqenc.metrics import NoOpMetricsCollector
+        from pyqenc.models import PhaseOutcome
         from pyqenc.phases.encoding import EncodingPhase, LimiterSummary, LimiterSummaryRow
+        from pyqenc.phases.probe import ProbePhase, ProbePhaseResult
 
+        config = load_app_config(default_only=True)
+        plan = config.resolve_encoding(
+            strategies=["h265-aq+slow"], targets=["ssim-median:90.0"],
+        )
+        probe = ProbePhase(
+            config, {}, collector=NoOpMetricsCollector(), crop_params=None, plan=plan,
+        )
+        probe.result = ProbePhaseResult(
+            outcome=PhaseOutcome.COMPLETED, message="stub", plan=plan,
+        )
         phase = EncodingPhase(
-            load_app_config(default_only=True), {}, collector=NoOpMetricsCollector(),
+            config, {ProbePhase: probe}, collector=NoOpMetricsCollector(),
         )
         summaries = [LimiterSummary(
             strategy = "h265-aq+slow",
@@ -311,7 +323,7 @@ class TestScanWinnerSidecars:
             ],
         )]
         with caplog.at_level(_logging.INFO, logger="pyqenc.phases.encoding"):
-            phase._log_limiter_summary(summaries)
+            phase._log_limiter_summary(summaries, plan.targets)
 
         text = caplog.text
         assert "97 (+1.4)" in text          # pass count with median surplus

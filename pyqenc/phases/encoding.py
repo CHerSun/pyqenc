@@ -73,6 +73,7 @@ from pyqenc.stream_model import (
 from pyqenc.stream_model import (
     File as StreamFile,
 )
+from pyqenc.summary_tables import CONVENTION_SEPARATOR
 from pyqenc.utils.alive import AdvanceState, ProgressBar
 from pyqenc.utils.concurrency import run_bounded
 from pyqenc.utils.ffmpeg_runner import FFmpegRequest, FFmpegRunResult, run_ffmpeg
@@ -2066,11 +2067,36 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
         fmt_key_value_table(kv)
 
 
-    def _log_limiter_summary(self, summaries: list[LimiterSummary]) -> None:
+    def _presentation_targets(self) -> list[QualityTarget]:
+        """The targets winner presentation is judged against (mode-aware).
+
+        Fixed compared runs judge the anchor targets (config targets are
+        search-tuned vocabulary); searched runs judge the configured
+        targets.  Uncompared fixed runs carry no basis — the empty set
+        extinguishes the winning-limiter table.
+
+        Returns:
+            The judging target set.
+        """
+        plan = self._deps[ProbePhase].plan
+        if plan.fixed_quality:
+            return self._deps[OptimizationPhase].anchor_targets
+        return plan.targets
+
+    def _log_limiter_summary(
+        self,
+        summaries: list[LimiterSummary],
+        targets:   list[QualityTarget],
+    ) -> None:
         """Emit the winning-limiter distribution table at INFO.
+
+        The basis line above the table states the absolutes the surplus /
+        deficit cells read against, in sidecar-key spelling — labeled
+        ``anchor targets`` on fixed runs, ``targets`` on searched runs.
 
         Args:
             summaries: Per-strategy groups (rows sorted by chunk count desc).
+            targets:   The judging basis (the presentation targets).
         """
         # Column widths
         LIMIT_WIDTH = 14
@@ -2081,6 +2107,14 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
 
         logger.info("")
         logger.info("Winning-limiter distribution")
+        basis = "anchor targets" if self._deps[ProbePhase].plan.fixed_quality else "targets"
+        logger.info(
+            "  %s: %s",
+            basis,
+            CONVENTION_SEPARATOR.join(
+                f"{t.key().sidecar_key()}={t.value:.1f}" for t in targets
+            ),
+        )
         for summary in summaries:
             # The median-quality column is labeled with the group strategy's
             # own knob label (CRF/CQ/QP/…) — never a hardcoded codec name.
@@ -2294,7 +2328,9 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
         """
         result = super()._reused_result(wanted, message)
         if self._persisted is not None and self._persisted.summary:
-            self._log_limiter_summary(self._persisted.summary)
+            self._log_limiter_summary(
+                self._persisted.summary, self._presentation_targets(),
+            )
         else:
             logger.debug("No persisted limiter summary — table skipped on reused run")
         self._reassert_frame_preservation(self._persisted)
@@ -2404,19 +2440,7 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
         # Cache quality labels for downstream phases (e.g. MergePhase quality plot)
         self.quality_labels = {s.display_name(): s.codec.quality_label for s in strategies}
 
-        # Presentation targets — what winner sidecars and the limiter-style
-        # output are judged against. Fixed compared runs use the anchor
-        # targets (config targets are search-tuned vocabulary and would
-        # read as all-miss noise); uncompared fixed runs have no comparison
-        # basis (absolute values, no verdicts — the limiter table
-        # self-extinguishes on empty targets); searched runs use the config
-        # targets, unchanged.
-        plan = self._deps[ProbePhase].plan
-
-        if plan.fixed_quality:
-            presentation_targets = optimization_result.anchor_targets
-        else:
-            presentation_targets = plan.targets
+        presentation_targets = self._presentation_targets()
 
         # encoding.yaml carries the replay aggregate ONLY (no keys — Req 24):
         # a single post-success write; there is no crash-safe early write
@@ -2530,7 +2554,7 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
         # measurements, the optimization error surfaces loudly instead of a
         # silent election.
         presentation_anchor = self._resolve_presentation_anchor(
-            optimization_result, scan, plan,
+            optimization_result, scan, self._deps[ProbePhase].plan,
             winner_sizes={
                 name: sum(
                     safe_stat_size(p.stream.stream.file.path) or 0
@@ -2547,7 +2571,7 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
         # via the processing path.
         if scan is not None:
             if scan.summaries is not None:
-                self._log_limiter_summary(scan.summaries)
+                self._log_limiter_summary(scan.summaries, presentation_targets)
             save_model(encoding_yaml, EncodingSidecar(
                 summary = scan.summaries if scan.summaries is not None else [],
                 frames  = scan.frame_totals() if scan.frames_known else {},

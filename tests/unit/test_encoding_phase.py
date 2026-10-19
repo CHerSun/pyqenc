@@ -700,6 +700,196 @@ class TestEncodingPresentationTargets:
         ]
 
 
+import logging
+import uuid
+
+from hypothesis import HealthCheck, given, settings
+from hypothesis import strategies as st
+
+from pyqenc.phases.encoding import EncodingSidecar, LimiterSummary, LimiterSummaryRow
+from pyqenc.utils.yaml_utils import save_model
+
+
+class TestWinningLimiterBasisLine:
+    """The winning-limiter table states its absolute judging basis (§125).
+
+    The surplus/deficit cells of the winning-limiter table are deltas —
+    a reader could not turn them into absolute metric values because the
+    judging basis (the configured targets, or the anchor targets on fixed
+    runs) was stated nowhere. Covered on the fully-reused path, which
+    renders the table from ``encoding.yaml``; the processing path feeds
+    the same renderer the same inputs.
+    """
+
+    def _run_reused_phase(
+        self,
+        base: Path,
+        caplog,
+        *,
+        fixed: bool,
+        plan_targets: list[str],
+        anchor_targets: list[QualityTarget],
+        limiter_keys: list[str],
+    ) -> list[str]:
+        """Run EncodingPhase into full reuse and return its INFO messages.
+
+        The work dir carries one complete winner pair plus the replay
+        aggregate, so the phase takes the reuse fast exit and renders the
+        winning-limiter table from the persisted summary.
+        """
+        from fractions import Fraction as _Fraction
+
+        from pyqenc.stream_model import File as _File
+        from pyqenc.stream_model import VideoStream, VideoStreamChunk, VideoStreamInfo
+
+        config = load_app_config(default_only=True).model_copy(deep=True)
+        plan = config.resolve_encoding(
+            strategies = ["h265-aq+slow"],
+            targets    = plan_targets,
+            quality    = (_D("18"), _D("18")) if fixed else None,
+        )
+
+        base.mkdir(parents=True, exist_ok=True)
+        src = base / "source.mkv"
+        src.write_bytes(b"\x00" * 64)
+        work_dir = base / "work"
+        work_dir.mkdir(parents=True, exist_ok=True)
+
+        job = JobPhase(
+            config, {}, source=src, work_dir=work_dir, force=False,
+            cleanup=CleanupLevel.NONE, no_metrics=True,
+            collector=NoOpMetricsCollector(),
+        )
+        job.run(dry_run=False)
+
+        info = VideoStreamInfo(
+            track_id=0, codec_name="hevc", fps=24.0,
+            fps_fraction=_Fraction(24, 1), resolution="1920x1080",
+            duration_seconds=10.0,
+        )
+        extended = ExtendedVideoStream(
+            stream=VideoStream(file=_File(path=src), info=info),
+            frame_count=240, crop=CropParams(),
+        )
+        probe = ProbePhase(config, {}, collector=NoOpMetricsCollector(), crop_params=None, plan=plan)
+        probe.result = ProbePhaseResult(
+            outcome=PhaseOutcome.COMPLETED, message="stub",
+            plan=plan,
+            stream=_PAArtifact(payload=extended, state=_PAState.COMPLETE),
+        )
+
+        chunk = VideoStreamChunk(stream=extended, start_timestamp=0.0,
+                                 end_timestamp=10.0, frame_count=240)
+        chunking = _CCP(config, {}, collector=NoOpMetricsCollector())
+        chunking.result = ChunkingPhaseResult(
+            outcome=PhaseOutcome.COMPLETED, message="stub",
+            chunks=[_PAArtifact(payload=chunk, state=_PAState.COMPLETE)],
+        )
+
+        strategy = plan.strategies[0]
+        optimization = OptimizationPhase(config, {}, collector=NoOpMetricsCollector())
+        optimization.result = OptimizationPhaseResult(
+            outcome=PhaseOutcome.COMPLETED, message="stub",
+            selected_strategies=[strategy],
+            anchor_targets=anchor_targets,
+        )
+
+        winner_dir = work_dir / "encoded" / strategy.safe_name()
+        winner_dir.mkdir(parents=True, exist_ok=True)
+        (winner_dir / _EC.format_winner_file_name(chunk.safe_name())).write_bytes(b"x" * 32)
+        write_yaml_atomic(
+            winner_dir / _EC.format_winner_sidecar_name(chunk.safe_name()),
+            {"quality": "18.0", "targets_met": True, "frame_count": 240, "metrics": {}},
+        )
+        save_model(work_dir / EncodingPhase.SIDECAR_NAME, EncodingSidecar(
+            frames={},
+            summary=[LimiterSummary(
+                strategy=strategy.display_name(), chunks=1,
+                rows=[LimiterSummaryRow(limiter=key, passed=1, missed=0, med_surplus=2.0,
+                                        med_quality=_D("18.0"))
+                      for key in limiter_keys],
+            )] if limiter_keys else [],
+        ))
+
+        phase = EncodingPhase(config, {
+            JobPhase: job, ProbePhase: probe,
+            _CCP: chunking, OptimizationPhase: optimization,
+        }, collector=NoOpMetricsCollector())
+        caplog.clear()
+        with caplog.at_level(logging.INFO):
+            result = phase.run(dry_run=False)
+        assert result.outcome is PhaseOutcome.REUSED
+        return caplog.messages
+
+    def test_search_run_states_configured_targets_above_table(self, tmp_path, caplog) -> None:
+        """A searched run states the configured targets above the table."""
+        messages = self._run_reused_phase(
+            tmp_path, caplog,
+            fixed=False, plan_targets=["vmaf-min:93.0", "psnr-median:40.0"],
+            anchor_targets=[], limiter_keys=["vmaf_min", "psnr_median"],
+        )
+        assert "Winning-limiter distribution" in messages
+        assert "  targets: vmaf_min=93.0 · psnr_median=40.0" in messages
+
+    def test_fixed_run_labels_the_basis_as_anchor_targets(self, tmp_path, caplog) -> None:
+        """A fixed run states the anchor targets — never the search-tuned config targets."""
+        messages = self._run_reused_phase(
+            tmp_path, caplog,
+            fixed=True, plan_targets=["vmaf-min:93.0"],
+            anchor_targets=[
+                QualityTarget(metric="vmaf", statistic="median", value=91.0),
+                QualityTarget(metric="vif", statistic="median", value=84.0),
+            ],
+            limiter_keys=["vmaf_median"],
+        )
+        assert "  anchor targets: vmaf_median=91.0 · vif_median=84.0" in messages
+
+    def test_uncompared_fixed_run_renders_no_table(self, tmp_path, caplog) -> None:
+        """A run with no judging basis (uncompared fixed) renders no table at all."""
+        messages = self._run_reused_phase(
+            tmp_path, caplog,
+            fixed=True, plan_targets=["vmaf-min:93.0"],
+            anchor_targets=[], limiter_keys=[],
+        )
+        assert "Winning-limiter distribution" not in messages
+        assert not [m for m in messages if "targets:" in m]
+
+    @settings(max_examples=25, deadline=None,
+              suppress_health_check=[HealthCheck.function_scoped_fixture])
+    @given(
+        targets=st.lists(st.tuples(
+            st.sampled_from(["vmaf", "psnr", "ssim", "vif"]),
+            st.sampled_from(["min", "median", "p10"]),
+            st.integers(min_value=10, max_value=1000).map(lambda t: t / 10),
+        ), min_size=1, max_size=3, unique=True),
+        limiter_count=st.integers(min_value=1, max_value=3),
+    )
+    def test_every_limiter_key_reads_against_a_stated_absolute(
+        self, tmp_path, caplog, targets, limiter_count,
+    ) -> None:
+        """Every limiter key of the table has its absolute value on the basis line.
+
+        The basis line appears exactly once, directly under the table
+        title, and states every configured target — limiters are
+        worst-targets, so each row's deltas read against a visible number.
+        """
+        base = tmp_path / f"run-{uuid.uuid4().hex[:8]}"
+        specs = [f"{metric}-{stat}:{value}" for metric, stat, value in targets]
+        limiter_keys = [f"{metric}_{stat}"
+                        for metric, stat, _ in targets[:limiter_count]]
+        messages = self._run_reused_phase(
+            base, caplog,
+            fixed=False, plan_targets=specs,
+            anchor_targets=[], limiter_keys=limiter_keys,
+        )
+        title_at = messages.index("Winning-limiter distribution")
+        basis_lines = [m for m in messages if m.startswith("  targets: ")]
+        assert len(basis_lines) == 1
+        assert messages.index(basis_lines[0]) == title_at + 1
+        for metric, stat, value in targets:
+            assert f"{metric}_{stat}={value:.1f}" in basis_lines[0]
+
+
 # ---------------------------------------------------------------------------
 # The chunk->winner 1:1 span contract guard
 # ---------------------------------------------------------------------------

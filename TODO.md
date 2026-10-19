@@ -680,14 +680,6 @@ Process (explicit): produce a TABLE first — current name, proposed name (publi
 
 ---
 
-## 125. (fast) Winner-limiter table never states the absolute bar it judges against
-
-The encoding summary's winning-limiter table (`EncodingPhase._log_limiter_summary`) reports pass/miss counts with median surplus/deficit deltas — but never the ABSOLUTE bar: search runs judge the user's configured targets, fixed runs the anchor-derived synthetic ruler, and neither set of values appears anywhere before the table. A reader cannot turn `miss 3 (−1.2)` into an actual metric value without opening sidecars.
-
-Direction: state the absolutes BEFORE the table (a line above it, in the pattern the unified comparison tables use — their convention line names the ruler identity, and their ruler row carries the absolute values). Natural shape: one `targets/synthetic ruler:` line listing `metric-stat = value` pairs over the table's limiter keys, so the deltas below read against visible numbers.
-
----
-
 ## 126. Per-selector fixed quality — multiple `--strategies`/`-q` pairs
 
 Fixed runs with a single `-q` are an awesome tool, but quality is NOT uniform between codecs — AV1 CRF and H.265 CRF differ wildly in both value and perceptible quality for the same number. Wanting different codecs at different fixed qualities in ONE run is impossible today:
