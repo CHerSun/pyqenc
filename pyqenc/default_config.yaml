@@ -89,15 +89,15 @@ audio:
       type: dynaudnorm            # option names are ffmpeg's long forms; run `ffmpeg -h filter=dynaudnorm` to inspect
       maxgain: 3.0                # steadier than ffmpeg's default 10, which audibly pumps ("dribbles"); rest = ffmpeg defaults
     # --- downmix (downmix-only: no-op when source channels <= target) -----
-    down_std:                     # canonical ITU-R BS.775 / ATSC Lo/Ro fold to stereo (LFE dropped)
+    to_stereo:                    # canonical ITU-R BS.775 / ATSC Lo/Ro fold to stereo (LFE dropped)
       type: downmix
       to: "2.0"                   # target layout; 5.1/7.1 fold to 2.0, a 2.0/stereo source passes through untouched
       matrix: std
-    down_lfe:                     # custom downmix preserving LFE channel for better dialogs / effects balance; very close to STD.
+    to_stereo_lfe:                # fold keeping a share of LFE + surrounds for a fuller sound; very close to std
       type: downmix
       to: "2.0"
       matrix: lfe
-    down_boosted:                 # custom downmix for dialogs boosting (full FC, reduced surrounds, LFE dropped)
+    to_stereo_dialog:             # dialog-boosting fold (full centre, reduced surrounds, LFE dropped)
       type: downmix
       to: "2.0"
       matrix: boosted
@@ -115,14 +115,14 @@ audio:
     # A chain applied to N matched tracks produces exactly N outputs, named
     # "<stream name> chain=<name>.<ext>". No encode filter -> FLAC (lossless);
     # otherwise the LAST encode filter in the chain sets the codec/extension.
-    - name: stereo_std_normal     # custom downmix to stereo with LFE channel and peak-normalized to prevent clipping
-      filters: [down_std, peaknorm, aac]
-    - name: stereo_std_night      # custom downmix to stereo with LFE channel + dynamic normalization for night
-      filters: [down_std, peaknorm, dynaudnorm, aac]
-    - name: stereo_lfe_normal     # custom downmix to stereo with LFE channel and peak-normalized to prevent clipping
-      filters: [down_lfe, peaknorm, aac]
-    - name: stereo_lfe_night      # custom downmix to stereo with LFE channel + dynamic normalization for night
-      filters: [down_lfe, peaknorm, dynaudnorm, aac]
+    - name: stereo_std_normal     # standard stereo fold (LFE dropped), peak-normalised to prevent clipping
+      filters: [to_stereo, peaknorm, aac]
+    - name: stereo_std_night      # standard stereo fold (LFE dropped) + dynamic normalisation for night listening
+      filters: [to_stereo, peaknorm, dynaudnorm, aac]
+    - name: stereo_lfe_normal     # LFE-keeping stereo fold, peak-normalised to prevent clipping
+      filters: [to_stereo_lfe, peaknorm, aac]
+    - name: stereo_lfe_night      # LFE-keeping stereo fold + dynamic normalisation for night listening
+      filters: [to_stereo_lfe, peaknorm, dynaudnorm, aac]
 
   select: []                      # empty (default) = process ALL extracted audio tracks
     # Uncomment and adapt entries below to process only specific tracks. Each

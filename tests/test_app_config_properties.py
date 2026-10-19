@@ -1685,14 +1685,14 @@ def _valid_audio_dict() -> dict:
     return {
         "filters": {
             "peaknorm":  {"type": "peaknorm", "target_dbfs": -1.0},
-            "down_lfe":  {"type": "downmix", "to": "2.0", "matrix": "lfe"},
+            "to_stereo_lfe":  {"type": "downmix", "to": "2.0", "matrix": "lfe"},
             "aac":       {"type": "encode", "codec": "aac",
                           "bitrate_per_channel": "96k", "extension": "m4a"},
             "passthrough": {"type": "passthrough"},
         },
         "chains": [
             {"name": "normal", "filters": ["peaknorm"]},
-            {"name": "night",  "filters": ["down_lfe", "aac"]},
+            {"name": "night",  "filters": ["to_stereo_lfe", "aac"]},
         ],
         "select": [],
         "concurrency": 1,
@@ -1726,7 +1726,7 @@ class TestAudioConfigLayeredMerge:
         audio = AudioConfig.model_validate(merged["audio"])
 
         # Untouched base filters survive (dict-merge, not replace).
-        assert {"peaknorm", "down_lfe", "aac", "passthrough", "loudnorm"} <= set(audio.filters)
+        assert {"peaknorm", "to_stereo_lfe", "aac", "passthrough", "loudnorm"} <= set(audio.filters)
         # Overridden param won.
         peak = audio.filters["peaknorm"]
         assert isinstance(peak, PeakNormInstance)

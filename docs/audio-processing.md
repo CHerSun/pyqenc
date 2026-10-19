@@ -127,15 +127,15 @@ LFE - low frequency effects channel. It preserves special effects, like explosio
 notice that LFE preservation gives sound more clarity.
 
 ```yaml
-down_std:
+to_stereo:
   type: downmix
   to: "2.0"
   matrix: std
-down_lfe:
+to_stereo_lfe:
   type: downmix
   to: "2.0"
   matrix: lfe
-down_boosted:
+to_stereo_dialog:
   type: downmix
   to: "2.0"
   matrix: boosted
@@ -181,9 +181,9 @@ chains:
   - name: normal
     filters: [peaknorm]
   - name: night
-    filters: [down_lfe, dynaudnorm]
+    filters: [to_stereo_lfe, dynaudnorm]
   - name: aac
-    filters: [down_std, peaknorm, aac]
+    filters: [to_stereo, peaknorm, aac]
 ```
 
 Key rules:
@@ -325,4 +325,4 @@ Editing the `audio:` section is therefore all it takes to re-run only what chang
 
 ## Where to configure
 
-Everything above lives under `audio:` in your config file. Start from the shipped `pyqenc/default_config.yaml`, which ships a working palette (`peaknorm`, `loudnorm`, `dynaudnorm`, `down_std`/`down_lfe`/`down_boosted`, `aac`, `passthrough`), example chains, and an empty `select` with commented rus-dub and eng-7.1-then-5.1 examples. Config is layered — a user or project config can add filters, replace the chain list, or set a select tree without editing the bundled defaults.
+Everything above lives under `audio:` in your config file. Start from the shipped `pyqenc/default_config.yaml`, which ships a working palette (`peaknorm`, the `loudnorm_r128`/`loudnorm_stream`/`loudnorm_apple` presets, `dynaudnorm`, `to_stereo`/`to_stereo_lfe`/`to_stereo_dialog`, `aac`, `passthrough`), example chains, and an empty `select` with commented rus-dub and eng-7.1-then-5.1 examples. Config is layered — a user or project config can add filters, replace the chain list, or set a select tree without editing the bundled defaults.
