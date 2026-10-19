@@ -304,14 +304,6 @@ See also 51.
 
 ---
 
-## 79. (HIGH) FilterInstance discriminated union — replace the registry cast — needs thinking
-
-2026-10-02: `FilterInstance` (app_config) is an open registry model — `type: str` + `params: SerializeAsAny[BaseModel]` — so chain.py needs a `cast(EncodeFilterParams, inst.params)` at the encode-conversion site. Proper fix: per-filter Instance models (`type: Literal["<id>"]`, concrete params) + pydantic discriminated union on `type`, defined in `audio/filters.py` (import direction allows it: app_config already imports filters). Kills the cast (isinstance/match narrows natively), mostly collapses the hand-rolled `_resolve_and_validate` dispatch (keep error wording if needed). Openness stays single-file: Params + Filter + Instance + union member. Blast radius: app_config, chain, 3 test files. Until then the cast (or an assert-isinstance) is the sanctioned interim.
-
-2026-10-05 addendum: the interim's fragility went live — the first-ever audio e2e run (new sample) caught FilterInstance params landing as plain BaseModel after any model_dump→validate round-trip; pydantic 2.13 turned that into hard AttributeErrors at the cast site (5339b61 fixed the round-trip to always re-validate through the type's params model). The discriminated union kills this class of drift structurally — worth the priority bump when next touched.
-
----
-
 ## 80. (HIGH) LongPathYaml redefinition — cleaner editor experience + pyright-gate enabler — needs thinking
 
 Related: §91 (LongPath trailing-whitespace idempotence — the other open LongPath finding, 2026-10-05).
@@ -890,7 +882,19 @@ To put it simply - encoding.py needs a full review for simplification.
 
 Strategy display name, being logged in brackets - should be owned somewhere uniformely for all similar logging (probably already have a func in logging).
 
-## Last known = 138
+## 139. Round-trip property trips filter_too_much on low-CPU machines
+
+2026-10-19, surfaced while gating the §79 refactor (unrelated to it — reproduced
+identically on unmodified code): `tests/test_app_config_properties.py::TestAppConfigRoundTrip::test_scalar_fields_survive_round_trip`
+fails deterministically under seed 21356150877959716566173950146632100797 on
+this 4-CPU machine. The strategy draws `concurrency` uniform in 1..16 and the
+test `assume`s `concurrency <= os.cpu_count()` — a 75% discard rate that trips
+Hypothesis's `HealthCheck.filter_too_much`. Generation-side fix candidate: draw
+`concurrency` from `1..cpu_count` directly (no assume), or suppress the health
+check for this test. Same statistics-based health-check family as §75's
+DeadlineExceeded flakes, but deterministic per-seed rather than load-dependent.
+
+## Last known = 139
 
 Keep this updated, so we can keep continuous numbering even on last todo item deletion.
 Keep this the last entry for easy human updates.
