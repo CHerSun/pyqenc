@@ -709,18 +709,6 @@ Blast radius (verified):
 
 ---
 
-## 128. Merge/optimization sidecar loaders duplicate `load_model` verbatim — generalize it to take a `TypeAdapter`
-
-`load_merged_output_sidecar` (`phases/merge.py:163-180`) and `load_optimization_sidecar` (`phases/optimization.py:141-158`) are verbatim copies of `load_model` (`utils/yaml_utils.py:25-48`): same absent→`None`, same `except (OSError, ValueError, yaml.YAMLError)` tuple, same `"Could not load %s: %s"` warning — one line differs (`_ADAPTER.validate_python(data or {})` vs `model_cls.model_validate(data or {})`). Reason: both sidecars are mode-discriminated unions (`Fixed | Search`, `discriminator="mode"`), and `load_model` is typed `model_cls: type[ModelT]` — a union isn't a class, so dispatch needs a `TypeAdapter`; when the unions landed, the scaffold got copy-pasted. The save half already goes through the wrapper in both files (`save_optimization_sidecar` is a one-line delegation; merge saves via `save_model` directly) — only the load half is hand-rolled.
-
-Direction: `load_model` accepts `type[ModelT] | TypeAdapter[ModelT]` and dispatches with one isinstance check; both loaders collapse to one-line delegations mirroring their save twins.
-
-Audited and ruled OUT in the same census (2026-10-12, user accepted) — different contracts, not duplication: `metrics.py`'s `_try_resume` / `_write_atomic` are deliberately best-effort non-fatal (warning + continue; `write_yaml_atomic` raises — the LOUD WRITES ruling must not apply to telemetry; §117 stub), and `app_config.py`'s three opens are a 3-layer dict-merge before validation with loud user-facing failures (warn-and-`None` would silently encode with default settings).
-
-**Questions to think about:** none blocking — mechanical.
-
----
-
 ## 130. Review dependencies
 
 There are quite heavy dependencies, a total of almost 250 MB! Need a review, if we really need them or if they can be replaced by a more lightweight alternatives:

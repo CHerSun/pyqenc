@@ -22,7 +22,6 @@ from fractions import Fraction
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, ClassVar, Literal
 
-import yaml
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
 from pyqenc.constants import (
@@ -170,15 +169,7 @@ def load_merged_output_sidecar(sidecar_path: Path) -> MergedOutputSidecar | None
     Returns:
         The tagged record, or ``None`` when absent or unparsable.
     """
-    if not sidecar_path.exists():
-        return None
-    try:
-        with sidecar_path.open("r", encoding="utf-8-sig") as fh:
-            data = yaml.safe_load(fh)
-        return _MERGED_OUTPUT_ADAPTER.validate_python(data or {})
-    except (OSError, ValueError, yaml.YAMLError) as exc:
-        logger.warning("Could not load %s: %s", sidecar_path, exc)
-        return None
+    return load_model(sidecar_path, _MERGED_OUTPUT_ADAPTER)
 
 
 class MergeSidecar(BaseModel):

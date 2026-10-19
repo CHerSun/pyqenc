@@ -25,7 +25,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, ClassVar, Literal
 
-import yaml
 from pydantic import BaseModel, Field, TypeAdapter
 
 from pyqenc.constants import (
@@ -72,7 +71,7 @@ from pyqenc.utils.alive import AdvanceState, ProgressBar
 from pyqenc.utils.fs import safe_stat_size
 from pyqenc.utils.log_format import fmt_key_value_table
 from pyqenc.utils.visualization import QualityMeasurer
-from pyqenc.utils.yaml_utils import save_model
+from pyqenc.utils.yaml_utils import load_model, save_model
 
 if TYPE_CHECKING:
     from pyqenc.app_config import AppConfig
@@ -147,15 +146,7 @@ def load_optimization_sidecar(path: Path) -> OptimizationSidecar | None:
     Returns:
         The tagged sidecar, or ``None`` when absent or unparsable.
     """
-    if not path.exists():
-        return None
-    try:
-        with path.open("r", encoding="utf-8-sig") as fh:
-            data = yaml.safe_load(fh)
-        return _OPTIMIZATION_ADAPTER.validate_python(data or {})
-    except (OSError, ValueError, yaml.YAMLError) as exc:
-        logger.warning("Could not load %s: %s", path, exc)
-        return None
+    return load_model(path, _OPTIMIZATION_ADAPTER)
 
 
 def save_optimization_sidecar(path: Path, sidecar: OptimizationSidecar) -> None:

@@ -15,15 +15,18 @@ import logging
 from pathlib import Path
 
 import yaml
-from pydantic import BaseModel
+from pydantic import BaseModel, TypeAdapter
 
 from pyqenc.constants import TEMP_SUFFIX
 
 logger = logging.getLogger(__name__)
 
 
-def load_model[ModelT: BaseModel](path: Path, model_cls: type[ModelT]) -> ModelT | None:
-    """Load a YAML sidecar file as the pydantic model *model_cls*.
+def load_model[ModelT: BaseModel](
+    path:  Path,
+    model: type[ModelT] | TypeAdapter[ModelT],
+) -> ModelT | None:
+    """Load a YAML sidecar file as the pydantic model *model*.
 
     The uniform sidecar-load contract: an absent file and any parse or
     validation failure both mean "rebuild" — the error is logged as a
@@ -31,8 +34,9 @@ def load_model[ModelT: BaseModel](path: Path, model_cls: type[ModelT]) -> ModelT
     loads as the model's defaults (``safe_load`` yields ``None``).
 
     Args:
-        path:      Path to the YAML file.
-        model_cls: The pydantic model class to validate the data against.
+        path:  Path to the YAML file.
+        model: The pydantic model class (or a ``TypeAdapter`` for a
+               discriminated-union sidecar) to validate the data against.
 
     Returns:
         The validated model, or ``None`` when absent or unparseable.
@@ -42,7 +46,9 @@ def load_model[ModelT: BaseModel](path: Path, model_cls: type[ModelT]) -> ModelT
     try:
         with path.open("r", encoding="utf-8-sig") as fh:
             data = yaml.safe_load(fh)
-        return model_cls.model_validate(data or {})
+        if isinstance(model, TypeAdapter):
+            return model.validate_python(data or {})
+        return model.model_validate(data or {})
     except (OSError, ValueError, yaml.YAMLError) as e:
         logger.warning("Could not load %s: %s", path, e)
         return None
