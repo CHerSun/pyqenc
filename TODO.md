@@ -914,6 +914,18 @@ To put it simply - encoding.py needs a full review for simplification.
 
 ---
 
+## 137. Logging strategy format ownership
+
+```
+                        logger.info(
+                            "%s%s%s (%d of %d): starting merge — %d chunks",
+                            BRACKET_LEFT, strategy_name, BRACKET_RIGHT,
+                            pending_idx, pending_count, chunk_count,
+                        )
+```
+
+Strategy display name, being logged in brackets - should be owned somewhere uniformely for all similar logging (probably already have a func in logging).
+
 ## Last known = 136
 
 Keep this updated, so we can keep continuous numbering even on last todo item deletion.
