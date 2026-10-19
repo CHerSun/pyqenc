@@ -274,6 +274,8 @@ Investigation needed.
 
 2026-10-19: FOURTH observation — first one with a NAME: `tests/unit/test_yaml_utils.py::test_properties_round_trip_preserves_arbitrary_text` failed mid-suite with Hypothesis DeadlineExceeded (909ms vs the 200ms deadline) under concurrent load; passed in isolation AND the full suite passed clean on immediate rerun. Same load-tracking pattern, now with the deadline mechanism identified as the trip-wire (examples run slower than the fixed per-example budget, not logic failures).
 
+2026-10-19 (later): FIFTH observation, same mechanism, different test: `tests/test_metrics_properties.py::test_convergence_stats_math` DeadlineExceeded mid-suite under load (during the 0.27.3 gate run); passed in isolation in 1.1s. Family now spans two files.
+
 ---
 
 ## 76. Reevaluate Python 3.15.x (lazy imports) — needs thinking
