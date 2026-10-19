@@ -274,7 +274,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
     ``optimization.yaml``, and selects strategies within the configured
     tolerance of the best result. Optimization IS encoding on a chunk subset
     and follows the encoding contract: its test encodes are timed under
-    ``optimization.<strategy>`` / ``optimization.quality_measure`` (via the
+    ``optimization.<strategy>`` / ``optimization.measure`` (via the
     shared ``ChunkEncoder`` metric prefix) and receive the run's cleanup
     level for rolling attempt cleanup.
 
@@ -406,6 +406,8 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         kv: dict[str, object] = {
             "Tolerance:":  self._config.encoding.optimize_tolerance,
         }
+        if self._config.encoding.concurrency > 1:
+            kv["Concurrency:"] = self._config.encoding.concurrency
 
         if plan.fixed_quality:
             kv["Quality:"]    = [f"{strategy.codec.quality_label}={strategy.codec.quality_range[0]} for {strategy.display_name()}" for strategy in plan.strategies]
@@ -778,7 +780,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         The top-level ``optimization`` span belongs to the template and covers
         everything here. Test encodes run through the shared encoder machinery
         with ``metric_prefix=optimization``, so their dotted keys land under
-        ``optimization.<strategy>`` / ``optimization.quality_measure``.
+        ``optimization.<strategy>`` / ``optimization.measure``.
         ``dry_run`` is never ``True`` here (optimization is not a
         readonly-execute phase; the template previews instead).
 
@@ -809,7 +811,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         current_sampling = self._config.measurement.sampling
 
         from pyqenc.phases.encoding import (
-            _encode_chunks_parallel,
+            _encode_pairs,
             _recover_encoding_attempts,
         )  # deferred: circular import (encoding <-> optimization)
 
@@ -837,9 +839,13 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
                 cleanup_level    = job_result.cleanup,
                 metric_prefix    = MetricKey.OPTIMIZATION,
             )
-            test_chunk_seconds = sum(c.end_timestamp - c.start_timestamp for c in test_chunks)
-            total_seconds      = test_chunk_seconds * len(strategies_to_test)
-            total_count        = len(test_chunks) * len(strategies_to_test)
+            # Duration-weighted bar (Σ test-chunk durations × strategies),
+            # advanced once per completed pair by that pair's duration.
+            total_count = len(test_chunks) * len(strategies_to_test)
+            total_seconds = (
+                sum(c.end_timestamp - c.start_timestamp for c in test_chunks)
+                * len(strategies_to_test)
+            )
 
             test_chunk_ids = [c.safe_name() for c in test_chunks]
             phase_recovery = _recover_encoding_attempts(work_dir, test_chunk_ids, strategies_to_test)
@@ -852,14 +858,15 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
             )
 
             with ProgressBar(total_seconds, title="Optimization", total_count=total_count) as advance:
-                # Pre-advance bar for already-complete pairs
+                # Pre-advance the bar for already-complete pairs (their full duration)
                 chunks_by_id = {c.safe_name(): c for c in test_chunks}
                 for r in phase_recovery.pairs.values():
                     if r.state == ArtifactState.COMPLETE:
-                        advance((chunks_by_id[r.chunk_id].end_timestamp - chunks_by_id[r.chunk_id].start_timestamp), AdvanceState.SKIPPED)
+                        c = chunks_by_id[r.chunk_id]
+                        advance(c.end_timestamp - c.start_timestamp, AdvanceState.SKIPPED)
 
                 asyncio.run(
-                    _encode_chunks_parallel(
+                    _encode_pairs(
                         encoder           = encoder,
                         chunks            = test_chunks,
                         strategies        = strategies_to_test,
@@ -868,7 +875,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
                         # the anchor's target set does not exist until these
                         # results do.
                         quality_targets   = [] if fixed else plan.targets,
-                        max_parallel      = self._config.encoding.concurrency,
+                        concurrency       = self._config.encoding.concurrency,
                         force             = False,
                         collector         = self._collector,
                         phase_recovery    = phase_recovery,
@@ -1534,7 +1541,7 @@ def _make_encoder(
 
     The encoder follows the full encoding contract on the optimization
     subset: dotted timing keys are prefixed by ``metric_prefix``
-    (``optimization.<strategy>``, ``optimization.quality_measure``) and the
+    (``optimization.<strategy>``, ``optimization.measure``) and the
     run's ``cleanup_level`` enables rolling attempt cleanup after each pair
     converges. Test encodes are always measured — the anchor's anchor
     target set is derived from them (fixed-quality spec Req 8.1), regardless

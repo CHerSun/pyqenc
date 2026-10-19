@@ -12,13 +12,15 @@ for the rest of the run.
 
 import fnmatch
 import logging
+import os
 from collections.abc import Sequence
 from decimal import Decimal
 from pathlib import Path
-from typing import Self
+from typing import Annotated, Self
 
 import yaml
 from pydantic import (
+    AfterValidator,
     BaseModel,
     ConfigDict,
     Field,
@@ -51,6 +53,33 @@ from pyqenc.models import (
 from pyqenc.utils.naming import is_filesystem_safe_name
 
 _logger = logging.getLogger(__name__)
+
+
+def _clamp_to_cpus(value: int) -> int:
+    """Clamp a concurrency value to the machine's CPU count.
+
+    A value above the CPU count is useless or damaging — every ffmpeg child
+    already spawns CPU-count threads — so it is stored clamped with one
+    warning naming both values. An undeterminable CPU count leaves the value
+    unchanged.
+
+    Args:
+        value: The configured concurrency (already validated ``>= 1``).
+
+    Returns:
+        The stored value.
+    """
+    cpus = os.cpu_count()
+    if cpus is None or value <= cpus:
+        return value
+    _logger.warning(
+        "Concurrency %d exceeds the CPU count %d — storing %d",
+        value, cpus, cpus,
+    )
+    return cpus
+
+
+_Concurrency = Annotated[int, Field(ge=1), AfterValidator(_clamp_to_cpus)]
 
 
 def _deep_merge(base: dict, override: dict) -> dict:
@@ -104,9 +133,15 @@ class MeasurementConfig(BaseModel):
                   less precise). Applied uniformly across encoding quality
                   checks, merge verification, and the standalone measure
                   command.
+        concurrency: Maximum videos the ``measure`` command processes
+                  simultaneously (one task per video: screenshots and
+                  measurement); clamped to the CPU count at validation.
     """
 
-    sampling: int
+    model_config = ConfigDict(validate_assignment=True)
+
+    sampling:    Annotated[int, Field(ge=1)]
+    concurrency: _Concurrency
 
 
 class ProfileConfig(BaseModel):
@@ -194,15 +229,18 @@ class EncodingConfig(BaseModel):
         targets:            Raw quality target strings (e.g. ``"vmaf-min:95"``).
         strategies:         Raw strategy pattern strings (e.g. ``"h265*"``).
         optimize:           Whether to run the strategy optimisation phase.
-        concurrency:        Maximum concurrent encoding processes.
+        concurrency:        Maximum concurrent encoding processes; clamped to
+                            the CPU count at validation.
         optimize_tolerance: Tolerance percentage for strategy selection.
         visual_hash:        Whether to display emoji visual hash in chunk logs.
     """
 
+    model_config = ConfigDict(validate_assignment=True)
+
     targets:            list[str]
     strategies:         list[str]
     optimize:           bool
-    concurrency:        int
+    concurrency:        _Concurrency
     optimize_tolerance: float
     visual_hash:        bool
 
@@ -356,11 +394,16 @@ class AudioConfig(BaseModel):
         filters: Palette: filter name → validated :class:`FilterInstance`.
         chains:  Ordered list of :class:`ChainSpec` recipes.
         select:  Ordered list of :class:`SelectEntry`; empty = all tracks.
+        concurrency: Maximum (track, chain) jobs processed simultaneously;
+                  clamped to the CPU count at validation.
     """
 
-    filters: dict[str, FilterInstance]
-    chains:  list[ChainSpec]
-    select:  list[SelectEntry]         = []
+    model_config = ConfigDict(validate_assignment=True)
+
+    filters:     dict[str, FilterInstance]
+    chains:      list[ChainSpec]
+    select:      list[SelectEntry]         = []
+    concurrency: _Concurrency
 
     @model_validator(mode="after")
     def _validate_chains(self) -> Self:

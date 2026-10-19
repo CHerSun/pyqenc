@@ -25,6 +25,8 @@
 - **In-memory stream objects (no on-disk extraction).** A future spec moves targeting to source stream objects and lets `passthrough` avoid producing a file entirely. This spec adds `passthrough` to the config surface but leaves its executor as a `NotImplementedError` stub.
   - 2026-09-25: partially realized by `2026-09-25 file-stream-model` — chain *inputs* become source stream objects (`AudioStream.as_input()` reads the source via a `-map` selector; no `.mka` intermediates are extracted). The `passthrough`-without-output-file idea remains open (merge still requires external audio files).
 
+**Superseded in part by `2026-10-18 concurrency`.** This spec's executor ran (track, chain) jobs strictly serially (one `asyncio.run` per job). The concurrency spec restores parallel execution through the shared bounded runner at `audio.concurrency`, adds per-chain dotted timing under `audio.<chain>`, and folds the phase's outer serial loop into one batched run — chain resolution, selection, invalidation, and the per-job executor contract are unchanged.
+
 ## Cross-Spec Notes
 
 **Realized in part by `2026-09-25 file-stream-model` (2026-09-27).** The

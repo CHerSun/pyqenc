@@ -18,6 +18,7 @@
 | The static hand-ordered phase registry, including the `video_required`-driven Probe omission | `phase.py` `_build_registry` | The registry is constructed from the dependency closure of the run's terminals (Req 6). No hand-maintained construction list, no omission special case. |
 | "Materialize audio/video via some special option" (deferred idea) | TODO §48, bullet 2 | Consumed: `extract` materializes every selected stream kind, video and audio included (Req 9). |
 | DEPENDS_ON validation as a standalone backlog item | TODO §54 | Folded into this window as Req 13 — closure-derived construction turns an undeclared dependency into a silent absence, so the audit is a prerequisite of the registry switch, not a follow-up. |
+| `--concurrency` as a quality-group flag (video-domain only) | this spec's argument-group vocabulary | Moved by `2026-10-18 concurrency` to its own shared adder covering `auto`/`video`/`audio`/`measure`; one flag now writes every concurrency knob (encoding, audio, measurement), each phase consuming its own. |
 
 ### Related, not superseded
 

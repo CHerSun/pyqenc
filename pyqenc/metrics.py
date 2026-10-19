@@ -15,6 +15,7 @@ Usage::
 """
 
 __all__ = [
+    "AppMetrics",
     # Pydantic models
     "AttemptStats",
     "ConvergenceStats",
@@ -29,7 +30,6 @@ __all__ = [
     # Type aliases
     "MetricsStore",
     "NoOpMetricsCollector",
-    "PipelineMetrics",
     "TimeDistribution",
     "TopLevelEntry",
     "YamlMetricsCollector",
@@ -232,14 +232,18 @@ class TimeDistribution(BaseModel):
     dotted:         dict[str, DottedGroup] # keyed by prefix string
 
 
-class PipelineMetrics(BaseModel):
-    """Top-level Pydantic model serialised to ``metrics.yaml``.
+class AppMetrics(BaseModel):
+    """Top-level model serialised to ``metrics.yaml`` (the app-metrics dump).
+
+    Wall-vs-sub-time invariant: top-level entries are wall-clock spans owned
+    by the phase template that records them; dotted entries are inclusive
+    sub-spans that may overlap under concurrency and are judged against
+    their internal sums, never against wall-clock (Σ sub-time ÷ the parent
+    wall span is the effective parallelism multiplier, derivable on read —
+    no ``parallelism`` field is persisted).
 
     ``convergence`` is ``None`` when no encoded result data has been collected
     (e.g. all chunks were reused from a prior run).
-
-    Note: ``parallelism`` is set where the metrics are assembled and is NOT
-    part of this model.
     """
 
     time_distribution: TimeDistribution
@@ -565,7 +569,7 @@ class YamlMetricsCollector(MetricsCollector):
             return
         try:
             raw = yaml.safe_load(metrics_file.read_text(encoding="utf-8-sig"))
-            pm  = PipelineMetrics.model_validate(raw["pipeline_metrics"])
+            pm  = AppMetrics.model_validate(raw)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Metrics: failed to load %s, starting fresh: %s", metrics_file, exc)
             return
@@ -698,8 +702,8 @@ class YamlMetricsCollector(MetricsCollector):
             partial[key] = partial.get(key, 0.0) + (now - t0)
         return partial
 
-    def _build_metrics(self) -> PipelineMetrics:
-        """Assemble a :class:`PipelineMetrics` from current accumulator state.
+    def _build_metrics(self) -> AppMetrics:
+        """Assemble an :class:`AppMetrics` from current accumulator state.
 
         Merges partial elapsed from any in-flight ``time()`` contexts so that
         a forced flush captures work-in-progress timing.  Zero-second entries
@@ -723,14 +727,14 @@ class YamlMetricsCollector(MetricsCollector):
 
         convergence_stats = _compute_convergence(self._conv_accumulators)
 
-        return PipelineMetrics(
+        return AppMetrics(
             time_distribution=time_dist,
             convergence=convergence_stats,
         )
 
-    def _write_atomic(self, metrics: PipelineMetrics) -> None:
+    def _write_atomic(self, metrics: AppMetrics) -> None:
         """Serialize *metrics* to YAML and write atomically via .tmp-then-rename."""
-        data = {"pipeline_metrics": metrics.model_dump()}
+        data = metrics.model_dump()
         text = yaml.dump(data, default_flow_style=False, allow_unicode=True, sort_keys=False)
         try:
             self._tmp_path.write_text(text, encoding="utf-8-sig")

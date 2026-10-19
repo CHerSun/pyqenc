@@ -17,12 +17,12 @@ from hypothesis import strategies as st
 
 from pyqenc.constants import DOTTED_KEY_SEPARATOR
 from pyqenc.metrics import (
+    AppMetrics,
     AttemptStats,
     ConvergenceStats,
     DottedEntry,
     DottedGroup,
     MetricKey,
-    PipelineMetrics,
     TimeDistribution,
     TopLevelEntry,
     YamlMetricsCollector,
@@ -146,12 +146,12 @@ def _st_time_distribution(draw: st.DrawFn) -> TimeDistribution:
 
 
 @st.composite
-def _st_pipeline_metrics(draw: st.DrawFn) -> PipelineMetrics:
+def _st_pipeline_metrics(draw: st.DrawFn) -> AppMetrics:
     convergence = draw(st.one_of(
         st.none(),
         st.lists(_st_convergence_stats(), min_size=1, max_size=10),
     ))
-    return PipelineMetrics(
+    return AppMetrics(
         time_distribution=draw(_st_time_distribution()),
         convergence=convergence,
     )
@@ -166,14 +166,14 @@ def _make_yaml_collector(tmp_path: Path) -> YamlMetricsCollector:
 # ---------------------------------------------------------------------------
 
 
-def _serialize(metrics: PipelineMetrics) -> str:
-    data = {"pipeline_metrics": metrics.model_dump()}
+def _serialize(metrics: AppMetrics) -> str:
+    data = metrics.model_dump()
     return yaml.dump(data, default_flow_style=False, allow_unicode=True)
 
 
-def _deserialize(text: str) -> PipelineMetrics:
+def _deserialize(text: str) -> AppMetrics:
     raw = yaml.safe_load(text)
-    return PipelineMetrics.model_validate(raw["pipeline_metrics"])
+    return AppMetrics.model_validate(raw)
 
 
 # ---------------------------------------------------------------------------
@@ -185,7 +185,7 @@ def _deserialize(text: str) -> PipelineMetrics:
 
 @settings(max_examples=50, suppress_health_check=[HealthCheck.too_slow])
 @given(metrics=_st_pipeline_metrics())
-def test_yaml_round_trip(metrics: PipelineMetrics) -> None:
+def test_yaml_round_trip(metrics: AppMetrics) -> None:
     """Property 5 (app-metrics-two-tier): YAML serialisation round-trip preserves all values.
 
     Validates: Requirements 5.1, 5.6
@@ -457,7 +457,7 @@ def test_top_level_percentages_sum_to_100(store: dict[str, float]) -> None:
         collector.flush()
 
         raw = yaml.safe_load((tmp_path / "metrics.yaml").read_text(encoding="utf-8"))
-        top_level = raw["pipeline_metrics"]["time_distribution"].get("top_level") or []
+        top_level = raw["time_distribution"].get("top_level") or []
 
         total = sum(float(e["percent"].rstrip("%")) for e in top_level)
         # Each entry is rounded to 1 decimal place (±0.05%), so with up to 8
@@ -512,7 +512,7 @@ def test_dotted_percentages_sum_to_100_per_prefix(
         collector.flush()
 
         raw    = yaml.safe_load((tmp_path / "metrics.yaml").read_text(encoding="utf-8"))
-        dotted = raw["pipeline_metrics"]["time_distribution"].get("dotted") or {}
+        dotted = raw["time_distribution"].get("dotted") or {}
 
         for prefix, group in dotted.items():
             breakdown = group.get("breakdown") or []
@@ -548,7 +548,7 @@ def test_top_level_sorted_descending_no_zeros(
         collector.flush()
 
         raw       = yaml.safe_load((tmp_path / "metrics.yaml").read_text(encoding="utf-8"))
-        top_level = raw["pipeline_metrics"]["time_distribution"].get("top_level") or []
+        top_level = raw["time_distribution"].get("top_level") or []
         secs_list = [e["seconds"] for e in top_level]
 
         assert all(s > 0 for s in secs_list), "top_level must contain no zero-second entries"
@@ -581,7 +581,7 @@ def test_dotted_breakdown_sorted_descending_no_zeros(
         collector.flush()
 
         raw    = yaml.safe_load((tmp_path / "metrics.yaml").read_text(encoding="utf-8"))
-        dotted = raw["pipeline_metrics"]["time_distribution"].get("dotted") or {}
+        dotted = raw["time_distribution"].get("dotted") or {}
 
         for prefix, group in dotted.items():
             breakdown = group.get("breakdown") or []

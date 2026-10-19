@@ -488,6 +488,7 @@ def measure_quality(
     source_video:             Path,
     work_dir:                 Path,
     sampling:                 int,
+    concurrency:              int,
     distorted_videos:         list[Path]        | None = None,
     crop_params:              CropParams | None = None,
     screenshot_count:         int | None        = DEFAULT_SCREENSHOT_COUNT,
@@ -517,6 +518,7 @@ def measure_quality(
                                   ``job.yaml`` in ``work_dir`` if present; pass an
                                   empty ``CropParams`` to explicitly disable cropping.
         sampling:                 Frame subsampling factor (≥1).
+        concurrency:              Maximum videos processed simultaneously (≥1).
         screenshot_count:         Screenshots to capture from each video (≥1, default 20).
                                   In interval mode, acts as a cap on the total count.
         screenshot_interval:      Interval string between screenshots in interval mode
@@ -533,7 +535,7 @@ def measure_quality(
 
     Raises:
         FileNotFoundError: If ``source_video`` or any path in ``distorted_videos`` does not exist.
-        ValueError:        If ``sampling`` < 1 or ``screenshot_count`` < 1.
+        ValueError:        If ``screenshot_count`` < 1.
     """
 
     if not source_video.exists():
@@ -552,6 +554,7 @@ def measure_quality(
         work_dir                 = work_dir,
         crop_params              = crop_params,
         sampling                 = sampling,
+        concurrency              = concurrency,
         width                    = width,
         screenshot_count         = screenshot_count,
         screenshot_interval      = parsed_interval,

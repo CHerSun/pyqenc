@@ -88,10 +88,10 @@ DOTTED_KEY_SEPARATOR: str = "."
 for metric key structure — distinct from file extension dots, ``TIME_SEPARATOR_MS``
 (U+2024, used in filenames), and other uses of ``"."`` in the codebase."""
 
-METRIC_KEY_QUALITY_MEASURE: str = "quality_measure"
+METRIC_KEY_MEASURE: str = "measure"
 """Dotted-key suffix used to time quality metric measurement (VMAF/PSNR measurement)
 within a phase.  Combined with a ``MetricKey`` prefix it forms keys such as
-``"encoding.quality_measure"`` and ``"merge.quality_measure"``.  Using a shared
+``"encoding.measure"`` and ``"merge.measure"``.  Using a shared
 constant ensures the suffix is identical across all phases that measure quality."""
 BRACKET_LEFT = "｟"
 BRACKET_RIGHT = " ｠"

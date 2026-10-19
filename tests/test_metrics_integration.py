@@ -261,13 +261,13 @@ def _top_level_keys(metrics: dict) -> set[str]:
     """Top-level timing keys with recorded (non-zero) seconds in metrics.yaml."""
     return {
         entry["key"]
-        for entry in metrics["pipeline_metrics"]["time_distribution"]["top_level"]
+        for entry in metrics["time_distribution"]["top_level"]
     }
 
 
 def _dotted_groups(metrics: dict) -> dict[str, dict]:
     """Dotted sub-action groups in metrics.yaml, keyed by prefix string."""
-    return metrics["pipeline_metrics"]["time_distribution"].get("dotted", {})
+    return metrics["time_distribution"].get("dotted", {})
 
 
 def _dotted_keys(metrics: dict) -> set[str]:
@@ -1086,7 +1086,7 @@ class TestOptimizationPhaseTiming:
         )
 
     def test_shared_executor_records_no_top_level_span(self, tmp_path: Path) -> None:
-        """``_encode_chunks_parallel`` must not open a timing span of its own.
+        """``_encode_pairs`` must not open a timing span of its own.
 
         Bug guarded: the shared executor (driven by both the encoding and the
         optimization phase) recording a top-level span would double-count
@@ -1105,7 +1105,7 @@ class TestOptimizationPhaseTiming:
         """
         import asyncio
 
-        from pyqenc.phases.encoding import ChunkEncodingResult, _encode_chunks_parallel
+        from pyqenc.phases.encoding import ChunkEncodingResult, _encode_pairs
 
         strategy = _STRATEGY_SLOW_H265
 
@@ -1133,12 +1133,12 @@ class TestOptimizationPhaseTiming:
                 patch("pyqenc.phases.encoding._encode_chunk_async", return_value=successful_result),
             ):
                 asyncio.run(
-                    _encode_chunks_parallel(
+                    _encode_pairs(
                         encoder          = MagicMock(),
                         chunks           = [chunk],
                         strategies       = [strategy],
                         quality_targets  = [],
-                        max_parallel     = 1,
+                        concurrency      = 1,
                         force            = False,
                         collector        = collector,
                         metric_prefix    = MetricKey.OPTIMIZATION,
@@ -1150,7 +1150,7 @@ class TestOptimizationPhaseTiming:
             "executor must not record a top-level span (the owning phase owns it), "
             f"got: {sorted(_top_level_keys(metrics))}"
         )
-        assert metrics["pipeline_metrics"]["convergence"], (
+        assert metrics["convergence"], (
             "convergence data from the executor's encodes must still reach the report"
         )
 
@@ -1345,7 +1345,7 @@ class TestEncodingPhaseTiming:
         """
         import asyncio
 
-        from pyqenc.phases.encoding import ChunkEncodingResult, _encode_chunks_parallel
+        from pyqenc.phases.encoding import ChunkEncodingResult, _encode_pairs
 
         chunk = _make_chunk_window(tmp_path / "source.mkv", 0.0, 1.0)
 
@@ -1368,19 +1368,19 @@ class TestEncodingPhaseTiming:
         def run(collector: MetricsCollector) -> None:
             with patch("pyqenc.phases.encoding._encode_chunk_async", return_value=successful_result):
                 asyncio.run(
-                    _encode_chunks_parallel(
+                    _encode_pairs(
                         encoder          = MagicMock(),
                         chunks           = [chunk],
                         strategies       = [_STRATEGY_SLOW_H265],
                         quality_targets  = [],
-                        max_parallel     = 1,
+                        concurrency      = 1,
                         force            = False,
                         collector        = collector,
                     )
                 )
 
         metrics     = _recorded_metrics(tmp_path, run)
-        convergence = metrics["pipeline_metrics"]["convergence"]
+        convergence = metrics["convergence"]
         assert convergence, f"convergence section missing from metrics.yaml: {metrics}"
         by_strategy = {stats["strategy"]: stats for stats in convergence}
         assert _STRATEGY_SLOW_H265.display_name() in by_strategy, (
@@ -1404,7 +1404,7 @@ class TestEncodingPhaseTiming:
         """
         import asyncio
 
-        from pyqenc.phases.encoding import ChunkEncodingResult, _encode_chunks_parallel
+        from pyqenc.phases.encoding import ChunkEncodingResult, _encode_pairs
 
         chunk = _make_chunk_window(tmp_path / "source.mkv", 0.0, 1.0)
 
@@ -1424,21 +1424,21 @@ class TestEncodingPhaseTiming:
         def run(collector: MetricsCollector) -> None:
             with patch("pyqenc.phases.encoding._encode_chunk_async", return_value=reused_result):
                 asyncio.run(
-                    _encode_chunks_parallel(
+                    _encode_pairs(
                         encoder          = MagicMock(),
                         chunks           = [chunk],
                         strategies       = [_STRATEGY_SLOW_H265],
                         quality_targets  = [],
-                        max_parallel     = 1,
+                        concurrency      = 1,
                         force            = False,
                         collector        = collector,
                     )
                 )
 
         metrics = _recorded_metrics(tmp_path, run)
-        assert metrics["pipeline_metrics"]["convergence"] is None, (
+        assert metrics["convergence"] is None, (
             "reused pairs must not produce convergence data, got: "
-            f"{metrics['pipeline_metrics']['convergence']}"
+            f"{metrics['convergence']}"
         )
 
     def test_noop_collector_works_as_drop_in(self, tmp_path: Path) -> None:
@@ -1696,13 +1696,13 @@ class TestMergePhaseTiming:
             f"concat sub-action missing from metrics.yaml, got: {sorted(_dotted_keys(metrics))}"
         )
 
-    def test_merge_quality_measure_recorded_when_targets_set(self, tmp_path: Path) -> None:
+    def test_merge_measure_recorded_when_targets_set(self, tmp_path: Path) -> None:
         """A merge run with quality targets reports the quality-measure
         sub-action as a dotted key in metrics.yaml.
 
         Bug guarded: quality measurement (a costly VMAF pass over the merged
         output) finishing without its cost being attributable in the report —
-        the ``merge.quality_measure`` dotted row is the only place that
+        the ``merge.measure`` dotted row is the only place that
         sub-action's share of merge time shows.
 
         Validates: Requirements 6.5
@@ -1745,8 +1745,8 @@ class TestMergePhaseTiming:
 
         metrics   = _recorded_metrics(tmp_path, run)
         dotted    = _dotted_keys(metrics)
-        assert "merge.quality_measure" in dotted, (
-            f"quality_measure sub-action missing from metrics.yaml, got: {sorted(dotted)}"
+        assert "merge.measure" in dotted, (
+            f"measure sub-action missing from metrics.yaml, got: {sorted(dotted)}"
         )
         assert "merge" in _top_level_keys(metrics)
 
@@ -1938,7 +1938,7 @@ class TestMetricKeySmoke:
         assert metrics_path.exists(), "metrics.yaml was not written"
 
         raw = yaml.safe_load(metrics_path.read_text(encoding="utf-8"))
-        pm  = raw["pipeline_metrics"]
+        pm  = raw
         td  = pm["time_distribution"]
 
         top_level_keys = [e["key"] for e in td.get("top_level", [])]
@@ -1986,7 +1986,7 @@ class TestMetricKeySmoke:
         assert metrics_path.exists(), "metrics.yaml was not written"
 
         raw = yaml.safe_load(metrics_path.read_text(encoding="utf-8"))
-        pm  = raw["pipeline_metrics"]
+        pm  = raw
         td  = pm["time_distribution"]
 
         dotted = td.get("dotted", {})

@@ -153,7 +153,7 @@ def test_empty_convergence_produces_null_in_yaml(tmp_path: Path) -> None:
     collector.flush()
 
     raw = yaml.safe_load((tmp_path / METRICS_YAML_FILENAME).read_text(encoding="utf-8"))
-    assert raw["pipeline_metrics"]["convergence"] is None
+    assert raw["convergence"] is None
 
 
 def test_convergence_present_after_step(tmp_path: Path) -> None:
@@ -166,8 +166,8 @@ def test_convergence_present_after_step(tmp_path: Path) -> None:
     collector.flush()
 
     raw = yaml.safe_load((tmp_path / METRICS_YAML_FILENAME).read_text(encoding="utf-8"))
-    assert raw["pipeline_metrics"]["convergence"] is not None
-    strategies = raw["pipeline_metrics"]["convergence"]
+    assert raw["convergence"] is not None
+    strategies = raw["convergence"]
     assert len(strategies) == 1
     assert strategies[0]["strategy"] == "h265+slow"
 
@@ -301,7 +301,7 @@ def test_flush_while_timer_active_includes_partial_elapsed(tmp_path: Path) -> No
     collector.flush()
 
     raw = yaml.safe_load((tmp_path / METRICS_YAML_FILENAME).read_text(encoding="utf-8"))
-    top_level = {e["key"]: e["seconds"] for e in raw["pipeline_metrics"]["time_distribution"]["top_level"]}
+    top_level = {e["key"]: e["seconds"] for e in raw["time_distribution"]["top_level"]}
 
     # The partial elapsed must be >= 0 (timer was running when flush happened)
     # Key may be absent if elapsed rounds to 0 (zero entries are omitted)
@@ -334,7 +334,7 @@ def test_active_timer_not_double_counted_after_exit(tmp_path: Path) -> None:
     # A second flush must report the same value (no double-count)
     collector.flush()
     raw = yaml.safe_load((tmp_path / METRICS_YAML_FILENAME).read_text(encoding="utf-8"))
-    top_level = {e["key"]: e["seconds"] for e in raw["pipeline_metrics"]["time_distribution"]["top_level"]}
+    top_level = {e["key"]: e["seconds"] for e in raw["time_distribution"]["top_level"]}
     # seconds is int(round(elapsed)); if it rounds to 0 the key is absent (zeros omitted)
     expected_secs = round(elapsed_after)
     if expected_secs == 0:

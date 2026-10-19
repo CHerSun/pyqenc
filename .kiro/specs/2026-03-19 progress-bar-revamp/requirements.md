@@ -5,6 +5,19 @@
 - Created: 2026-03-19
 - Completed: 2026-03-19
 
+## Cross-Spec Notes
+
+**Superseded in part by `2026-10-18 concurrency`.** The bar-mode doctrine
+landed there: count-based means one advance per item finalization,
+weighted by the item's duration (NOT unweighted counting — the
+encoding/optimization duration-weighted basis, Σ chunk durations ×
+strategies, is kept, with per-completion duration advances); duration-based
+means fine-grained in-job `PROGRESS` ticks (merge, measure). The `measure`
+command's per-video inner bars are gone, replaced by one shared
+duration-based bar fed through the same `show_progress` pass-down merge
+already uses. Bar mechanics (`ProgressBar`, `AdvanceState`, advance
+callables) are unchanged.
+
 ## Introduction
 
 The pipeline currently uses `duration_bar` (in `pyqenc/utils/alive.py`) for duration-based progress in the chunking, encoding, optimization, and metrics phases, and a separate `alive_bar` in manual count mode for the audio phase (`SynchronousRunner` and `AsyncRunner` in `pyqenc/phases/audio.py`). Two problems have been identified:

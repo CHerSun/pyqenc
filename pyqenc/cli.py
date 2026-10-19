@@ -268,6 +268,23 @@ _QUALITY_TARGET_HELP: str = (
 )
 
 
+def _add_concurrency_argument(parser: argparse.ArgumentParser) -> None:
+    """Add the concurrency override (used by subcommands with a bounded-work domain)."""
+    parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=None,
+        metavar="N",
+        dest="concurrency",
+        help=(
+            "Concurrency for bounded work — writes every config knob "
+            "(encoding, audio, measurement); each phase consumes its own. "
+            "Values above the CPU count are clamped. "
+            "Per-domain control: edit the config file. Default: from config (1)."
+        ),
+    )
+
+
 def _add_quality_arguments(parser: argparse.ArgumentParser) -> None:
     """Add quality/encoding arguments (used by subcommands that depend on EncodingPhase)."""
     parser.add_argument(
@@ -311,13 +328,6 @@ def _add_quality_arguments(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         dest="no_optimize",
         help="Disable optimization phase and produce output for all strategies.",
-    )
-    parser.add_argument(
-        "--concurrency",
-        type=int,
-        default=None,
-        dest="concurrency",
-        help="Maximum concurrent encoding processes (default: from config).",
     )
     parser.add_argument(
         "--sampling",
@@ -389,7 +399,11 @@ def _build_config(args: argparse.Namespace) -> AppConfig:
 
     concurrency = getattr(args, "concurrency", None)
     if concurrency is not None:
-        config.encoding.concurrency = concurrency
+        # One flag, every knob (Req 5): each phase consumes only its own
+        # domain's field; per-domain control is the config file's job.
+        config.encoding.concurrency    = concurrency
+        config.audio.concurrency       = concurrency
+        config.measurement.concurrency = concurrency
 
     sampling = getattr(args, "sampling", None)
     if sampling is not None:
@@ -428,11 +442,12 @@ def _resolve_plan(args: argparse.Namespace, config: AppConfig) -> EncodingPlan:
 _Flavor = Literal["plain", "auto_table", "files"]
 
 _ARG_GROUP_ADDERS: dict[str, Callable[[argparse.ArgumentParser], None]] = {
-    "pipeline": _add_pipeline_arguments,
-    "filter":   _add_filter_arguments,
-    "crop":     _add_crop_arguments,
-    "chunking": _add_chunking_arguments,
-    "quality":  _add_quality_arguments,
+    "pipeline":    _add_pipeline_arguments,
+    "filter":      _add_filter_arguments,
+    "crop":        _add_crop_arguments,
+    "chunking":    _add_chunking_arguments,
+    "concurrency": _add_concurrency_argument,
+    "quality":     _add_quality_arguments,
 }
 """The argument-group vocabulary: group name → the existing `_add_*` helper.
 
@@ -476,7 +491,7 @@ _PIPELINE_SUBCOMMANDS: tuple[_SubcommandSpec, ...] = (
         banner     = "automatic pipeline execution",
         noun       = "Pipeline",
         runner     = run_pipeline,
-        arg_groups = ("pipeline", "filter", "crop", "chunking", "quality"),
+        arg_groups = ("pipeline", "filter", "crop", "chunking", "concurrency", "quality"),
         flavor     = "auto_table",
     ),
     _SubcommandSpec(
@@ -485,7 +500,7 @@ _PIPELINE_SUBCOMMANDS: tuple[_SubcommandSpec, ...] = (
         banner     = "video processing",
         noun       = "Video processing",
         runner     = merge_final,
-        arg_groups = ("pipeline", "filter", "crop", "chunking", "quality"),
+        arg_groups = ("pipeline", "filter", "crop", "chunking", "concurrency", "quality"),
         flavor     = "files",
     ),
     _SubcommandSpec(
@@ -494,7 +509,7 @@ _PIPELINE_SUBCOMMANDS: tuple[_SubcommandSpec, ...] = (
         banner     = "audio processing",
         noun       = "Audio processing",
         runner     = process_audio,
-        arg_groups = ("pipeline", "filter"),
+        arg_groups = ("pipeline", "filter", "concurrency"),
     ),
 )
 
@@ -762,6 +777,7 @@ def _create_measure_subcommand(subparsers: argparse._SubParsersAction) -> None:
     )
     _add_base_arguments(p)
     _add_crop_arguments(p)
+    _add_concurrency_argument(p)
     p.add_argument(
         "--sampling",
         type=int,
@@ -820,18 +836,26 @@ def _cmd_measure(args: argparse.Namespace) -> int:
         return 1
 
     _config  = load_app_config()
-    sampling = (
-        args.sampling if args.sampling is not None
-        else _config.measurement.sampling
-    )
 
     try:
+        # One flag, every knob (Req 5) — validated assignments; the measure
+        # run consumes only the measurement domain's values.
+        cli_concurrency = getattr(args, "concurrency", None)
+        if cli_concurrency is not None:
+            _config.encoding.concurrency    = cli_concurrency
+            _config.audio.concurrency       = cli_concurrency
+            _config.measurement.concurrency = cli_concurrency
+        cli_sampling = getattr(args, "sampling", None)
+        if cli_sampling is not None:
+            _config.measurement.sampling = cli_sampling
+
         measure_quality(
             source_video             = args.source,
             work_dir                 = args.work_dir,
             distorted_videos         = args.distorted,
             crop_params              = crop_params,
-            sampling                 = sampling,
+            sampling                 = _config.measurement.sampling,
+            concurrency              = _config.measurement.concurrency,
             screenshot_count         = args.screenshots,
             screenshot_interval      = args.every,
             screenshot_include_edges = args.screenshot_include_edges,

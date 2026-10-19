@@ -12,6 +12,7 @@ This spec builds directly on top of `config-refactor` (Created: 2026-06-23, Comp
 | Spec | Relationship |
 |------|--------------|
 | `config-refactor` | **Extended.** Established `AppConfig`, sub-models, and `default_config.yaml` structure. This spec renames fields, restructures `AudioConfig`, adds `MeasurementConfig`, removes `crop_params` from `AppConfig`, and revises the YAML. All field paths in `config-refactor` that reference the old names are superseded by this spec. |
+| `concurrency` (2026-10-18) | **Extended.** Adds `AudioConfig.concurrency` and `MeasurementConfig.concurrency` beside this spec's `encoding.concurrency` rename, and layers value validation into the models themselves (`validate_assignment` on the three subconfigs; `ge=1` plus a CPU-count clamp at load) — the plain-flag CLI doctrine stands, but plain assignments now pass through the same validators as construction. |
 
 ---
 

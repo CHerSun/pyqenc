@@ -437,7 +437,7 @@ class TestSelectionFromLiveState:
             "pyqenc.phases.optimization._make_encoder", lambda **_kw: _MM(),
         )
         monkeypatch.setattr(
-            "pyqenc.phases.encoding._encode_chunks_parallel", _fake_parallel,
+            "pyqenc.phases.encoding._encode_pairs", _fake_parallel,
         )
 
         result = phase.run(dry_run=False)
@@ -1359,7 +1359,7 @@ class TestFixedComparedExecute:
             "pyqenc.phases.optimization._make_encoder", lambda **_kw: MagicMock(),
         )
         monkeypatch.setattr(
-            "pyqenc.phases.encoding._encode_chunks_parallel", _fake_parallel,
+            "pyqenc.phases.encoding._encode_pairs", _fake_parallel,
         )
         result = phase.run(dry_run=False)
         return result, work_dir
@@ -1596,7 +1596,7 @@ class TestFixedAlwaysRuns:
             "pyqenc.phases.optimization._make_encoder", lambda **_kw: MagicMock(),
         )
         monkeypatch.setattr(
-            "pyqenc.phases.encoding._encode_chunks_parallel", _fake_parallel,
+            "pyqenc.phases.encoding._encode_pairs", _fake_parallel,
         )
         result = phase.run(dry_run=False)
 
@@ -1673,7 +1673,7 @@ class TestFixedAlwaysRuns:
             "pyqenc.phases.optimization._make_encoder", lambda **_kw: MagicMock(),
         )
         monkeypatch.setattr(
-            "pyqenc.phases.encoding._encode_chunks_parallel", _fake_parallel,
+            "pyqenc.phases.encoding._encode_pairs", _fake_parallel,
         )
         result = phase.run(dry_run=False)
 

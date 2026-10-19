@@ -30,7 +30,7 @@ from pyqenc.constants import (
     BRACKET_RIGHT,
     FAILURE_SYMBOL_MINOR,
     MERGED_OUTPUT_DIR,
-    METRIC_KEY_QUALITY_MEASURE,
+    METRIC_KEY_MEASURE,
     SUCCESS_SYMBOL_MAJOR,
     SUCCESS_SYMBOL_MINOR,
     TEMP_SUFFIX,
@@ -733,7 +733,7 @@ class MergePhase(Phase[MergePhaseResult]):
         """Merge pending strategies by concatenating encoded chunks.
 
         The top-level ``merge`` span belongs to the template; the dotted
-        ``merge.concat`` / ``merge.quality_measure`` spans are recorded around
+        ``merge.concat`` / ``merge.measure`` spans are recorded around
         the individual sub-actions below. ``dry_run`` is never ``True`` here
         (merge is not a readonly-execute phase; the template previews
         instead).
@@ -801,16 +801,16 @@ class MergePhase(Phase[MergePhaseResult]):
                         # Sampling-only difference (Req 49): the concat is
                         # current — re-measure in place, never re-merge.
                         logger.info(
-                            "Starting quality measurement %s%s%s (%d of %d)",
+                            "%s%s%s (%d of %d): starting quality measurement",
                             BRACKET_LEFT, strategy_name, BRACKET_RIGHT,
                             pending_idx, pending_count,
                         )
                     else:
                         chunk_count = len(encoded_chunks.get(strategy_name, []))
                         logger.info(
-                            "Starting merging %s%s%s — %d chunks (%d of %d)",
+                            "%s%s%s (%d of %d): starting merge — %d chunks",
                             BRACKET_LEFT, strategy_name, BRACKET_RIGHT,
-                            chunk_count, pending_idx, pending_count,
+                            pending_idx, pending_count, chunk_count,
                         )
                         if not self._concat_and_promote(
                             strategy        = strategy,
@@ -830,7 +830,7 @@ class MergePhase(Phase[MergePhaseResult]):
                             failed_strategies.append(strategy_name)
                             continue
                         logger.info(
-                            "Starting quality measurement %s%s%s (%d of %d)",
+                            "%s%s%s (%d of %d): starting quality measurement",
                             BRACKET_LEFT, strategy_name, BRACKET_RIGHT,
                             pending_idx, pending_count,
                         )
@@ -858,7 +858,7 @@ class MergePhase(Phase[MergePhaseResult]):
                     metrics_dict: dict[str, float] = {}
                     plot_path:    Path | None       = None
                     try:
-                        with self._collector.time(MetricKey.MERGE, METRIC_KEY_QUALITY_MEASURE):
+                        with self._collector.time(MetricKey.MERGE, METRIC_KEY_MEASURE):
                             metrics_dict, plot_path = self._measure_quality(
                                 final_result  = output_file,
                                 source_stream = source_stream,

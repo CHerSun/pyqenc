@@ -4,10 +4,13 @@
 **Validates: Requirements 2.2, 2.5**
 """
 
+import os
 from typing import cast
 
-from hypothesis import given, settings
+import pytest
+from hypothesis import assume, given, settings
 from hypothesis import strategies as st
+from pydantic import ValidationError
 
 from pyqenc.app_config import _deep_merge
 from pyqenc.audio.filters import PeakNormParams
@@ -746,9 +749,16 @@ class TestAppConfigRoundTrip:
         # Start from a valid base config to avoid generating invalid strategy strings.
         config = _BASE_CONFIG.model_copy(deep=True)
 
+        # Values above the machine's CPU count clamp at validation — only
+        # in-range values can round-trip unchanged.
+        cpus = os.cpu_count()
+        assume(cpus is None or concurrency <= cpus)
+
         # Apply Hypothesis-generated mutations to simple scalar fields.
         config.encoding.optimize          = optimize
         config.encoding.concurrency       = concurrency
+        config.audio.concurrency          = concurrency
+        config.measurement.concurrency    = concurrency
         config.measurement.sampling       = measurement_sampling
         config.encoding.visual_hash       = visual_hash
         config.encoding.optimize_tolerance = optimize_tolerance
@@ -771,6 +781,16 @@ class TestAppConfigRoundTrip:
             f"encoding.concurrency changed during round-trip.\n"
             f"  expected : {concurrency!r}\n"
             f"  got      : {round_tripped.encoding.concurrency!r}"
+        )
+        assert round_tripped.audio.concurrency == concurrency, (
+            f"audio.concurrency changed during round-trip.\n"
+            f"  expected : {concurrency!r}\n"
+            f"  got      : {round_tripped.audio.concurrency!r}"
+        )
+        assert round_tripped.measurement.concurrency == concurrency, (
+            f"measurement.concurrency changed during round-trip.\n"
+            f"  expected : {concurrency!r}\n"
+            f"  got      : {round_tripped.measurement.concurrency!r}"
         )
         assert round_tripped.measurement.sampling == measurement_sampling, (
             f"measurement.sampling changed during round-trip.\n"
@@ -905,6 +925,113 @@ class TestAppConfigRoundTrip:
         assert round_tripped.audio.select               == config.audio.select
         assert set(round_tripped.codecs.keys())         == set(config.codecs.keys())
         assert set(round_tripped.profiles.keys())       == set(config.profiles.keys())
+
+    def test_default_config_carries_audio_and_measurement_concurrency(self) -> None:
+        """The bundled defaults provide the audio and measurement concurrency knobs.
+
+        Bug condition (concurrency spec Req 1): a knob missing from
+        default_config.yaml makes every load fail validation (all fields are
+        required) or silently falls back to a Python-level default — either
+        way the single-source-of-truth rule for defaults is broken.
+        """
+        config = load_app_config(default_only=True)
+
+        assert isinstance(config.audio.concurrency, int)
+        assert isinstance(config.measurement.concurrency, int)
+        assert isinstance(config.encoding.concurrency, int)
+
+
+class TestConcurrencyValidation:
+    """Concurrency knobs: ge=1 rejection, CPU-count clamp, validated assignment.
+
+    **Validates: concurrency spec Req 2–4**
+    """
+
+    @pytest.mark.parametrize("domain", ["encoding", "audio", "measurement"])
+    def test_below_one_rejected_on_assignment(self, domain: str) -> None:
+        """Assigning 0 or a negative value raises ValidationError (Req 2).
+
+        Bug condition: a zero/negative concurrency reaching a phase spawns
+        zero workers (silent no-op run) or breaks the bounded runner's
+        worker count.
+        """
+        config = _BASE_CONFIG.model_copy(deep=True)
+        subconfig = getattr(config, domain)
+
+        with pytest.raises(ValidationError):
+            subconfig.concurrency = 0
+
+    def test_sampling_below_one_rejected_on_assignment(self) -> None:
+        """Assigning a non-positive sampling raises ValidationError.
+
+        Bug condition: a zero/negative sampling reaching ffmpeg's select
+        expression divides by zero inside the filter, surfacing as a cryptic
+        per-video failure instead of a config-time rejection — the config
+        layer is the single owner of the bound (run_measure no longer
+        re-checks it).
+        """
+        config = _BASE_CONFIG.model_copy(deep=True)
+
+        with pytest.raises(ValidationError):
+            config.measurement.sampling = 0
+
+    @pytest.mark.parametrize("domain", ["encoding", "audio", "measurement"])
+    def test_above_cpu_count_clamped_with_warning(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, domain: str,
+    ) -> None:
+        """Assigning above the CPU count stores the CPU count and warns (Req 3).
+
+        Bug condition: an unclamped value oversubscribes the machine (every
+        ffmpeg child already spawns CPU-count threads) and the user is never
+        told the effective value differs from what they configured.
+        """
+        monkeypatch.setattr(os, "cpu_count", lambda: 4)
+        config = _BASE_CONFIG.model_copy(deep=True)
+        subconfig = getattr(config, domain)
+
+        with caplog.at_level("WARNING"):
+            subconfig.concurrency = 9
+
+        assert subconfig.concurrency == 4
+        assert "9" in caplog.text and "4" in caplog.text
+
+    @pytest.mark.parametrize("domain", ["encoding", "audio", "measurement"])
+    def test_unchanged_when_cpu_count_unknown(
+        self, monkeypatch: pytest.MonkeyPatch, domain: str,
+    ) -> None:
+        """An undeterminable CPU count leaves the value unchanged (Req 3).
+
+        Bug condition: treating an unknown CPU count as 0 or 1 would clamp
+        every configured value down to a degenerate bound.
+        """
+        monkeypatch.setattr(os, "cpu_count", lambda: None)
+        config = _BASE_CONFIG.model_copy(deep=True)
+        subconfig = getattr(config, domain)
+
+        subconfig.concurrency = 9
+
+        assert subconfig.concurrency == 9
+
+    @given(value=st.integers(min_value=1, max_value=64))
+    @settings(max_examples=25)
+    def test_stored_value_never_below_one_and_never_above_cpus(self, value: int) -> None:
+        """Property: whatever the input, the stored value is in [1, CPU count].
+
+        Bug condition: a clamp or validation path that stores 0, a negative
+        number, or an above-CPU value — any of them reaches a phase as a
+        ready-to-consume lie.
+        """
+        cpus = os.cpu_count()
+
+        for domain in ("encoding", "audio", "measurement"):
+            config = _BASE_CONFIG.model_copy(deep=True)
+            subconfig = getattr(config, domain)
+            subconfig.concurrency = value
+            stored = subconfig.concurrency
+
+            assert stored >= 1
+            if cpus is not None:
+                assert stored <= cpus
 
 
 # ---------------------------------------------------------------------------
@@ -1244,7 +1371,6 @@ class TestStrategyDeduplicationByPresetProfile:
 # **Validates: Requirements 3.2, 3.5, 3.6**
 # ---------------------------------------------------------------------------
 
-from pydantic import ValidationError
 
 
 class TestValidationErrorOnInvalidStrings:
@@ -1581,6 +1707,7 @@ def _valid_audio_dict() -> dict:
             {"name": "night",  "filters": ["down_lfe", "aac"]},
         ],
         "select": [],
+        "concurrency": 1,
     }
 
 
