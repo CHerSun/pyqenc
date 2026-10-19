@@ -829,7 +829,7 @@ class TestWinningLimiterBasisLine:
             anchor_targets=[], limiter_keys=["vmaf_min", "psnr_median"],
         )
         assert "Winning-limiter distribution" in messages
-        assert "  targets: vmaf_min=93.0 · psnr_median=40.0" in messages
+        assert "  targets: ◎  vmaf_min=93.0 · psnr_median=40.0" in messages
 
     def test_fixed_run_labels_the_basis_as_anchor_targets(self, tmp_path, caplog) -> None:
         """A fixed run states the anchor targets — never the search-tuned config targets."""
@@ -842,7 +842,7 @@ class TestWinningLimiterBasisLine:
             ],
             limiter_keys=["vmaf_median"],
         )
-        assert "  anchor targets: vmaf_median=91.0 · vif_median=84.0" in messages
+        assert "  anchor targets: ◎  vmaf_median=91.0 · vif_median=84.0" in messages
 
     def test_uncompared_fixed_run_renders_no_table(self, tmp_path, caplog) -> None:
         """A run with no judging basis (uncompared fixed) renders no table at all."""

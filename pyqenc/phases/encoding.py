@@ -73,7 +73,7 @@ from pyqenc.stream_model import (
 from pyqenc.stream_model import (
     File as StreamFile,
 )
-from pyqenc.summary_tables import CONVENTION_SEPARATOR
+from pyqenc.summary_tables import ANCHOR_GLYPH, CONVENTION_SEPARATOR
 from pyqenc.utils.alive import AdvanceState, ProgressBar
 from pyqenc.utils.concurrency import run_bounded
 from pyqenc.utils.ffmpeg_runner import FFmpegRequest, FFmpegRunResult, run_ffmpeg
@@ -2092,7 +2092,9 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
 
         The basis line above the table states the absolutes the surplus /
         deficit cells read against, in sidecar-key spelling — labeled
-        ``anchor targets`` on fixed runs, ``targets`` on searched runs.
+        ``anchor targets`` on fixed runs, ``targets`` on searched runs,
+        and led by the anchor glyph like the comparison tables' basis
+        lines.
 
         Args:
             summaries: Per-strategy groups (rows sorted by chunk count desc).
@@ -2109,8 +2111,8 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
         logger.info("Winning-limiter distribution")
         basis = "anchor targets" if self._deps[ProbePhase].plan.fixed_quality else "targets"
         logger.info(
-            "  %s: %s",
-            basis,
+            "  %s: %s  %s",
+            basis, ANCHOR_GLYPH,
             CONVENTION_SEPARATOR.join(
                 f"{t.key().sidecar_key()}={t.value:.1f}" for t in targets
             ),
