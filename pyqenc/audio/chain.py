@@ -17,7 +17,7 @@ Two concerns live here:
 - **Execution** — :func:`execute_chain` runs one (track, chain) job. The loop is
   fully generic: it holds the accumulating invariant ``-af`` chain, the current
   layout, the effective output format, and the current filter's most recent
-  measurement result, and drives each filter through :meth:`FilterType.resolve`.
+  measurement result, and drives each filter's ``resolve``.
   It contains **zero** filter-type-specific logic. A filter finishes
   the instant it returns ``needs_pass=False``; at that moment its fragment is
   frozen and ``last_output`` is cleared so it can never leak to the next filter.
@@ -45,8 +45,6 @@ from pyqenc.audio.filters import (
     EncodeInstance,
     EncodeParams,
     FilterInstance,
-    FilterType,
-    get_filter_class,
 )
 from pyqenc.audio.layout import ChannelLayout
 from pyqenc.constants import (
@@ -337,8 +335,8 @@ async def execute_chain(
 ) -> Path:
     """Execute one (track, chain) job as a combined ``-af`` chain, split at passes.
 
-    The loop is fully generic: it drives each filter through
-    :meth:`FilterType.resolve`, comma-joining non-empty fragments, running a
+    The loop is fully generic: it drives each filter's ``resolve``,
+    comma-joining non-empty fragments, running a
     measurement pass whenever a filter reports ``needs_pass`` and feeding only
     that single latest result back to the same filter. When a filter finishes it
     freezes its fragment into the invariant chain, adopts its ``out_layout``, and
@@ -362,9 +360,7 @@ async def execute_chain(
         NotImplementedError:  When the chain contains a ``passthrough`` filter
                               (surfaced from the filter's ``resolve``).
     """
-    runnable: deque[FilterType] = deque(
-        get_filter_class(inst.type)(inst) for inst in resolved.filters
-    )
+    runnable: deque[FilterInstance] = deque(resolved.filters)
 
     af_parts:      list[str]              = []            # frozen fragments (invariant)
     output_format: EncodeParams           = resolved.encode  # authoritative effective target

@@ -1,20 +1,13 @@
-"""Filter-type registry and self-contained filter-type classes.
+"""Self-contained audio filter classes: config-loaded params plus behaviour.
 
-Runnable filter types form a registry; the config side is a closed
-discriminated union (:data:`FilterInstance`). Each type is self-contained in
-this module, owning three things:
-
-1. its type id (``type_id``),
-2. its Pydantic parameter model (``extra="forbid"`` so invalid params raise
-   at config load) — also the base of its config-side Instance member, and
-3. its realisation behaviour via the single stateless contract
-   :meth:`FilterType.resolve` — including its pass count and, for two-pass
-   filters, how it scrapes the measured value out of a measurement pass.
-
-A new filter type is added entirely in this module: params model +
-``@register_filter`` class + :data:`FilterInstance` member. No edits to
-``AudioConfig``, the chain executor, or existing filter classes are required.
-Registering two classes with the same ``type_id`` fails at import time.
+Each filter is ONE Pydantic class owning its ``type`` tag, its parameters
+(fields, ``extra="forbid"`` so invalid params raise at config load), and its
+realisation behaviour via the single stateless contract
+:meth:`_FilterInstanceBase.resolve` — including its pass count and, for
+two-pass filters, how it scrapes the measured value out of a measurement
+pass. A new filter type is added entirely in this module: one class plus one
+:data:`FilterInstance` union member; no edits to ``AudioConfig``, the chain
+executor, or existing filters are required.
 
 The single contract the executor drives is::
 
@@ -28,12 +21,12 @@ The single contract the executor drives is::
   result, which the filter scrapes (its own regex/JSON parse lives here) to
   build the final ``-af`` fragment.
 
-All filter-specific knowledge (loudnorm JSON regex, ``volumedetect``
-``max_volume`` regex, downmix matrices) lives inside the owning filter class; the
-executor knows only the ``resolve``/:class:`FilterStep` contract.
+All filter-specific knowledge (loudnorm JSON regex, ``astats`` peak regex,
+downmix matrices) lives inside the owning filter class; the executor knows
+only the ``resolve``/:class:`FilterStep` contract.
 
 ``EncodeParams`` is defined here (rather than in ``chain.py``) because both
-``FilterStep.output_format`` and :class:`EncodeFilter` need it, and ``chain.py``
+``FilterStep.output_format`` and the ``encode`` filter need it, and ``chain.py``
 imports from this module (defining it there would create a circular import).
 This module is its canonical home.
 """
@@ -43,7 +36,7 @@ import json
 import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Annotated, ClassVar, Final, Literal
+from typing import Annotated, Final, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -84,7 +77,7 @@ class EncodeParams(BaseModel):
 
 @dataclass
 class FilterStep:
-    """One filter's contribution to the chain, returned by :meth:`FilterType.resolve`.
+    """One filter's contribution to the chain, returned by the filter's ``resolve``.
 
     The executor consumes this without inspecting the filter's concrete type.
 
@@ -93,7 +86,7 @@ class FilterStep:
                        filter (never ``None``); the executor drops empty
                        fragments from the comma-join.
         needs_pass:    ``True`` = run a measurement pass with ``af`` (output to
-                       null), then call :meth:`FilterType.resolve` again with the
+                       null), then call the filter's ``resolve`` again with the
                        result. ``False`` = the fragment is final.
         out_layout:    The channel layout after this filter (``downmix`` updates
                        it; every other filter passes the incoming layout through).
@@ -107,28 +100,16 @@ class FilterStep:
     output_format: EncodeParams | None = None
 
 
-class FilterType(ABC):
-    """Abstract base for a registered filter type.
+class _FilterInstanceBase(BaseModel, ABC):
+    """Base of every audio filter class: shared validation config + ``resolve``.
 
-    A filter instance is **stateless and re-entrant**: it holds only its
-    validated parameters and is reused across every (track, chain). Everything a
-    later ``resolve`` call needs arrives via ``last_output`` — never stored on
-    the instance.
-
-    Subclasses declare :attr:`type_id` and implement :meth:`resolve`.
+    A filter object is **stateless and re-entrant**: it holds only its
+    validated fields (the config palette entry) and is reused across every
+    (track, chain). Everything a later ``resolve`` call needs beyond the
+    fields arrives via ``last_output`` — never stored on the instance.
     """
 
-    type_id: ClassVar[str]
-
-    def __init__(self, params: BaseModel) -> None:
-        """Store the validated params model instance for this filter.
-
-        Args:
-            params: A validated params model instance for this filter type —
-                typically the config-side :data:`FilterInstance` member, which
-                subclasses the params model.
-        """
-        self._params = params
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     @abstractmethod
     def resolve(
@@ -153,198 +134,7 @@ class FilterType(ABC):
 
 
 # ---------------------------------------------------------------------------
-# Registry
-# ---------------------------------------------------------------------------
-
-_FILTER_REGISTRY: dict[str, type[FilterType]] = {}
-"""Type id → filter-type class. Populated by :func:`register_filter` at import."""
-
-
-def register_filter(cls: type[FilterType]) -> type[FilterType]:
-    """Register a filter-type class under its ``type_id``.
-
-    Used as a class decorator. Rejects a duplicate ``type_id`` at import time so
-    two classes cannot claim the same id.
-
-    Args:
-        cls: The :class:`FilterType` subclass to register.
-
-    Returns:
-        The same class (so it can be used as a decorator).
-
-    Raises:
-        ValueError: If a class is already registered for ``cls.type_id``.
-    """
-    if cls.type_id in _FILTER_REGISTRY:
-        raise ValueError(f"Duplicate filter type id: {cls.type_id!r}")
-    _FILTER_REGISTRY[cls.type_id] = cls
-    return cls
-
-
-def get_filter_class(type_id: str) -> type[FilterType]:
-    """Return the registered filter-type class for ``type_id``.
-
-    Args:
-        type_id: A filter-type id (e.g. ``peaknorm``).
-
-    Returns:
-        The registered :class:`FilterType` subclass.
-
-    Raises:
-        KeyError: When no class is registered for ``type_id``. Callers (config
-            validation) surface this as a ``ValidationError`` listing
-            :func:`registered_type_ids`.
-    """
-    return _FILTER_REGISTRY[type_id]
-
-
-def registered_type_ids() -> list[str]:
-    """Return the sorted list of currently registered filter-type ids."""
-    return sorted(_FILTER_REGISTRY)
-
-
-# ---------------------------------------------------------------------------
-# Parameter models
-# ---------------------------------------------------------------------------
-
-class PeakNormParams(BaseModel):
-    """Parameters for the ``peaknorm`` filter."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    target_dbfs: float
-
-
-class LoudNormParams(BaseModel):
-    """Parameters for the ``loudnorm`` filter (EBU R128 targets).
-
-    Config-facing field names are lower-case; the filter emits loudnorm's
-    canonical upper-case option names (``I=``/``TP=``/``LRA=`` and
-    ``measured_*``) — per ``ffmpeg -h filter=loudnorm`` the lower-case
-    ``i``/``tp``/``lra`` spellings are the aliases, so no long-name switch is
-    needed (unlike ``dynaudnorm``, where ``f``/``g``/``p``/``m``/``r`` were
-    the short forms actually used).
-    """
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    i:   float
-    tp:  float
-    lra: float
-
-
-class DynAudNormParams(BaseModel):
-    """Parameters for the ``dynaudnorm`` filter (dynamic normalisation).
-
-    Field names are ffmpeg's **long** option names (not the single-letter
-    aliases) for readability. To inspect the full set of options a filter
-    accepts — to revise or extend these later — run::
-
-        ffmpeg -h filter=dynaudnorm
-
-    (general form ``ffmpeg -h filter=<name>``). The values used here map to
-    ``dynaudnorm=framelen=<>:gausssize=<>:peak=<>:maxgain=<>:targetrms=<>``.
-    """
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    framelen:  int      # analysis window length in ms (ffmpeg ``framelen``/``f``)
-    gausssize: int      # Gaussian window size in frames (ffmpeg ``gausssize``/``g``)
-    peak:      float    # target peak magnitude, 0..1 (ffmpeg ``peak``/``p``)
-    maxgain:   float    # maximum gain factor (ffmpeg ``maxgain``/``m``)
-    targetrms: float    # target RMS, 0 = disabled (ffmpeg ``targetrms``/``r``)
-
-
-class DownmixParams(BaseModel):
-    """Parameters for the ``downmix`` filter."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    to:     str
-    matrix: str | None = None
-
-
-class EncodeFilterParams(BaseModel):
-    """Parameters for the ``encode`` filter."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    codec:               str
-    bitrate_per_channel: str
-    extension:           str
-
-
-class PassthroughParams(BaseModel):
-    """Parameters for the ``passthrough`` filter — none accepted."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-
-# ---------------------------------------------------------------------------
-# Config-side instances
-# ---------------------------------------------------------------------------
-
-class PeakNormInstance(PeakNormParams):
-    """``audio.filters`` palette entry of the ``peaknorm`` filter type."""
-
-    type: Literal["peaknorm"] = "peaknorm"
-
-
-class LoudNormInstance(LoudNormParams):
-    """``audio.filters`` palette entry of the ``loudnorm`` filter type."""
-
-    type: Literal["loudnorm"] = "loudnorm"
-
-
-class DynAudNormInstance(DynAudNormParams):
-    """``audio.filters`` palette entry of the ``dynaudnorm`` filter type."""
-
-    type: Literal["dynaudnorm"] = "dynaudnorm"
-
-
-class DownmixInstance(DownmixParams):
-    """``audio.filters`` palette entry of the ``downmix`` filter type."""
-
-    type: Literal["downmix"] = "downmix"
-
-
-class EncodeInstance(EncodeFilterParams):
-    """``audio.filters`` palette entry of the ``encode`` filter type."""
-
-    type: Literal["encode"] = "encode"
-
-
-class PassthroughInstance(PassthroughParams):
-    """``audio.filters`` palette entry of the ``passthrough`` filter type."""
-
-    type: Literal["passthrough"] = "passthrough"
-
-
-FilterInstance = Annotated[
-    PeakNormInstance
-    | LoudNormInstance
-    | DynAudNormInstance
-    | DownmixInstance
-    | EncodeInstance
-    | PassthroughInstance,
-    Field(discriminator="type"),
-]
-"""A validated ``audio.filters`` palette entry — the config-side filter union.
-
-The flat YAML form ``{type: <id>, ...params}`` is the only shape: each member
-subclasses its filter's params model, so the params ARE the member's fields and
-config, ``model_dump()``, and chain fingerprints all share one form. The
-``type`` tag discriminates; an unknown type id or a param foreign to the type
-is a config-load ``ValidationError`` listing the expected tags.
-
-The runnable filter for an instance is built via
-``get_filter_class(inst.type)(inst)`` — the registry pairs the tag with the
-:class:`FilterType`, and the instance itself is the validated params.
-"""
-
-
-# ---------------------------------------------------------------------------
-# Two-pass scraping regexes (owned by the two-pass filter classes)
+# Two-pass scraping regexes (owned by the two-pass filters)
 # ---------------------------------------------------------------------------
 
 _LOUDNORM_JSON_RE: Final = re.compile(
@@ -353,26 +143,24 @@ _LOUDNORM_JSON_RE: Final = re.compile(
 )
 """Extracts the ``loudnorm`` JSON measurement block from ffmpeg stderr."""
 
-_VOLUMEDETECT_RE: Final = re.compile(r"max_volume:\s*([-\d.]+)\s*dB")
-"""Extracts the ``max_volume`` reading from ``volumedetect`` stderr output."""
 _ASTATS_PEAK_VOLUME_RE: Final = re.compile(r"Peak level dB:\s*([-\d.]+)")
 """Extracts the ``peak_volume`` reading from ``astats`` stderr output."""
 # Sample line:
 # [Parsed_astats_2 @ ...] Peak level dB: 2.269108
 
 # ---------------------------------------------------------------------------
-# Registered filter types
+# Audio filters
 # ---------------------------------------------------------------------------
 
-@register_filter
-class PeakNormFilter(FilterType):
-    """Two-pass peak normalisation: measure peak (``volumedetect``), apply gain.
+class PeakNormInstance(_FilterInstanceBase):
+    """Two-pass peak normalisation: measure peak (``astats``), apply gain.
 
     Preserves source sample rate and bit depth — it only applies a ``volume``
     gain to shift the measured peak to ``target_dbfs``.
     """
 
-    type_id = "peaknorm"
+    type:        Literal["peaknorm"] = "peaknorm"
+    target_dbfs: float
 
     def resolve(
         self,
@@ -397,10 +185,8 @@ class PeakNormFilter(FilterType):
                 "peaknorm did not produce a parseable peak volume line "
                 f"(ffmpeg exit code {last_output.returncode})"
             )
-        params        = self._params
-        assert isinstance(params, PeakNormParams)
         max_volume_db = float(match.group(1))
-        gain_db       = params.target_dbfs - max_volume_db
+        gain_db       = self.target_dbfs - max_volume_db
         return FilterStep(
             af         = f"volume={gain_db:.4f}dB",
             needs_pass = False,
@@ -408,16 +194,24 @@ class PeakNormFilter(FilterType):
         )
 
 
-@register_filter
-class LoudNormFilter(FilterType):
+class LoudNormInstance(_FilterInstanceBase):
     """Two-pass EBU R128 loudness normalisation (``loudnorm``).
 
     Pass 1 measures integrated loudness / true peak / range via
     ``loudnorm=…:print_format=json``; pass 2 linear-normalises using the
     measured values scraped from the pass-1 JSON block.
+
+    Field names are lower-case; the filter emits loudnorm's canonical
+    upper-case option names (``I=``/``TP=``/``LRA=`` and ``measured_*``) — per
+    ``ffmpeg -h filter=loudnorm`` the lower-case ``i``/``tp``/``lra`` spellings
+    are the aliases, so no long-name switch is needed (unlike ``dynaudnorm``,
+    where ``f``/``g``/``p``/``m``/``r`` were the short forms actually used).
     """
 
-    type_id = "loudnorm"
+    type: Literal["loudnorm"] = "loudnorm"
+    i:   float
+    tp:  float
+    lra: float
 
     def resolve(
         self,
@@ -425,9 +219,7 @@ class LoudNormFilter(FilterType):
         last_output: FFmpegRunResult | None,
     ) -> FilterStep:
         """Analyse on the first call, linear-normalise on the second."""
-        params = self._params
-        assert isinstance(params, LoudNormParams)
-        targets = f"I={params.i}:TP={params.tp}:LRA={params.lra}"
+        targets = f"I={self.i}:TP={self.tp}:LRA={self.lra}"
         if last_output is None:
             # Pass 1 — analysis only (no output file).
             return FilterStep(
@@ -483,8 +275,7 @@ class LoudNormFilter(FilterType):
         }
 
 
-@register_filter
-class DynAudNormFilter(FilterType):
+class DynAudNormInstance(_FilterInstanceBase):
     """Single-pass dynamic audio normalisation (``dynaudnorm``).
 
     Emits ``dynaudnorm=framelen=<>:gausssize=<>:peak=<>:maxgain=<>:targetrms=<>``
@@ -493,7 +284,12 @@ class DynAudNormFilter(FilterType):
     (general form ``ffmpeg -h filter=<name>``).
     """
 
-    type_id = "dynaudnorm"
+    type: Literal["dynaudnorm"] = "dynaudnorm"
+    framelen:  int      # analysis window length in ms (ffmpeg ``framelen``/``f``)
+    gausssize: int      # Gaussian window size in frames (ffmpeg ``gausssize``/``g``)
+    peak:      float    # target peak magnitude, 0..1 (ffmpeg ``peak``/``p``)
+    maxgain:   float    # maximum gain factor (ffmpeg ``maxgain``/``m``)
+    targetrms: float    # target RMS, 0 = disabled (ffmpeg ``targetrms``/``r``)
 
     def resolve(
         self,
@@ -501,17 +297,14 @@ class DynAudNormFilter(FilterType):
         last_output: FFmpegRunResult | None,
     ) -> FilterStep:
         """Return the single-pass ``dynaudnorm`` fragment (ignores ``last_output``)."""
-        params = self._params
-        assert isinstance(params, DynAudNormParams)
         af = (
-            f"dynaudnorm=framelen={params.framelen}:gausssize={params.gausssize}"
-            f":peak={params.peak}:maxgain={params.maxgain}:targetrms={params.targetrms}"
+            f"dynaudnorm=framelen={self.framelen}:gausssize={self.gausssize}"
+            f":peak={self.peak}:maxgain={self.maxgain}:targetrms={self.targetrms}"
         )
         return FilterStep(af=af, needs_pass=False, out_layout=layout)
 
 
-@register_filter
-class DownmixFilter(FilterType):
+class DownmixInstance(_FilterInstanceBase):
     """Downmix-only channel fold (``downmix``).
 
     Emits an index-addressed ``pan`` fragment from :data:`DOWNMIX_MATRICES` when
@@ -519,7 +312,9 @@ class DownmixFilter(FilterType):
     (``af=""``) that leaves the channels untouched.
     """
 
-    type_id = "downmix"
+    type:   Literal["downmix"] = "downmix"
+    to:     str
+    matrix: str | None = None
 
     def resolve(
         self,
@@ -527,20 +322,18 @@ class DownmixFilter(FilterType):
         last_output: FFmpegRunResult | None,
     ) -> FilterStep:
         """Return the pan fragment, or a no-op when source channels <= target."""
-        params = self._params
-        assert isinstance(params, DownmixParams)
-        target        = ChannelLayout.parse(params.to)
+        target          = ChannelLayout.parse(self.to)
         target_channels = layout_channels(target.normalized)
         if layout.channels <= target_channels:
             # Downmix-only: nothing to reduce, pass channels through untouched.
             return FilterStep(af="", needs_pass=False, out_layout=layout)
 
         # Pick the matrix to downmix with.
-        layout_id = (layout.normalized, target.normalized, params.matrix)
+        layout_id = (layout.normalized, target.normalized, self.matrix)
         if layout_id not in DOWNMIX_MATRICES:
             raise ValueError(
                 f"No downmix matrix for {layout.normalized} → {target.normalized} "
-                f"with matrix={params.matrix!r}"
+                f"with matrix={self.matrix!r}"
             )
 
         pan = ",".join([
@@ -550,11 +343,13 @@ class DownmixFilter(FilterType):
         return FilterStep(af=pan, needs_pass=False, out_layout=target)
 
 
-@register_filter
-class EncodeFilter(FilterType):
+class EncodeInstance(_FilterInstanceBase):
     """Terminal output target (``encode``): no ``-af``, sets ``output_format``."""
 
-    type_id = "encode"
+    type:                Literal["encode"] = "encode"
+    codec:               str
+    bitrate_per_channel: str
+    extension:           str
 
     def resolve(
         self,
@@ -562,22 +357,19 @@ class EncodeFilter(FilterType):
         last_output: FFmpegRunResult | None,
     ) -> FilterStep:
         """Contribute no ``-af`` fragment; set the terminal output format."""
-        params = self._params
-        assert isinstance(params, EncodeFilterParams)
         return FilterStep(
             af            = "",
             needs_pass    = False,
             out_layout    = layout,
             output_format = EncodeParams(
-                codec               = params.codec,
-                bitrate_per_channel = params.bitrate_per_channel,
-                extension           = params.extension,
+                codec               = self.codec,
+                bitrate_per_channel = self.bitrate_per_channel,
+                extension           = self.extension,
             ),
         )
 
 
-@register_filter
-class PassthroughFilter(FilterType):
+class PassthroughInstance(_FilterInstanceBase):
     """Stream-copy with no filtering — a forward-compatible stub.
 
     Config-time this is a valid filter (a chain may consist solely of it), but
@@ -588,7 +380,7 @@ class PassthroughFilter(FilterType):
     stream object directly into the phase result — no file produced.
     """
 
-    type_id = "passthrough"
+    type: Literal["passthrough"] = "passthrough"
 
     def resolve(
         self,
@@ -600,3 +392,23 @@ class PassthroughFilter(FilterType):
             "passthrough is not implemented yet. "
             "It must never silently emit an incorrect file."
         )
+
+
+FilterInstance = Annotated[
+    PeakNormInstance
+    | LoudNormInstance
+    | DynAudNormInstance
+    | DownmixInstance
+    | EncodeInstance
+    | PassthroughInstance,
+    Field(discriminator="type"),
+]
+"""A validated ``audio.filters`` palette entry — the audio filter union.
+
+The flat YAML form ``{type: <id>, ...params}`` is the only shape: each member's
+fields ARE its params, so config, ``model_dump()``, and chain fingerprints all
+share one form. The ``type`` tag discriminates; an unknown type id or a param
+foreign to the type is a config-load ``ValidationError`` listing the expected
+tags. Each member IS its filter — validated config data and ``resolve()``
+behaviour on one class; the executor drives ``inst.resolve()`` directly.
+"""
