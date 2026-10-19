@@ -282,6 +282,8 @@ Investigation needed.
 
 2026-10-02: second same-shaped flake in a targeted 3-file run (quality + vif + metrics; 1 failed of 129, name not captured) that passed on two immediate re-runs AND in the full suite. Pattern so far: ~1 flake per full-suite-scale run under load — worth a session with `-p xdist`-style repetition or last-failed + load when it recurs.
 
+2026-10-19: FOURTH observation — first one with a NAME: `tests/unit/test_yaml_utils.py::test_properties_round_trip_preserves_arbitrary_text` failed mid-suite with Hypothesis DeadlineExceeded (909ms vs the 200ms deadline) under concurrent load; passed in isolation AND the full suite passed clean on immediate rerun. Same load-tracking pattern, now with the deadline mechanism identified as the trip-wire (examples run slower than the fixed per-example budget, not logic failures).
+
 ---
 
 ## 76. Reevaluate Python 3.15.x (lazy imports) — needs thinking
