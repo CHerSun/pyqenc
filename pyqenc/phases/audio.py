@@ -22,7 +22,7 @@ from pydantic import BaseModel, Field
 from pyqenc.utils.log_format import fmt_key_value_table
 
 if TYPE_CHECKING:
-    from pyqenc.app_config import AppConfig
+    from pyqenc.app_config import AppConfig, SelectEntry
     from pyqenc.metrics import MetricsCollector
 
 from pyqenc.audio.chain import (
@@ -35,6 +35,7 @@ from pyqenc.audio.chain import (
 from pyqenc.audio.select import resolve_selection
 from pyqenc.constants import (
     AUDIO_OUTPUT_DIR,
+    FAILURE_SYMBOL_MINOR,
     SUCCESS_SYMBOL_MINOR,
     TEMP_SUFFIX,
 )
@@ -196,7 +197,6 @@ class AudioPhase(Phase[AudioPhaseResult]):
 
         kv: dict[str, object] = {
             "Processing chains:" : len(audio_cfg.chains),
-            "Selectors:"         : "0 (all extracted tracks)" if not audio_cfg.select else len(audio_cfg.select),
             "Tracks:"            : len(self._deps[ExtractionPhase].audio_streams),
         }
         if audio_cfg.concurrency > 1:
@@ -278,7 +278,12 @@ class AudioPhase(Phase[AudioPhaseResult]):
         remove_stale_tmp_files(audio_dir)
 
         listing = {f.name for f in audio_dir.iterdir() if f.is_file()}
-        return Recovery.from_artifacts(self._classify(audio_dir, tracks, resolved, listing))
+        rows = self._classify(audio_dir, tracks, resolved, listing)
+        all_streams = [a.payload for a in self._deps[ExtractionPhase].audio_streams]
+        _log_track_table(all_streams, tracks, rows)
+        if all_streams:
+            _log_selector(audio_cfg.select)
+        return Recovery.from_artifacts(rows)
 
     def _output_dir(self, tracks: list[AudioStream], work_dir: Path) -> Path:
         """Return the phase's dedicated audio output directory (``work_dir/audio``).
@@ -569,3 +574,76 @@ class AudioPhase(Phase[AudioPhaseResult]):
             message=message,
             outputs=outputs,
         )
+
+
+# ---------------------------------------------------------------------------
+# Run-log presentation
+# ---------------------------------------------------------------------------
+
+def _log_track_table(
+    streams:  list[AudioStream],
+    selected: list[AudioStream],
+    rows:     list[Artifact],
+) -> None:
+    """Log a 3-column table over the extraction inventory: want, present, name.
+
+    Columns (orthogonal — neither influences the other):
+    - Want:    ``✔`` when the track is in the working track set (selected
+               by ``audio.select``) else ``✘``.
+    - Present: ``✔`` when every expected chain output of the track is on
+               disk (COMPLETE ledger rows) else ``✘`` — a deselected track
+               expects no outputs and shows ``✘`` by construction.
+    - Name:    The stream's ``display_name()``.
+
+    Args:
+        streams:  Every extracted audio stream, in extraction order.
+        selected: The working track set (the ``Want`` column's source).
+        rows:     The classified ledger (only the ``AudioOutput`` rows are
+                  read).
+    """
+    logger.info("Tracks:")
+    logger.info("Want  Present      Name")
+    if not streams:
+        logger.warning("NO audio tracks in the source.")
+        return
+
+    selected_ids = {(s.file.path, s.info.track_id) for s in selected}
+    states_by_id: dict[tuple[Path, int], list[ArtifactState]] = {}
+    for row in rows:
+        payload = row.payload
+        if isinstance(payload, AudioOutput):
+            key = (payload.stream.file.path, payload.stream.info.track_id)
+            states_by_id.setdefault(key, []).append(row.state)
+    present_ids = {
+        key for key, states in states_by_id.items()
+        if all(s == ArtifactState.COMPLETE for s in states)
+    }
+
+    for stream in streams:
+        key = (stream.file.path, stream.info.track_id)
+        w_sym = SUCCESS_SYMBOL_MINOR if key in selected_ids else FAILURE_SYMBOL_MINOR
+        p_sym = SUCCESS_SYMBOL_MINOR if key in present_ids else FAILURE_SYMBOL_MINOR
+        logger.info("   %s  %s  \"%s\"", w_sym, p_sym, stream.display_name())
+
+
+def _log_selector(select: list[SelectEntry]) -> None:
+    """Log the ``audio.select`` entries — the reason behind the table's picks.
+
+    One line per entry renders the configured regexes verbatim (``for``
+    always; ``exclude`` and ``prefer`` when set); an empty select logs the
+    pick-everything fallback instead.
+
+    Args:
+        select: The ordered ``audio.select`` entries.
+    """
+    if not select:
+        logger.info("Selector: none — all extracted tracks selected")
+        return
+    logger.info("Selector:")
+    for entry in select:
+        parts = [f"for={entry.for_}"]
+        if entry.exclude:
+            parts.append(f"exclude={entry.exclude}")
+        if entry.prefer:
+            parts.append("prefer: " + ", ".join(entry.prefer))
+        logger.info("  %s", "  ".join(parts))

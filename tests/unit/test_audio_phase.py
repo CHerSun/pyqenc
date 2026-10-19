@@ -22,15 +22,23 @@ Bugs guarded:
 # CHerSun 2026
 
 import asyncio
+import logging
+import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+from hypothesis import HealthCheck, given, settings
+from hypothesis import strategies as st
 
 from pyqenc.app_config import AudioConfig, ChainSpec, FilterInstance, SelectEntry
 from pyqenc.audio.chain import ResolvedChain, chain_output_path
 from pyqenc.audio.layout import ChannelLayout
-from pyqenc.constants import AUDIO_OUTPUT_DIR
+from pyqenc.constants import (
+    AUDIO_OUTPUT_DIR,
+    FAILURE_SYMBOL_MINOR,
+    SUCCESS_SYMBOL_MINOR,
+)
 from pyqenc.models import PhaseOutcome, SizedFingerprint
 from pyqenc.phases.audio import AudioPhase, AudioSidecar
 from pyqenc.stream_model import AudioStream, AudioStreamInfo, ProbedFile
@@ -528,3 +536,166 @@ class TestBoundedExecution:
         dotted = raw["time_distribution"]["dotted"]
         keys = {e["key"] for group in dotted.values() for e in group["breakdown"]}
         assert {"audio.normal", "audio.night"} <= keys
+
+
+class TestSelectionTable:
+    """The run-log selection summary: the per-track table + the selector reason.
+
+    **Validates: TODO §45 — the audio phase's log answers "which streams were
+    picked up, in what state, and why".**
+    """
+
+    @staticmethod
+    def _run_logged(
+        work_dir: Path,
+        config:   AudioConfig,
+        tracks:   list[AudioStream],
+        caplog,
+    ) -> list[tuple[str, str]]:
+        """Run the phase and leave its INFO+ log in *caplog*; return the record.
+
+        The record of executed (chain, stem) jobs lets callers derive the
+        selected set from the run itself.
+        """
+        record: list[tuple[str, str]] = []
+        phase = _make_phase(work_dir, config, tracks)
+        caplog.clear()
+        with (
+            patch("pyqenc.phases.audio.execute_chain", _fake_execute_chain_factory(record)),
+            caplog.at_level(logging.INFO),
+        ):
+            phase.run()
+        return record
+
+    @staticmethod
+    def _name_lines(caplog, track: AudioStream) -> list[str]:
+        """The summary lines naming *track* — exactly one row per track."""
+        return [
+            line for line in caplog.text.splitlines()
+            if track.display_name() in line
+        ]
+
+    def test_table_shows_want_per_track_and_selector_reason(
+        self, tmp_path: Path, caplog,
+    ) -> None:
+        """Bug: the run log never said which audio tracks were picked up.
+
+        With a selector configured, every extracted track appears in the
+        summary exactly once — selected rows carry the success glyph,
+        deselected rows the failure glyph — and the selector's ``for``
+        pattern is logged as the reason for the split.
+        """
+        config = _audio_config(
+            [ChainSpec(name="normal", filters=["peaknorm"])],
+            select=[SelectEntry(for_="lang=eng")],
+        )
+        tracks = [
+            _track(tmp_path, "t1", track_id=1, language="eng"),
+            _track(tmp_path, "t2", track_id=2, language="rus"),
+        ]
+        self._run_logged(tmp_path, config, tracks, caplog)
+
+        for track, wanted in zip(tracks, (True, False)):
+            lines = self._name_lines(caplog, track)
+            assert len(lines) == 1
+            if wanted:
+                assert SUCCESS_SYMBOL_MINOR in lines[0]
+            else:
+                assert SUCCESS_SYMBOL_MINOR not in lines[0]
+                assert FAILURE_SYMBOL_MINOR in lines[0]
+        assert "for=lang=eng" in caplog.text
+
+    def test_present_glyph_marks_fully_reused_tracks(
+        self, tmp_path: Path, caplog,
+    ) -> None:
+        """Bug: per-track reuse was invisible — a track whose every chain
+        output is already on disk must show both success glyphs on a
+        re-run that produces nothing."""
+        config = _audio_config(
+            [ChainSpec(name="normal", filters=["peaknorm"]),
+             ChainSpec(name="night",  filters=["peaknorm2", "aac"])],
+        )
+        tracks = [_track(tmp_path, "t1", track_id=1)]
+        self._run_logged(tmp_path, config, tracks, caplog)
+        record = self._run_logged(tmp_path, config, tracks, caplog)
+
+        assert record == []                       # pure reuse
+        lines = self._name_lines(caplog, tracks[0])
+        assert len(lines) == 1
+        assert lines[0].count(SUCCESS_SYMBOL_MINOR) == 2   # want + present
+
+    def test_empty_select_picks_everything_without_entry_lines(
+        self, tmp_path: Path, caplog,
+    ) -> None:
+        """With no select config every track is wanted and no selector
+        entry lines appear — the pick-everything fallback needs no reason."""
+        config = _audio_config([ChainSpec(name="normal", filters=["peaknorm"])])
+        tracks = [_track(tmp_path, "t1", track_id=1), _track(tmp_path, "t2", track_id=2)]
+        self._run_logged(tmp_path, config, tracks, caplog)
+
+        assert "for=" not in caplog.text
+        for track in tracks:
+            lines = self._name_lines(caplog, track)
+            assert len(lines) == 1
+            assert SUCCESS_SYMBOL_MINOR in lines[0]
+
+    def test_no_tracks_in_inventory_warns_and_skips_selector(
+        self, tmp_path: Path, caplog,
+    ) -> None:
+        """Bug: a source without audio streams printed an empty summary —
+        a warning belongs there instead, no selector reason (nothing was
+        selected), and the phase still finishes green (nothing pending →
+        REUSED by the template's mapping)."""
+        config = _audio_config(
+            [ChainSpec(name="normal", filters=["peaknorm"])],
+            select=[SelectEntry(for_="lang=eng")],
+        )
+        with (
+            patch("pyqenc.phases.audio.execute_chain", _fake_execute_chain_factory([])),
+            caplog.at_level(logging.INFO),
+        ):
+            result = _make_phase(tmp_path, config, []).run()
+
+        assert result.is_complete
+        assert any(r.levelno >= logging.WARNING for r in caplog.records)
+        assert "for=lang=eng" not in caplog.text
+
+    @settings(
+        deadline=None,
+        max_examples=25,
+        suppress_health_check=[HealthCheck.function_scoped_fixture],
+    )
+    @given(
+        langs =st.lists(st.sampled_from(["eng", "rus", "jpn"]), min_size=0, max_size=5),
+        picked=st.sampled_from(["eng", "rus", "jpn"]),
+    )
+    def test_properties_table_covers_every_track_exactly_once(
+        self, langs: list[str], picked: str, caplog,
+    ) -> None:
+        """Property: whatever the inventory and the picked language, the
+        summary lists every extracted track exactly once, and exactly the
+        selector-picked tracks carry the success glyph.
+
+        caplog is reset per example (function-scoped fixture, manually
+        cleared); the phase runs in a fresh temp dir per example.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            tracks = [
+                _track(tmp_path, f"t{i}", track_id=i + 1, language=lang)
+                for i, lang in enumerate(langs)
+            ]
+            config = _audio_config(
+                [ChainSpec(name="normal", filters=["peaknorm"])],
+                select=[SelectEntry(for_=f"lang={picked}")],
+            )
+            record = self._run_logged(tmp_path, config, tracks, caplog)
+
+            selected_stems = {stem for _, stem in record}
+            wanted_lines = 0
+            for track in tracks:
+                lines = self._name_lines(caplog, track)
+                assert len(lines) == 1
+                if SUCCESS_SYMBOL_MINOR in lines[0]:
+                    wanted_lines += 1
+            assert wanted_lines == len(selected_stems)

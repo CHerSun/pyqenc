@@ -116,16 +116,6 @@ Need to check footprints and adjust accordingly for explicitly required values (
 
 ---
 
-## 45. (fast) Summary table for audio
-
-Should be basically a reuse of extraction table for audio table.
-
-Like for extraction phase - I want a similar table for audio phase - a summary on which streams were picked up (wanted flag), maybe with a chain counter per stream. Maybe also add after the table - the selector - selected tracks (as a clear reason for the choice).
-
-With the `2026-09-28 artifact-model` spec the data lives in one place: the audio ledger rows (`Artifact[AudioOutput]` = source stream + chain, with `wanted`) — pure UX on top.
-
----
-
 ## 47. Scene detection threshold search
 
 Default doesn't always produce wanted results.
@@ -830,7 +820,7 @@ If constants are used for a single module - they should belong there. If they ar
 
 ---
 
-## 134. (fast) Screenshotting uses legacy positioning
+## 138. (fast) Screenshotting uses legacy positioning
 
 It looks like screenshotting uses legacy frame_num based positioning, and an approximate at that.
 
@@ -900,7 +890,7 @@ To put it simply - encoding.py needs a full review for simplification.
 
 Strategy display name, being logged in brackets - should be owned somewhere uniformely for all similar logging (probably already have a func in logging).
 
-## Last known = 136
+## Last known = 138
 
 Keep this updated, so we can keep continuous numbering even on last todo item deletion.
 Keep this the last entry for easy human updates.
