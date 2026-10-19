@@ -35,6 +35,8 @@ def _codec(**overrides) -> CodecConfig:
         "default_quality": Decimal(20),
         "default_preset": "slow",
         "quality_range": (Decimal(0), Decimal(51)),
+        "quality_granularity": Decimal("0.5"),
+        "quality_label": "CRF",
         "presets": ["slow"],
         "encoder_args": ["-c:v", "libx265", "-crf", "{quality}"],
     }

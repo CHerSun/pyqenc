@@ -725,14 +725,6 @@ See also: python 3.15, major dependencies bump.
 
 ---
 
-## 131. YAML round-trip drops U+0085 (NEL)
-
-**Status:** needs thinking (found 2026-10-17; pre-existing on main — Hypothesis drew the falsifier and cached it in `.hypothesis/examples`, so it now fails deterministically)
-
-`test_yaml_utils.py::test_properties_round_trip_preserves_arbitrary_text` fails on the single character `\x85` (NEL): a model field holding it dumps+loads back as `' '`. PyYAML treats NEL as a YAML 1.1 line break, so a scalar consisting of exactly NEL normalizes away on load. Question is whether to care (no real pipeline field carries NEL) — options: exclude line-break-class characters from the property's alphabet, or make the dump side escape them. Related: the BOM work (§124) already special-cases one invisible codepoint.
-
----
-
 ## 132. Merge swallows measurement failures — dataless summaries stay green
 
 **Status:** needs thinking (reachability census 2026-10-17, surfaced by

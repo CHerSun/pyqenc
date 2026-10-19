@@ -240,7 +240,7 @@ class TestOverrideValidation:
     def test_single_point_granularity_rejected(self) -> None:
         # av1 granularity is 1 (integer steps): -q 18.5 must exit loudly
         # naming the codec and the nearest aligned values.
-        with pytest.raises(ValueError, match="av1.*18 and 19"):
+        with pytest.raises(ValueError, match=r"av1.*aligned values are 18\.0 and 19\.0"):
             _resolve_with_override(["av1"], (Decimal("18.5"), Decimal("18.5")))
 
     def test_pair_granularity_rejected(self) -> None:
@@ -251,7 +251,7 @@ class TestOverrideValidation:
     def test_multi_codec_intersection(self) -> None:
         # h265 (0.5) + AV1 (1.0) matched by one override: the coarsest step
         # wins — 18.5 is legal for h265 but must fail naming the AV1 side.
-        with pytest.raises(ValueError, match="av1.*18 and 19"):
+        with pytest.raises(ValueError, match=r"av1.*aligned values are 18\.0 and 19\.0"):
             _resolve_with_override(["h265-aq", "av1"], (Decimal("18.5"), Decimal("18.5")))
 
     def test_aligned_pair_accepted_across_codecs(self) -> None:

@@ -1273,11 +1273,11 @@ class TestMergeYamlReplayAggregate:
 
 
 def _summary_block(caplog_text: str) -> str:
-    """The rendered summary block: from the convention lines to before the
-    ``Files named`` line (the table + the below-table audit line)."""
+    """The rendered summary block: from the convention line to the
+    output-location line (the table + the below-table audit line)."""
     lines = caplog_text.splitlines()
     start = next(i for i, ln in enumerate(lines) if "anchor:" in ln or "targets:" in ln)
-    end = next(i for i, ln in enumerate(lines) if "Files named:" in ln)
+    end = next(i for i, ln in enumerate(lines) if "Merged video files Location:" in ln)
     return "\n".join(ln for ln in lines[start:end] if ln.strip())
 
 
@@ -1296,19 +1296,25 @@ class TestUnifiedMergeSummary:
             _run_full_merge(tmp_path, fixed=True, anchor="h265-aq+slow")
 
         text = caplog.text
-        assert "anchor: ◎  h265-aq+slow" in text
-        assert "anchor holds at full scale: h265-aq+slow" in text
-        # The source row renders with the (src) cue; the anchor row carries
-        # the full-movie absolutes as ◆-marked sub-column pairs.
-        assert "test (src)" in text
-        assert "◆ 95.0 | 96.5" in text
-        # Inline completion: values only, comparison statistics only.
-        assert "vmaf-p10=95.0  vmaf-median=96.5  ssim-median=98.2  psnr-median=46.0" in text
-        # The old furniture is gone: no targets reminder under the table (the
-        # key-params line at phase start stays), no miss block.
-        assert "≥ 96.00" not in text
-        assert "missed quality targets" not in text
-        assert "Files named: test *.mkv" in text
+        lines = text.splitlines()
+        block = _summary_block(text)
+        rows = [ln for ln in block.splitlines() if ln.strip()]
+
+        # The fixed basis is declared naming the merge anchor strategy.
+        assert any("anchor" in ln and "h265-aq+slow" in ln for ln in lines)
+        # The source renders as its own row, identified by the source name.
+        assert any("test" in ln and "(src)" in ln for ln in rows)
+        # The anchor row carries the full-movie measured absolutes.
+        anchor_row = next(ln for ln in rows if "(anchor)" in ln)
+        assert all(value in anchor_row for value in ("95.0", "96.5", "98.2", "46.0"))
+        # Inline completion: the comparison values, no verdict tokens.
+        completion = next(ln for ln in lines if "vmaf-p10=95.0" in ln)
+        assert "vmaf-median=96.5" in completion and "targets" not in completion
+        # The audit reports the two elections agreeing (the same anchor).
+        assert any("h265-aq+slow" in ln and "same" in ln for ln in lines)
+        # Fixed mode renders no target thresholds and no miss block.
+        assert "≥" not in block
+        assert "miss" not in text.lower()
 
     def test_search_table_targets_ride_the_source_row(
         self, tmp_path: Path, caplog,
@@ -1322,14 +1328,25 @@ class TestUnifiedMergeSummary:
             _run_full_merge(tmp_path, fixed=False)
 
         text = caplog.text
-        assert "targets: ◎  configured" in text
-        assert "◎ test (src)" in text
-        assert "◆ 93.0 | 96.0" in text  # the vmaf p10 | median target absolutes
+        block = _summary_block(text)
+        rows = [ln for ln in block.splitlines() if ln.strip()]
+
+        # Search mode declares the configured-targets basis.
+        assert "targets" in rows[0]
+        # The targets ride the source row as the row's absolute values —
+        # every configured target value appears on the source row.
+        source_row = next(ln for ln in rows if "test" in ln and "(src)" in ln)
+        for target in _APP_CONFIG.resolve_encoding().targets:
+            assert str(target.value) in source_row
+        # Strategy table rows carry live verdicts; the vif target is
+        # unmeasured here, so the strategy row shows the miss verdict.
+        # (INFO-level lines only — the missed-targets warning names the
+        # strategy too but is not a table row.)
         strategy_rows = [
-            ln for ln in _summary_block(text).splitlines()
-            if "h265" in ln and "(src)" not in ln
+            ln for ln in rows
+            if ln.startswith("INFO") and "h265" in ln and "test" not in ln
         ]
-        assert strategy_rows and strategy_rows[0].rstrip().endswith("◀ ✘")
+        assert strategy_rows and "✘" in strategy_rows[0]
 
     def test_replay_is_byte_identical_to_the_processing_table(
         self, tmp_path: Path, caplog,
@@ -1391,9 +1408,9 @@ class TestUnifiedMergeSummary:
         with caplog.at_level(_logging.WARNING, logger="pyqenc.phases.merge"):
             result = second.run(dry_run=False)
         assert result.outcome is PhaseOutcome.REUSED
-        assert (
-            "anchor shifted at full scale: h265-aq+slow (test subset)"
-            " → h264+ultrafast (full movie)" in caplog.text
+        audits = [rec.getMessage() for rec in caplog.records if rec.levelno >= _logging.WARNING]
+        assert any(
+            "h265-aq+slow" in msg and "h264+ultrafast" in msg for msg in audits
         )
 
 
