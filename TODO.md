@@ -306,16 +306,6 @@ See also 51.
 
 ---
 
-## 80. (HIGH) LongPathYaml redefinition — cleaner editor experience + pyright-gate enabler — needs thinking
-
-Related: §91 (LongPath trailing-whitespace idempotence — the other open LongPath finding, 2026-10-05).
-
-2026-10-02, pyright cross-check evaluation DONE and stance DECIDED (recorded in commands-and-gates.md): ruff + ty are the static gates; pyright/Pylance stays an editor aid + occasional probe (`uvx pyright --pythonpath .venv/Scripts/python.exe`). Its real findings were fixed (LongPath operator params widened to StrPath, dead Strategy.raw branch, Artifact wrap, Decimal literals in tests); the known non-actionable families are documented in steering.
-
-The one open idea from the probe: redefine `LongPathYaml` as `Annotated[Path, AfterValidator(... -> LongPath)]` — the field then honestly accepts `Path`, runtime still yields `LongPath`, both checkers satisfied, zero call-site churn. It deletes the 51-squiggle `Path -> LongPath` family from the VS Code experience outright (editor value today), and is the prerequisite step if a pyright gate is ever wanted (recipe: this, then widen done, test Decimals done, config `reportPrivateImportUsage: none`, a handful of per-checker ignores for negative tests + lib gaps).
-
----
-
 ## 82. Research: multi-metric quality scoring/evaluation — joint paper review for possible improvements
 
 Born from the fixed-quality mode design discussion (2026-10-02). In fixed mode the optimization phase loses its "targets met -> compare sizes" assumption (knob pinned, strategies sit at different actual quality levels), so cross-strategy judging needs a defensible multi-metric story. Current working direction: anchor-relative deltas (size-winner strategy as reference) + Pareto dominance pruning, no composite scalar. This item collects sources for a dedicated joint research pass over the papers.
@@ -896,7 +886,21 @@ Hypothesis's `HealthCheck.filter_too_much`. Generation-side fix candidate: draw
 check for this test. Same statistics-based health-check family as §75's
 DeadlineExceeded flakes, but deterministic per-seed rather than load-dependent.
 
-## Last known = 139
+---
+
+## 140. Empirical test of h265 medium preset vs slow preset
+
+There are many tests stating:
+- slow vs slower - negligible quality difference (~1%) with significant complexity increase
+- slow vs medium - here we have different reports, many claim that medium gives practically the same result, but much faster. My personal experience - slow matters,
+  especially for grainy content (in particular our h265-crisp and VIF metric).
+
+Suggestion: test medium, slow and maybe slower on a few not too long videos.
+Measure time it takes, resulting sizes, quality. Run in both fixed and search mode. I.e. `3*2=6` tests. For fixed quality use 17 (my nearly visually lossless).
+
+---
+
+## Last known = 140
 
 Keep this updated, so we can keep continuous numbering even on last todo item deletion.
 Keep this the last entry for easy human updates.

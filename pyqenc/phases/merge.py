@@ -87,7 +87,6 @@ from pyqenc.utils.alive import AdvanceState, BarAdvance, ProgressBar
 from pyqenc.utils.ffmpeg_runner import FrameCountError, get_frame_count
 from pyqenc.utils.fs import remove_stale_tmp_files, safe_stat_size
 from pyqenc.utils.log_format import fmt_key_value_table, fmt_metric_value
-from pyqenc.utils.long_path import LongPath
 from pyqenc.utils.visualization import QualityMeasurer, create_quality_plot
 from pyqenc.utils.yaml_utils import load_model, save_model
 
@@ -561,11 +560,11 @@ class MergePhase(Phase[MergePhaseResult]):
                         payload = MergedVideo(
                             source_stem = source_stem,
                             strategy    = strategy,
-                            output_path = LongPath(output_file),
+                            output_path = output_file,
                             frame_count = record.frame_count,
                             metrics     = metrics,
                             targets_met = self._live_verdict(metrics),
-                            plot_path   = LongPath(output_file.with_suffix(".png"))
+                            plot_path   = output_file.with_suffix(".png")
                             if output_file.with_suffix(".png").exists() else None,
                         ),
                         state   = ArtifactState.COMPLETE,
@@ -588,7 +587,7 @@ class MergePhase(Phase[MergePhaseResult]):
                 payload = MergedVideo(
                     source_stem = source_stem,
                     strategy    = strategy,
-                    output_path = LongPath(output_file),
+                    output_path = output_file,
                 ),
                 state   = state,
             ))
@@ -610,7 +609,7 @@ class MergePhase(Phase[MergePhaseResult]):
                     else ArtifactState.PARTIAL
                 )
                 rows.append(Artifact(
-                    payload = File(path=LongPath(output_file)),
+                    payload = File(path=output_file),
                     state   = state,
                     wanted  = False,
                 ))
@@ -914,11 +913,11 @@ class MergePhase(Phase[MergePhaseResult]):
                         payload = MergedVideo(
                             source_stem = source_stem,
                             strategy    = strategy,
-                            output_path = LongPath(output_file),
+                            output_path = output_file,
                             frame_count = frame_count,
                             metrics     = metrics_dict,
                             targets_met = targets_met,
-                            plot_path   = LongPath(plot_path) if plot_path is not None else None,
+                            plot_path   = plot_path,
                         ),
                         state   = ArtifactState.COMPLETE,
                     ))

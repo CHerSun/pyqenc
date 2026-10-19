@@ -39,9 +39,16 @@ from abc import abstractmethod
 from dataclasses import replace
 from decimal import Decimal
 from fractions import Fraction
+from pathlib import Path
 from typing import Annotated, Self
 
-from pydantic import BaseModel, BeforeValidator, ConfigDict, PlainSerializer
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    PlainSerializer,
+)
 
 from pyqenc.audio.layout import ChannelLayout
 from pyqenc.constants import (
@@ -58,7 +65,7 @@ from pyqenc.constants import (
 )
 from pyqenc.models import CropParams, SizedFingerprint, Strategy
 from pyqenc.utils.ffmpeg_runner import FFmpegInput
-from pyqenc.utils.long_path import LongPath
+from pyqenc.utils.long_path import coerce_long_path
 from pyqenc.utils.naming import sanitize_filesystem_text
 
 # ---------------------------------------------------------------------------
@@ -86,10 +93,13 @@ FractionYaml = Annotated[
 average-fps convention (e.g. ``[24000, 1001]``)."""
 
 LongPathYaml = Annotated[
-    LongPath,
+    Path,
+    AfterValidator(coerce_long_path),
     PlainSerializer(str, return_type=str),
 ]
-"""A :class:`LongPath` persisted as its plain string form (no ``\\\\?`` prefix)."""
+"""A path field accepting any :class:`~pathlib.Path` (or string) input,
+coerced to :class:`LongPath` at runtime and persisted as its plain string
+form (no ``\\\\?`` prefix)."""
 
 DecimalYaml = Annotated[
     Decimal,

@@ -87,7 +87,6 @@ from pyqenc.utils.log_format import (
     fmt_key_value_table,
     fmt_metric_summary,
 )
-from pyqenc.utils.long_path import LongPath
 from pyqenc.utils.visualization import QualityMeasurer
 from pyqenc.utils.yaml_utils import load_model, save_model
 
@@ -514,7 +513,7 @@ def _orphan_strategy_rows(work_dir: Path, strategies: list[Strategy]) -> list[Ar
     for strategy_dir in sorted(out_dir.iterdir()):
         if strategy_dir.is_dir() and strategy_dir.name not in expected:
             rows.append(Artifact(
-                payload = StreamFile(path=LongPath(strategy_dir)),
+                payload = StreamFile(path=strategy_dir),
                 state   = ArtifactState.COMPLETE,
                 wanted  = False,
             ))
@@ -2285,7 +2284,7 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
                 )
                 shutil.rmtree(strategy_dir, ignore_errors=True)
                 curated.append(Artifact(
-                    payload = StreamFile(path=LongPath(strategy_dir)),
+                    payload = StreamFile(path=strategy_dir),
                     state   = ArtifactState.ABSENT,
                     wanted  = False,
                 ))
@@ -2303,7 +2302,7 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
                     path.unlink()
                     logger.debug("Deleted unconsumed winner-layer name: %s", path.name)
                     curated.append(Artifact(
-                        payload = StreamFile(path=LongPath(path)),
+                        payload = StreamFile(path=path),
                         state   = ArtifactState.ABSENT,
                         wanted  = False,
                     ))
