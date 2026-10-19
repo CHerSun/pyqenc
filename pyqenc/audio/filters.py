@@ -199,7 +199,9 @@ class LoudNormInstance(_FilterInstanceBase):
 
     Pass 1 measures integrated loudness / true peak / range via
     ``loudnorm=…:print_format=json``; pass 2 linear-normalises using the
-    measured values scraped from the pass-1 JSON block.
+    measured values scraped from the pass-1 JSON block. Any param left unset
+    is omitted from the emitted fragment — ffmpeg then applies its own
+    default for it (``I=-24``, ``TP=-2``, ``LRA=7``).
 
     Field names are lower-case; the filter emits loudnorm's canonical
     upper-case option names (``I=``/``TP=``/``LRA=`` and ``measured_*``) — per
@@ -209,9 +211,9 @@ class LoudNormInstance(_FilterInstanceBase):
     """
 
     type: Literal["loudnorm"] = "loudnorm"
-    i:   float
-    tp:  float
-    lra: float
+    i:   float | None = None
+    tp:  float | None = None
+    lra: float | None = None
 
     def resolve(
         self,
@@ -219,26 +221,30 @@ class LoudNormInstance(_FilterInstanceBase):
         last_output: FFmpegRunResult | None,
     ) -> FilterStep:
         """Analyse on the first call, linear-normalise on the second."""
-        targets = f"I={self.i}:TP={self.tp}:LRA={self.lra}"
+        targets = [
+            f"{name}={value}"
+            for name, value in (("I", self.i), ("TP", self.tp), ("LRA", self.lra))
+            if value is not None
+        ]
         if last_output is None:
             # Pass 1 — analysis only (no output file).
             return FilterStep(
-                af         = f"loudnorm={targets}:print_format=json",
+                af         = "loudnorm=" + ":".join([*targets, "print_format=json"]),
                 needs_pass = True,
                 out_layout = layout,
             )
         # Pass 2 — scrape measured values and linear-normalise.
         measured = self._scrape_measurements(last_output)
-        af = (
-            f"loudnorm={targets}"
-            f":linear=true"
-            f":measured_I={measured['input_i']}"
-            f":measured_TP={measured['input_tp']}"
-            f":measured_LRA={measured['input_lra']}"
-            f":measured_thresh={measured['input_thresh']}"
-            f":offset={measured['target_offset']}"
-            f":print_format=none"
-        )
+        af = "loudnorm=" + ":".join([
+            *targets,
+            "linear=true",
+            f"measured_I={measured['input_i']}",
+            f"measured_TP={measured['input_tp']}",
+            f"measured_LRA={measured['input_lra']}",
+            f"measured_thresh={measured['input_thresh']}",
+            f"offset={measured['target_offset']}",
+            "print_format=none",
+        ])
         return FilterStep(af=af, needs_pass=False, out_layout=layout)
 
     @staticmethod
@@ -278,18 +284,20 @@ class LoudNormInstance(_FilterInstanceBase):
 class DynAudNormInstance(_FilterInstanceBase):
     """Single-pass dynamic audio normalisation (``dynaudnorm``).
 
-    Emits ``dynaudnorm=framelen=<>:gausssize=<>:peak=<>:maxgain=<>:targetrms=<>``
-    using ffmpeg's **long** option names. To inspect the filter's full option
-    set (to revise these params later) run ``ffmpeg -h filter=dynaudnorm``
-    (general form ``ffmpeg -h filter=<name>``).
+    Emits ``dynaudnorm`` using ffmpeg's **long** option names. Any param left
+    unset is omitted from the emitted fragment — ffmpeg then applies its own
+    default for it (``framelen=500``, ``gausssize=31``, ``peak=0.95``,
+    ``maxgain=10``, ``targetrms=0``). To inspect the filter's full option set
+    run ``ffmpeg -h filter=dynaudnorm`` (general form ``ffmpeg -h
+    filter=<name>``).
     """
 
-    type: Literal["dynaudnorm"] = "dynaudnorm"
-    framelen:  int      # analysis window length in ms (ffmpeg ``framelen``/``f``)
-    gausssize: int      # Gaussian window size in frames (ffmpeg ``gausssize``/``g``)
-    peak:      float    # target peak magnitude, 0..1 (ffmpeg ``peak``/``p``)
-    maxgain:   float    # maximum gain factor (ffmpeg ``maxgain``/``m``)
-    targetrms: float    # target RMS, 0 = disabled (ffmpeg ``targetrms``/``r``)
+    type:       Literal["dynaudnorm"] = "dynaudnorm"
+    framelen:   int   | None = None   # analysis window length in ms (ffmpeg ``framelen``/``f``)
+    gausssize:  int   | None = None   # Gaussian window size in frames (ffmpeg ``gausssize``/``g``)
+    peak:       float | None = None   # target peak magnitude, 0..1 (ffmpeg ``peak``/``p``)
+    maxgain:    float | None = None   # maximum gain factor (ffmpeg ``maxgain``/``m``)
+    targetrms:  float | None = None   # target RMS, 0 = disabled (ffmpeg ``targetrms``/``r``)
 
     def resolve(
         self,
@@ -297,10 +305,18 @@ class DynAudNormInstance(_FilterInstanceBase):
         last_output: FFmpegRunResult | None,
     ) -> FilterStep:
         """Return the single-pass ``dynaudnorm`` fragment (ignores ``last_output``)."""
-        af = (
-            f"dynaudnorm=framelen={self.framelen}:gausssize={self.gausssize}"
-            f":peak={self.peak}:maxgain={self.maxgain}:targetrms={self.targetrms}"
-        )
+        options = [
+            f"{name}={value}"
+            for name, value in (
+                ("framelen", self.framelen),
+                ("gausssize", self.gausssize),
+                ("peak", self.peak),
+                ("maxgain", self.maxgain),
+                ("targetrms", self.targetrms),
+            )
+            if value is not None
+        ]
+        af = f"dynaudnorm={':'.join(options)}" if options else "dynaudnorm"
         return FilterStep(af=af, needs_pass=False, out_layout=layout)
 
 

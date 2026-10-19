@@ -133,9 +133,11 @@ class ResolvedChain(BaseModel):
         never persisted (``audio.yaml`` stores the token; debug diffs the
         config, not the sidecar), and comparisons are token equality only
         (spec 2026-10-07, Req 10b). No ``size`` belt — a chain has no
-        meaningful pre-check magnitude.
+        meaningful pre-check magnitude. Unset filter params fold out
+        (``exclude_none``), mirroring how ``resolve`` omits them from the
+        emitted ``-af`` fragment.
         """
-        return fingerprinter.of_text(self.model_dump_json())
+        return fingerprinter.of_text(self.model_dump_json(exclude_none=True))
 
 
 def resolve_chain(spec: ChainSpec, palette: Mapping[str, FilterInstance]) -> ResolvedChain:

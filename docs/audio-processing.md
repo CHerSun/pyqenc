@@ -23,7 +23,7 @@ flowchart LR
 - **chains** — ordered lists of filter names. A chain is a recipe; applied to N selected tracks it produces exactly N outputs. Defined as a list that a later config layer replaces wholesale (list-replace).
 - **select** — decides which source tracks get processed at all. Empty (the default) means every audio track. Also list-replace across layers.
 
-All three live under the top-level `audio:` key in your config. See `pyqenc/default_config.yaml` for the shipped starter palette.
+All three live under the top-level `audio:` key in your config. See `pyqenc/default_config.yaml` for the shipped starter palette. Because the palette dict-merges across config layers, tuning a bundled filter only requires stating the changed param in a higher layer — the rest of the entry is inherited from the base.
 
 ---
 
@@ -53,46 +53,55 @@ peaknorm:
 
 Measures integrated loudness, true peak, and loudness range in a first pass, then linear-normalises to your targets in a second pass. This is perceptual loudness normalisation (LUFS), not peak.
 
+All three params are optional — an unstated param is omitted from the emitted filter fragment and **ffmpeg's default applies** (`I=-24`, `TP=-2`, `LRA=7`).
+
 #### Parameters
 
 | Param | Type | Meaning |
 |-------|------|---------|
-| `i`   | float | Integrated loudness target, in LUFS. `-16` is a common streaming target; broadcast often uses `-23`. |
-| `tp`  | float | Maximum true peak, in dBTP. Typically `-1.0` to `-2.0`. |
-| `lra` | float | Target loudness range, in LU. `11` is a typical value. |
+| `i`   | float, optional | Integrated loudness target, in LUFS. `-23` is the EBU R128 broadcast/film target; `-16` the Apple ecosystem; `-14` common music-streaming normalization. |
+| `tp`  | float, optional | Maximum true peak, in dBTP. `-1.0` is the usual delivery ceiling. |
+| `lra` | float, optional | Target loudness range, in LU. Leave unset to keep ffmpeg's `7`; matters only when linear normalization is impossible. |
+
+The shipped palette carries three industry-standard presets — reference one in a chain by name:
 
 ```yaml
-loudnorm:
+loudnorm_r128:    # European broadcast / film (EBU R128): -23 LUFS, TP -1 dBTP
+  type: loudnorm
+  i: -23.0
+  tp: -1.0
+loudnorm_stream:  # Spotify / YouTube / Amazon (~-14 LUFS)
+  type: loudnorm
+  i: -14.0
+  tp: -1.0
+loudnorm_apple:   # Apple Music / Sound Check (~-16 LUFS)
   type: loudnorm
   i: -16.0
-  tp: -1.5
-  lra: 11.0
+  tp: -1.0
 ```
+
+For US broadcast (ATSC A/85: −24 LKFS, −2 dBTP), copy a preset and tune `i`/`tp`.
 
 ### `dynaudnorm` — single-pass dynamic normalisation
 
 Applies ffmpeg's `dynaudnorm` filter in one pass. Dynamic normalisation smooths level over time with a moving analysis window, rather than applying one fixed gain. Good for content with a wide dynamic range where you want a more consistent listening level.
 
-Parameter names are ffmpeg's **long** option names — run `ffmpeg -h filter=dynaudnorm` to inspect the full option set the filter accepts.
+Parameter names are ffmpeg's **long** option names — run `ffmpeg -h filter=dynaudnorm` to inspect the full option set the filter accepts. All params are optional — unstated params are omitted from the emitted fragment and **ffmpeg's defaults apply** (`framelen=500`, `gausssize=31`, `peak=0.95`, `maxgain=10`, `targetrms=0`). The shipped palette states only its one deliberate divergence:
 
 #### Parameters
 
 | Param | Type | Meaning |
 |-------|------|---------|
-| `framelen`  | int   | Analysis window length in milliseconds. |
-| `gausssize` | int   | Gaussian window size in frames. Larger values give smoother, slower gain changes. |
-| `peak`      | float | Target peak magnitude, `0`–`1`. |
-| `maxgain`   | float | Maximum gain factor. |
-| `targetrms` | float | Target RMS. `0` disables RMS targeting (pure peak-based). |
+| `framelen`  | int, optional   | Analysis window length in milliseconds. |
+| `gausssize` | int, optional   | Gaussian window size in frames. Larger values give smoother, slower gain changes. |
+| `peak`      | float, optional | Target peak magnitude, `0`–`1`. |
+| `maxgain`   | float, optional | Maximum gain factor. |
+| `targetrms` | float, optional | Target RMS. `0` disables RMS targeting (pure peak-based). |
 
 ```yaml
 dynaudnorm:
   type: dynaudnorm
-  framelen: 500
-  gausssize: 31
-  peak: 0.95
-  maxgain: 3.0
-  targetrms: 0.0
+  maxgain: 3.0   # steadier than ffmpeg's default 10, which audibly pumps; rest = ffmpeg defaults
 ```
 
 ### `downmix` — downmix-only channel fold

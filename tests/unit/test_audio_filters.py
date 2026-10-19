@@ -50,7 +50,7 @@ class TestShippedFilters:
 
 
 class TestParamValidation:
-    """Each filter forbids unknown params and enforces required fields."""
+    """Each filter forbids unknown params; pyqenc-owned params stay required."""
 
     def test_peaknorm_rejects_unknown_param(self) -> None:
         # Bug: silently accepting a typo'd param (e.g. `target_db`) would apply
@@ -58,17 +58,46 @@ class TestParamValidation:
         with pytest.raises(ValidationError):
             PeakNormInstance(target_dbfs=-1.0, bogus=1)  # ty: ignore[unknown-argument] — rejection is the test's subject
 
-    def test_loudnorm_requires_all_targets(self) -> None:
-        # Bug: a missing target silently applying a default deviates from the
-        # user's configured loudness target.
-        with pytest.raises(ValidationError):
-            LoudNormInstance(i=-23.0, tp=-1.0)  # ty: ignore[missing-argument] — rejection is the test's subject
-
     def test_passthrough_rejects_any_param(self) -> None:
         # Bug: passthrough accepting transformation params would imply behaviour
         # it does not have.
         with pytest.raises(ValidationError):
             PassthroughInstance(target_dbfs=-1.0)  # ty: ignore[unknown-argument] — rejection is the test's subject
+
+
+class TestUnsetParamsDelegateToffmpeg:
+    """Unset ffmpeg-passthrough params are omitted; ffmpeg owns their defaults."""
+
+    def test_bare_dynaudnorm_emits_filter_name_only(self) -> None:
+        # Bug: emitting `dynaudnorm=...None...` (or a dangling `=`) breaks the
+        # ffmpeg invocation; a fully-unset filter is just its name.
+        assert DynAudNormInstance().resolve(_STEREO, None).af == "dynaudnorm"
+
+    def test_partial_dynaudnorm_emits_only_set_options(self) -> None:
+        # Bug: restating ffmpeg's defaults ourselves would freeze them in
+        # pyqenc — only the stated param may appear.
+        step = DynAudNormInstance(maxgain=3.0).resolve(_STEREO, None)
+        assert step.af == "dynaudnorm=maxgain=3.0"
+
+    def test_bare_loudnorm_pass1_keeps_mechanics(self) -> None:
+        # print_format=json is pass mechanics, not a user param — always emitted.
+        assert LoudNormInstance().resolve(_STEREO, None).af == "loudnorm=print_format=json"
+
+    def test_partial_loudnorm_pass2_keeps_mechanics(self) -> None:
+        # Unset tp/lra vanish; linear/measured_*/offset stay (pass mechanics,
+        # never user params) — the fragment shape is uniform in both passes.
+        f = LoudNormInstance(i=-23.0)
+        json_block = (
+            '[Parsed_loudnorm_0 @ 0x0] '
+            '{"input_i":"-27.5","input_tp":"-5.2","input_lra":"9.1",'
+            '"input_thresh":"-38.1","target_offset":"0.3"}'
+        )
+        step = f.resolve(_STEREO, _measurement(["ffmpeg version 6.0", json_block]))
+        assert step.af == (
+            "loudnorm=I=-23.0:linear=true"
+            ":measured_I=-27.5:measured_TP=-5.2:measured_LRA=9.1"
+            ":measured_thresh=-38.1:offset=0.3:print_format=none"
+        )
 
 
 class TestDownmixNoOp:

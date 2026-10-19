@@ -70,18 +70,24 @@ audio:
     peaknorm:                     # two-pass peak normalisation: measure peak (volumedetect), then apply a gain
       type: peaknorm
       target_dbfs: -1.0           # shift the measured peak to this dBFS (0 = full scale); -1.0 leaves 1 dB headroom
-    loudnorm:                     # two-pass EBU R128 loudness normalisation (measure, then linear-normalise)
+    # loudnorm presets — industry-standard loudness targets (two-pass EBU R128
+    # measure + linear-normalise). Unstated params (tp, lra) delegate to ffmpeg
+    # defaults (TP=-2, LRA=7). Reference one in a chain by name.
+    loudnorm_r128:               # European broadcast / film deliverables (EBU R128: -23 LUFS, TP <= -1 dBTP)
+      type: loudnorm             # US broadcast (ATSC A/85) instead uses -24 LKFS / -2 dBTP — tune i/tp for it
+      i: -23.0
+      tp: -1.0
+    loudnorm_stream:             # music/web streaming (Spotify, YouTube, Amazon normalize to ~-14 LUFS)
       type: loudnorm
-      i: -16.0                    # integrated loudness target (LUFS); -16 is a common streaming target
-      tp: -1.0                    # max true peak (dBTP)
-      lra: 11.0                   # target loudness range (LU)
+      i: -14.0
+      tp: -1.0
+    loudnorm_apple:              # Apple ecosystem (Apple Music / Sound Check / podcasts, ~-16 LUFS)
+      type: loudnorm
+      i: -16.0
+      tp: -1.0
     dynaudnorm:                   # single-pass dynamic normalisation (ffmpeg dynaudnorm)
       type: dynaudnorm            # option names are ffmpeg's long forms; run `ffmpeg -h filter=dynaudnorm` to inspect
-      framelen: 500               # frame length (ms) of each analysis window
-      gausssize: 31               # Gaussian window size (frames); larger = smoother gain
-      peak: 0.95                  # target peak magnitude (0..1)
-      maxgain: 3.0                # max gain factor
-      targetrms: 0.0              # target RMS (0 = disabled, pure peak-based)
+      maxgain: 3.0                # steadier than ffmpeg's default 10, which audibly pumps ("dribbles"); rest = ffmpeg defaults
     # --- downmix (downmix-only: no-op when source channels <= target) -----
     down_std:                     # canonical ITU-R BS.775 / ATSC Lo/Ro fold to stereo (LFE dropped)
       type: downmix
