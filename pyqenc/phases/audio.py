@@ -197,7 +197,6 @@ class AudioPhase(Phase[AudioPhaseResult]):
 
         kv: dict[str, object] = {
             "Processing chains:" : len(audio_cfg.chains),
-            "Tracks:"            : len(self._deps[ExtractionPhase].audio_streams),
         }
         if audio_cfg.concurrency > 1:
             kv["Concurrency:"] = audio_cfg.concurrency
@@ -280,9 +279,9 @@ class AudioPhase(Phase[AudioPhaseResult]):
         listing = {f.name for f in audio_dir.iterdir() if f.is_file()}
         rows = self._classify(audio_dir, tracks, resolved, listing)
         all_streams = [a.payload for a in self._deps[ExtractionPhase].audio_streams]
-        _log_track_table(all_streams, tracks, rows)
         if all_streams:
             _log_selector(audio_cfg.select)
+        _log_track_table(all_streams, tracks, rows)
         return Recovery.from_artifacts(rows)
 
     def _output_dir(self, tracks: list[AudioStream], work_dir: Path) -> Path:

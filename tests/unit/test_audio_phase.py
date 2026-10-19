@@ -603,6 +603,9 @@ class TestSelectionTable:
             else:
                 assert SUCCESS_SYMBOL_MINOR not in lines[0]
                 assert FAILURE_SYMBOL_MINOR in lines[0]
+        # The selector reason sits ABOVE the table, mirroring extraction's
+        # Filter → Streams order (user ruling from the first real run).
+        assert caplog.text.index("Selector:") < caplog.text.index("Want  Present")
         assert "for=lang=eng" in caplog.text
 
     def test_present_glyph_marks_fully_reused_tracks(
