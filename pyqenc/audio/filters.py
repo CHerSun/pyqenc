@@ -1,17 +1,19 @@
 """Filter-type registry and self-contained filter-type classes.
 
-Filter types are an **open registry**, not a closed union. Each type is a
-self-contained class owning three things:
+Runnable filter types form a registry; the config side is a closed
+discriminated union (:data:`FilterInstance`). Each type is self-contained in
+this module, owning three things:
 
 1. its type id (``type_id``),
-2. its Pydantic parameter model (``params_model``, with ``extra="forbid"`` so
-   invalid params raise at config load), and
+2. its Pydantic parameter model (``extra="forbid"`` so invalid params raise
+   at config load) — also the base of its config-side Instance member, and
 3. its realisation behaviour via the single stateless contract
    :meth:`FilterType.resolve` — including its pass count and, for two-pass
    filters, how it scrapes the measured value out of a measurement pass.
 
-A new filter type is added by defining one ``@register_filter`` class; no edits
-to ``AudioConfig``, the chain executor, or existing filter classes are required.
+A new filter type is added entirely in this module: params model +
+``@register_filter`` class + :data:`FilterInstance` member. No edits to
+``AudioConfig``, the chain executor, or existing filter classes are required.
 Registering two classes with the same ``type_id`` fails at import time.
 
 The single contract the executor drives is::
@@ -41,9 +43,9 @@ import json
 import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import ClassVar, Final
+from typing import Annotated, ClassVar, Final, Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from pyqenc.audio.layout import ChannelLayout
 from pyqenc.audio.matrices import DOWNMIX_FORMAT, DOWNMIX_MATRICES, layout_channels
@@ -113,19 +115,18 @@ class FilterType(ABC):
     later ``resolve`` call needs arrives via ``last_output`` — never stored on
     the instance.
 
-    Subclasses declare :attr:`type_id` and :attr:`params_model` as class
-    variables and implement :meth:`resolve`.
+    Subclasses declare :attr:`type_id` and implement :meth:`resolve`.
     """
 
-    type_id:      ClassVar[str]
-    params_model: ClassVar[type[BaseModel]]
+    type_id: ClassVar[str]
 
     def __init__(self, params: BaseModel) -> None:
         """Store the validated params model instance for this filter.
 
         Args:
-            params: An instance of this type's :attr:`params_model`, already
-                validated by config load.
+            params: A validated params model instance for this filter type —
+                typically the config-side :data:`FilterInstance` member, which
+                subclasses the params model.
         """
         self._params = params
 
@@ -209,7 +210,7 @@ def registered_type_ids() -> list[str]:
 class PeakNormParams(BaseModel):
     """Parameters for the ``peaknorm`` filter."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     target_dbfs: float
 
@@ -225,7 +226,7 @@ class LoudNormParams(BaseModel):
     the short forms actually used).
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     i:   float
     tp:  float
@@ -245,7 +246,7 @@ class DynAudNormParams(BaseModel):
     ``dynaudnorm=framelen=<>:gausssize=<>:peak=<>:maxgain=<>:targetrms=<>``.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     framelen:  int      # analysis window length in ms (ffmpeg ``framelen``/``f``)
     gausssize: int      # Gaussian window size in frames (ffmpeg ``gausssize``/``g``)
@@ -257,7 +258,7 @@ class DynAudNormParams(BaseModel):
 class DownmixParams(BaseModel):
     """Parameters for the ``downmix`` filter."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     to:     str
     matrix: str | None = None
@@ -266,7 +267,7 @@ class DownmixParams(BaseModel):
 class EncodeFilterParams(BaseModel):
     """Parameters for the ``encode`` filter."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     codec:               str
     bitrate_per_channel: str
@@ -276,7 +277,70 @@ class EncodeFilterParams(BaseModel):
 class PassthroughParams(BaseModel):
     """Parameters for the ``passthrough`` filter — none accepted."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+
+# ---------------------------------------------------------------------------
+# Config-side instances
+# ---------------------------------------------------------------------------
+
+class PeakNormInstance(PeakNormParams):
+    """``audio.filters`` palette entry of the ``peaknorm`` filter type."""
+
+    type: Literal["peaknorm"] = "peaknorm"
+
+
+class LoudNormInstance(LoudNormParams):
+    """``audio.filters`` palette entry of the ``loudnorm`` filter type."""
+
+    type: Literal["loudnorm"] = "loudnorm"
+
+
+class DynAudNormInstance(DynAudNormParams):
+    """``audio.filters`` palette entry of the ``dynaudnorm`` filter type."""
+
+    type: Literal["dynaudnorm"] = "dynaudnorm"
+
+
+class DownmixInstance(DownmixParams):
+    """``audio.filters`` palette entry of the ``downmix`` filter type."""
+
+    type: Literal["downmix"] = "downmix"
+
+
+class EncodeInstance(EncodeFilterParams):
+    """``audio.filters`` palette entry of the ``encode`` filter type."""
+
+    type: Literal["encode"] = "encode"
+
+
+class PassthroughInstance(PassthroughParams):
+    """``audio.filters`` palette entry of the ``passthrough`` filter type."""
+
+    type: Literal["passthrough"] = "passthrough"
+
+
+FilterInstance = Annotated[
+    PeakNormInstance
+    | LoudNormInstance
+    | DynAudNormInstance
+    | DownmixInstance
+    | EncodeInstance
+    | PassthroughInstance,
+    Field(discriminator="type"),
+]
+"""A validated ``audio.filters`` palette entry — the config-side filter union.
+
+The flat YAML form ``{type: <id>, ...params}`` is the only shape: each member
+subclasses its filter's params model, so the params ARE the member's fields and
+config, ``model_dump()``, and chain fingerprints all share one form. The
+``type`` tag discriminates; an unknown type id or a param foreign to the type
+is a config-load ``ValidationError`` listing the expected tags.
+
+The runnable filter for an instance is built via
+``get_filter_class(inst.type)(inst)`` — the registry pairs the tag with the
+:class:`FilterType`, and the instance itself is the validated params.
+"""
 
 
 # ---------------------------------------------------------------------------
@@ -308,8 +372,7 @@ class PeakNormFilter(FilterType):
     gain to shift the measured peak to ``target_dbfs``.
     """
 
-    type_id      = "peaknorm"
-    params_model = PeakNormParams
+    type_id = "peaknorm"
 
     def resolve(
         self,
@@ -354,8 +417,7 @@ class LoudNormFilter(FilterType):
     measured values scraped from the pass-1 JSON block.
     """
 
-    type_id      = "loudnorm"
-    params_model = LoudNormParams
+    type_id = "loudnorm"
 
     def resolve(
         self,
@@ -431,8 +493,7 @@ class DynAudNormFilter(FilterType):
     (general form ``ffmpeg -h filter=<name>``).
     """
 
-    type_id      = "dynaudnorm"
-    params_model = DynAudNormParams
+    type_id = "dynaudnorm"
 
     def resolve(
         self,
@@ -458,8 +519,7 @@ class DownmixFilter(FilterType):
     (``af=""``) that leaves the channels untouched.
     """
 
-    type_id      = "downmix"
-    params_model = DownmixParams
+    type_id = "downmix"
 
     def resolve(
         self,
@@ -494,8 +554,7 @@ class DownmixFilter(FilterType):
 class EncodeFilter(FilterType):
     """Terminal output target (``encode``): no ``-af``, sets ``output_format``."""
 
-    type_id      = "encode"
-    params_model = EncodeFilterParams
+    type_id = "encode"
 
     def resolve(
         self,
@@ -529,8 +588,7 @@ class PassthroughFilter(FilterType):
     stream object directly into the phase result — no file produced.
     """
 
-    type_id      = "passthrough"
-    params_model = PassthroughParams
+    type_id = "passthrough"
 
     def resolve(
         self,

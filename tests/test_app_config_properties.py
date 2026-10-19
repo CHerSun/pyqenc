@@ -5,7 +5,6 @@
 """
 
 import os
-from typing import cast
 
 import pytest
 from hypothesis import assume, given, settings
@@ -13,7 +12,7 @@ from hypothesis import strategies as st
 from pydantic import ValidationError
 
 from pyqenc.app_config import _deep_merge, load_app_config
-from pyqenc.audio.filters import PeakNormParams
+from pyqenc.audio.filters import PeakNormInstance
 
 # ---------------------------------------------------------------------------
 # Shared strategies
@@ -1729,7 +1728,9 @@ class TestAudioConfigLayeredMerge:
         # Untouched base filters survive (dict-merge, not replace).
         assert {"peaknorm", "down_lfe", "aac", "passthrough", "loudnorm"} <= set(audio.filters)
         # Overridden param won.
-        assert cast(PeakNormParams, audio.filters["peaknorm"].params).target_dbfs == -2.0
+        peak = audio.filters["peaknorm"]
+        assert isinstance(peak, PeakNormInstance)
+        assert peak.target_dbfs == -2.0
         # Added filter present.
         assert audio.filters["loudnorm"].type == "loudnorm"
 

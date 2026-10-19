@@ -25,16 +25,11 @@ from pydantic import (
     ConfigDict,
     Field,
     PrivateAttr,
-    SerializeAsAny,
     field_validator,
     model_validator,
 )
 
-from pyqenc.audio.filters import (
-    PassthroughFilter,
-    get_filter_class,
-    registered_type_ids,
-)
+from pyqenc.audio.filters import FilterInstance, PassthroughInstance
 from pyqenc.constants import (
     CONFIG_DIR_HOME,
     CONFIG_FILENAME_CWD,
@@ -245,73 +240,6 @@ class EncodingConfig(BaseModel):
     visual_hash:        bool
 
 
-class FilterInstance(BaseModel):
-    """A validated config-side filter definition from ``audio.filters``.
-
-    A raw filter def in YAML is ``{type: <id>, ...params}``. This model resolves
-    ``type`` against the filter-type **registry** (``pyqenc.audio.filters``) — the
-    single authority on which types exist — and validates the remaining fields
-    against that type's ``params_model`` (whose ``extra="forbid"`` rejects unknown
-    params). No filter-type ids are enumerated here; adding a filter
-    type never touches this model.
-
-    The runnable filter is constructed from an instance via
-    ``get_filter_class(inst.type)(inst.params)``.
-
-    Attributes:
-        type:   The filter-type id, guaranteed present in the registry.
-        params: The validated parameter model instance for that type.
-    """
-
-    model_config = ConfigDict(frozen=True)
-
-    type:   str
-    # ``SerializeAsAny``: ``params`` must serialise by its runtime concrete
-    # type — the declared ``BaseModel`` would dump ``{}`` and silently drop
-    # every filter param.
-    params: SerializeAsAny[BaseModel]
-
-    @model_validator(mode="before")
-    @classmethod
-    def _resolve_and_validate(cls, data: object) -> object:
-        """Resolve ``type`` via the registry and validate the remaining params.
-
-        Args:
-            data: The raw filter def — a mapping ``{type: <id>, ...params}``.
-
-        Returns:
-            A dict ``{"type": <id>, "params": <validated model>}`` ready for
-            field validation.
-
-        Raises:
-            ValueError: If ``type`` is missing, unknown to the registry (message
-                lists the registered ids), or the params fail the type's model.
-        """
-        if not isinstance(data, dict):
-            return data
-
-        raw = dict(data)
-        type_id = raw.pop("type", None)
-        if type_id is None:
-            raise ValueError("Filter definition is missing the required 'type' field.")
-        try:
-            filter_cls = get_filter_class(type_id)
-        except KeyError:
-            raise ValueError(
-                f"Unknown filter type {type_id!r}. "
-                f"Registered filter types: {registered_type_ids()}."
-            ) from None
-        # Accept both shapes — the flat YAML form ({type, ...params}) and the
-        # resolved/serialised form ({type, params: {...}}). The params are
-        # ALWAYS re-validated against the type's model: a round-tripped
-        # ``params`` dict would otherwise validate against the declared
-        # ``BaseModel`` and land as a plain instance, losing the subclass.
-        # extra="forbid" on the param model rejects any parameter not valid for the type.
-        params_source = raw.pop("params", raw)
-        params = filter_cls.params_model.model_validate(params_source)
-        return {"type": type_id, "params": params}
-
-
 class ChainSpec(BaseModel):
     """A named, ordered chain of filter references from ``audio.chains``.
 
@@ -378,7 +306,7 @@ class AudioConfig(BaseModel):
     The three pieces are:
 
     - ``filters`` — a **palette** of named, reusable filter definitions, each
-      validated through the filter-type registry (:class:`FilterInstance`).
+      validated as a :data:`~pyqenc.audio.filters.FilterInstance` union member.
       Uses **dict-merge** across config layers, so a later layer may add or tune
       a named filter without redefining the whole palette.
     - ``chains`` — ordered recipes referencing filter names. Uses **list-replace**
@@ -391,7 +319,7 @@ class AudioConfig(BaseModel):
     surfaces as a ``ValidationError`` at config load.
 
     Attributes:
-        filters: Palette: filter name → validated :class:`FilterInstance`.
+        filters: Palette: filter name → validated :data:`FilterInstance`.
         chains:  Ordered list of :class:`ChainSpec` recipes.
         select:  Ordered list of :class:`SelectEntry`; empty = all tracks.
         concurrency: Maximum (track, chain) jobs processed simultaneously;
@@ -432,12 +360,12 @@ class AudioConfig(BaseModel):
                     )
 
             has_passthrough = any(
-                self.filters[name].type == PassthroughFilter.type_id
+                isinstance(self.filters[name], PassthroughInstance)
                 for name in chain.filters
             )
             if has_passthrough and len(chain.filters) != 1:
                 raise ValueError(
-                    f"Chain {chain.name!r} combines {PassthroughFilter.type_id!r} with "
+                    f"Chain {chain.name!r} combines 'passthrough' with "
                     f"other filters; a passthrough filter must be the only filter in its chain."
                 )
         return self

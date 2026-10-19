@@ -31,8 +31,14 @@ import pytest
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
-from pyqenc.app_config import AudioConfig, ChainSpec, FilterInstance, SelectEntry
+from pyqenc.app_config import AudioConfig, ChainSpec, SelectEntry
 from pyqenc.audio.chain import ResolvedChain, chain_output_path
+from pyqenc.audio.filters import (
+    DynAudNormInstance,
+    EncodeInstance,
+    PassthroughInstance,
+    PeakNormInstance,
+)
 from pyqenc.audio.layout import ChannelLayout
 from pyqenc.constants import (
     AUDIO_OUTPUT_DIR,
@@ -61,19 +67,14 @@ def _chain_out(tmp_path: Path, track: AudioStream, chain: str, ext: str = "flac"
 # Config + track builders
 # ---------------------------------------------------------------------------
 
-def _fi(type_id: str, **params) -> FilterInstance:
-    """Build a validated config-side ``FilterInstance``."""
-    return FilterInstance(type=type_id, **params)
-
-
 def _audio_config(chains: list[ChainSpec], select: list[SelectEntry] | None = None) -> AudioConfig:
     """Build an ``AudioConfig`` with a small palette and the given chains/select."""
     palette = {
-        "peaknorm":  _fi("peaknorm", target_dbfs=-1.0),
-        "peaknorm2": _fi("peaknorm", target_dbfs=-2.0),   # a *different* peaknorm
-        "dynaudnorm": _fi("dynaudnorm", framelen=150, gausssize=15, peak=0.95, maxgain=10.0, targetrms=0.0),
-        "aac":       _fi("encode", codec="aac", bitrate_per_channel="96k", extension="m4a"),
-        "passthrough": _fi("passthrough"),
+        "peaknorm":    PeakNormInstance(target_dbfs=-1.0),
+        "peaknorm2":   PeakNormInstance(target_dbfs=-2.0),   # a *different* peaknorm
+        "dynaudnorm":  DynAudNormInstance(framelen=150, gausssize=15, peak=0.95, maxgain=10.0, targetrms=0.0),
+        "aac":         EncodeInstance(codec="aac", bitrate_per_channel="96k", extension="m4a"),
+        "passthrough": PassthroughInstance(),
     }
     return AudioConfig(filters=palette, chains=chains, select=select or [], concurrency=1)
 

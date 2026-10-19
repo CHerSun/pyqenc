@@ -1,6 +1,6 @@
 """Chain resolution and the generic combined-``-af`` execution loop.
 
-This module ties the filter palette (config-side :class:`FilterInstance`) to the
+This module ties the filter palette (config-side :data:`FilterInstance`) to the
 runnable filter classes (:mod:`pyqenc.audio.filters`) and drives them through
 their passes as a single combined ffmpeg ``-af`` invocation, split only where a
 filter genuinely needs a measurement pass.
@@ -35,17 +35,16 @@ imports from ``filters.py``, never the reverse.
 
 import logging
 from collections import deque
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
-from typing import cast
 
 from pydantic import BaseModel, ConfigDict
 
-from pyqenc.app_config import ChainSpec, FilterInstance
+from pyqenc.app_config import ChainSpec
 from pyqenc.audio.filters import (
-    EncodeFilter,
-    EncodeFilterParams,
+    EncodeInstance,
     EncodeParams,
+    FilterInstance,
     FilterType,
     get_filter_class,
 )
@@ -116,7 +115,7 @@ class ResolvedChain(BaseModel):
         name:    The chain's configured, filesystem-safe name (the
                  ``chain=<name>`` output-filename suffix).
         filters: The referenced filters as concrete, param-inlined
-                 :class:`FilterInstance` objects, in chain order. No synthetic
+                 :data:`FilterInstance` objects, in chain order. No synthetic
                  FLAC filter is present.
         encode:  The effective terminal output format (last ``encode``
                  filter's format, or :data:`FLAC_DEFAULT`).
@@ -141,7 +140,7 @@ class ResolvedChain(BaseModel):
         return fingerprinter.of_text(self.model_dump_json())
 
 
-def resolve_chain(spec: ChainSpec, palette: dict[str, FilterInstance]) -> ResolvedChain:
+def resolve_chain(spec: ChainSpec, palette: Mapping[str, FilterInstance]) -> ResolvedChain:
     """Resolve a :class:`ChainSpec` against the palette into a :class:`ResolvedChain`.
 
     Inlines each referenced filter's params (by palette lookup) and computes the
@@ -152,7 +151,7 @@ def resolve_chain(spec: ChainSpec, palette: dict[str, FilterInstance]) -> Resolv
     Args:
         spec:    The config-side chain definition (name + ordered filter names).
         palette: The ``audio.filters`` palette (name → validated
-                 :class:`FilterInstance`). All names in ``spec.filters`` are
+                 :data:`FilterInstance`). All names in ``spec.filters`` are
                  guaranteed present by config validation.
 
     Returns:
@@ -162,31 +161,27 @@ def resolve_chain(spec: ChainSpec, palette: dict[str, FilterInstance]) -> Resolv
 
     encode = FLAC_DEFAULT
     for inst in filters:
-        if inst.type == EncodeFilter.type_id:
+        if isinstance(inst, EncodeInstance):
             # Last-encode-wins: keep overwriting so the final encode filter stands.
             encode = _encode_params_from(inst)
 
     return ResolvedChain(name=spec.name, filters=filters, encode=encode)
 
 
-def _encode_params_from(inst: FilterInstance) -> EncodeParams:
+def _encode_params_from(inst: EncodeInstance) -> EncodeParams:
     """Build the terminal :class:`EncodeParams` from an ``encode`` filter instance.
 
     Args:
-        inst: A :class:`FilterInstance` whose ``type`` is ``encode``; its
-              ``params`` is an ``EncodeFilterParams`` (codec, bitrate_per_channel,
-              extension).
+        inst: An :class:`~pyqenc.audio.filters.EncodeInstance` palette entry
+              (codec, bitrate_per_channel, extension).
 
     Returns:
         The equivalent :class:`EncodeParams` terminal target.
     """
-    # The type_id -> params-model correlation lives in the filter registry,
-    # not the type system; inst.params is an EncodeFilterParams here.
-    params = cast(EncodeFilterParams, inst.params)
     return EncodeParams(
-        codec               = params.codec,
-        bitrate_per_channel = params.bitrate_per_channel,
-        extension           = params.extension,
+        codec               = inst.codec,
+        bitrate_per_channel = inst.bitrate_per_channel,
+        extension           = inst.extension,
     )
 
 
@@ -368,7 +363,7 @@ async def execute_chain(
                               (surfaced from the filter's ``resolve``).
     """
     runnable: deque[FilterType] = deque(
-        get_filter_class(inst.type)(inst.params) for inst in resolved.filters
+        get_filter_class(inst.type)(inst) for inst in resolved.filters
     )
 
     af_parts:      list[str]              = []            # frozen fragments (invariant)

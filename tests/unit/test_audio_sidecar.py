@@ -21,22 +21,23 @@ from pathlib import Path
 
 from pyqenc.app_config import ChainSpec, FilterInstance
 from pyqenc.audio.chain import resolve_chain
+from pyqenc.audio.filters import (
+    DownmixInstance,
+    DynAudNormInstance,
+    EncodeInstance,
+    PeakNormInstance,
+)
 from pyqenc.phases.audio import AudioSidecar
 from pyqenc.utils.yaml_utils import load_model, save_model
-
-
-def _fi(type_id: str, **params) -> FilterInstance:
-    """Build a validated config-side ``FilterInstance`` from raw params."""
-    return FilterInstance(type=type_id, **params)
 
 
 def _palette() -> dict[str, FilterInstance]:
     """A small realistic palette covering a filter, a downmix, and an encode."""
     return {
-        "dyn":   _fi("dynaudnorm", framelen=150, gausssize=15, peak=0.9, maxgain=9.0, targetrms=0.0),
-        "peak":  _fi("peaknorm", target_dbfs=-1.0),
-        "down":  _fi("downmix", to="2.0", matrix="std"),
-        "aac":   _fi("encode", codec="aac", bitrate_per_channel="64k", extension="m4a"),
+        "dyn":   DynAudNormInstance(framelen=150, gausssize=15, peak=0.9, maxgain=9.0, targetrms=0.0),
+        "peak":  PeakNormInstance(target_dbfs=-1.0),
+        "down":  DownmixInstance(to="2.0", matrix="std"),
+        "aac":   EncodeInstance(codec="aac", bitrate_per_channel="64k", extension="m4a"),
     }
 
 
@@ -132,7 +133,7 @@ class TestInvalidationFingerprints:
 
         # Same chain name, one filter param changed.
         changed_palette = _palette()
-        changed_palette["peak"] = _fi("peaknorm", target_dbfs=-3.0)
+        changed_palette["peak"] = PeakNormInstance(target_dbfs=-3.0)
         current_fp = _resolved("night", ["peak", "aac"], changed_palette).fingerprint
 
         assert current_fp.token != persisted.chains["night"].token

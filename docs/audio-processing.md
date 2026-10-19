@@ -29,7 +29,7 @@ All three live under the top-level `audio:` key in your config. See `pyqenc/defa
 
 ## Filters
 
-A filter definition is `{type: <type-id>, ...params}`. The `type` selects the behaviour; the remaining keys are that type's parameters. Unknown parameters are rejected at config load (each type forbids extras), so a typo fails fast with a clear message instead of being silently ignored.
+A filter definition is `{type: <type-id>, ...params}`. The `type` selects the behaviour; the remaining keys are that type's parameters. Unknown parameters are rejected at config load (each type forbids extras), and an unknown `type` is rejected the same way — the error lists the known type ids — so a typo fails fast with a clear message instead of being silently ignored.
 
 The built-in filter types are below.
 

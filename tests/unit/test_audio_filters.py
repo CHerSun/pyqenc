@@ -7,6 +7,7 @@ validation errors), never internal representation.
 # CHerSun 2026
 
 from collections.abc import Iterator
+from typing import get_args
 
 import pytest
 from pydantic import BaseModel, ConfigDict, ValidationError
@@ -20,6 +21,7 @@ from pyqenc.audio.filters import (
     EncodeFilter,
     EncodeFilterParams,
     EncodeParams,
+    FilterInstance,
     FilterStep,
     FilterType,
     LoudNormFilter,
@@ -48,6 +50,14 @@ def _measurement(stderr_lines: list[str], returncode: int = 0) -> FFmpegRunResul
     )
 
 
+class _TestParams(BaseModel):
+    """Params for the throwaway ``test_only_type`` registry fixture."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    gain: float
+
+
 class TestRegistryOpenness:
     """A newly registered type is usable with no edits to config/executor."""
 
@@ -56,14 +66,9 @@ class TestRegistryOpenness:
         """Register a throwaway filter type and remove it after the test."""
         test_id = "test_only_type"
 
-        class _TestParams(BaseModel):
-            model_config = ConfigDict(extra="forbid")
-            gain: float
-
         @register_filter
         class _TestFilter(FilterType):
-            type_id      = test_id
-            params_model = _TestParams
+            type_id = test_id
 
             def resolve(
                 self,
@@ -88,7 +93,7 @@ class TestRegistryOpenness:
     ) -> None:
         # Bug: extension requiring executor edits. A registered type must produce
         # a usable FilterStep purely through the resolve contract.
-        instance = temp_type(temp_type.params_model.model_validate({"gain": 1.0}))
+        instance = temp_type(_TestParams.model_validate({"gain": 1.0}))
         step = instance.resolve(_STEREO, None)
         assert step.af == "anull"
         assert step.needs_pass is False
@@ -103,8 +108,7 @@ class TestDuplicateRegistration:
         with pytest.raises(ValueError, match="Duplicate filter type id"):
             @register_filter
             class _Dup(FilterType):
-                type_id      = "peaknorm"  # already registered
-                params_model = PeakNormParams
+                type_id = "peaknorm"  # already registered
 
                 def resolve(
                     self,
@@ -122,6 +126,16 @@ class TestInitialRegistrations:
         # fail config validation as "unknown type".
         for type_id in ("peaknorm", "loudnorm", "dynaudnorm", "downmix", "encode", "passthrough"):
             assert type_id in _FILTER_REGISTRY
+
+    def test_instance_tags_match_registry_ids(self) -> None:
+        # Bug: the two enumerations in filters.py drifting apart — an Instance
+        # member whose tag has no registered filter class (config accepts a
+        # type the executor cannot build, KeyError at runtime) or a registered
+        # id without a member (config rejects a type the registry provides).
+        union = get_args(FilterInstance)[0]
+        tags = {member.model_fields["type"].default for member in get_args(union)}
+        assert tags == {"peaknorm", "loudnorm", "dynaudnorm", "downmix", "encode", "passthrough"}
+        assert tags == set(registered_type_ids())
 
 
 class TestParamValidation:

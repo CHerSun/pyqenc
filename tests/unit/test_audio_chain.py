@@ -16,18 +16,17 @@ Bugs guarded:
 - Wrong output extension (FLAC default / last-encode-wins).
 - A downmix no-op producing a stray/doubled comma in ``-af``.
 - An all-empty chain still emitting ``-af``.
-- Filter-type logic leaking into the loop (a test-only two-pass filter must drive
-  the same K+1 behaviour with no executor change).
+- Filter-type logic leaking into the loop (K+1 invocation counts must follow
+  purely from the resolve/FilterStep contract across the real two-pass types).
 """
 # CHerSun 2026
 
-from collections.abc import Iterator
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
-from pydantic import BaseModel, ConfigDict
 
-from pyqenc.app_config import ChainSpec, FilterInstance
+from pyqenc.app_config import ChainSpec
 from pyqenc.audio.chain import (
     FLAC_DEFAULT,
     ResolvedChain,
@@ -37,10 +36,12 @@ from pyqenc.audio.chain import (
     resolve_chain,
 )
 from pyqenc.audio.filters import (
-    _FILTER_REGISTRY,
-    FilterStep,
-    FilterType,
-    register_filter,
+    DownmixInstance,
+    DynAudNormInstance,
+    EncodeInstance,
+    FilterInstance,
+    LoudNormInstance,
+    PeakNormInstance,
 )
 from pyqenc.audio.layout import ChannelLayout
 from pyqenc.constants import FFMPEG_ARG_AF
@@ -103,12 +104,7 @@ class _SpyRunner:
         return None
 
 
-def _fi(type_id: str, **params) -> FilterInstance:
-    """Build a validated config-side ``FilterInstance`` from raw params."""
-    return FilterInstance(type=type_id, **params)
-
-
-def _resolved(name: str, palette: dict[str, FilterInstance], order: list[str]) -> ResolvedChain:
+def _resolved(name: str, palette: Mapping[str, FilterInstance], order: list[str]) -> ResolvedChain:
     """Resolve a chain from a palette and an ordered list of filter names."""
     return resolve_chain(ChainSpec(name=name, filters=order), palette)
 
@@ -170,7 +166,7 @@ class TestInvocationCount:
     @pytest.mark.asyncio
     async def test_k0_single_application_pass(self, source: AudioStream, out_dir: Path) -> None:
         """No measuring filter ⇒ one application invocation (bug: needless passes)."""
-        palette = {"dyn": _fi("dynaudnorm", framelen=150, gausssize=15, peak=0.9, maxgain=9.0, targetrms=0.0)}
+        palette = {"dyn": DynAudNormInstance(framelen=150, gausssize=15, peak=0.9, maxgain=9.0, targetrms=0.0)}
         resolved = _resolved("normal", palette, ["dyn"])
         spy = _SpyRunner()
 
@@ -181,7 +177,7 @@ class TestInvocationCount:
     @pytest.mark.asyncio
     async def test_k1_two_invocations(self, source: AudioStream, out_dir: Path) -> None:
         """One two-pass filter ⇒ 1 measurement + 1 application (bug: wrong count)."""
-        palette = {"peak": _fi("peaknorm", target_dbfs=-1.0)}
+        palette = {"peak": PeakNormInstance(target_dbfs=-1.0)}
         resolved = _resolved("peak", palette, ["peak"])
         spy = _SpyRunner(stderr_per_call=[_ASTATS_STDERR])
 
@@ -196,8 +192,8 @@ class TestInvocationCount:
     async def test_k2_three_invocations(self, source: AudioStream, out_dir: Path) -> None:
         """Two two-pass filters ⇒ K+1 = 3 invocations (bug: wrong count on stacking)."""
         palette = {
-            "peak": _fi("peaknorm", target_dbfs=-1.0),
-            "loud": _fi("loudnorm", i=-16.0, tp=-1.5, lra=11.0),
+            "peak": PeakNormInstance(target_dbfs=-1.0),
+            "loud": LoudNormInstance(i=-16.0, tp=-1.5, lra=11.0),
         }
         resolved = _resolved("both", palette, ["peak", "loud"])
         spy = _SpyRunner(stderr_per_call=[_ASTATS_STDERR, _LOUDNORM_STDERR])
@@ -219,8 +215,8 @@ class TestMeasurementAfIncludesFrozenFragments:
         normalised signal, giving a wrong measurement.
         """
         palette = {
-            "peak": _fi("peaknorm", target_dbfs=-1.0),
-            "loud": _fi("loudnorm", i=-16.0, tp=-1.5, lra=11.0),
+            "peak": PeakNormInstance(target_dbfs=-1.0),
+            "loud": LoudNormInstance(i=-16.0, tp=-1.5, lra=11.0),
         }
         resolved = _resolved("both", palette, ["peak", "loud"])
         spy = _SpyRunner(stderr_per_call=[_ASTATS_STDERR, _LOUDNORM_STDERR])
@@ -250,8 +246,8 @@ class TestMeasurementAfIncludesFrozenFragments:
         Bug: ``last_output`` accumulated/leaked across filters (Req 6.3).
         """
         palette = {
-            "peak": _fi("peaknorm", target_dbfs=-1.0),
-            "loud": _fi("loudnorm", i=-16.0, tp=-1.5, lra=11.0),
+            "peak": PeakNormInstance(target_dbfs=-1.0),
+            "loud": LoudNormInstance(i=-16.0, tp=-1.5, lra=11.0),
         }
         resolved = _resolved("both", palette, ["peak", "loud"])
         spy = _SpyRunner(stderr_per_call=[_ASTATS_STDERR, _LOUDNORM_STDERR])
@@ -275,7 +271,7 @@ class TestExtensionCorrectness:
     @pytest.mark.asyncio
     async def test_flac_default_when_no_encode(self, source: AudioStream, out_dir: Path) -> None:
         """No encode filter ⇒ .flac and no -b:a (bug: wrong ext / bitrate on FLAC)."""
-        palette = {"dyn": _fi("dynaudnorm", framelen=150, gausssize=15, peak=0.9, maxgain=9.0, targetrms=0.0)}
+        palette = {"dyn": DynAudNormInstance(framelen=150, gausssize=15, peak=0.9, maxgain=9.0, targetrms=0.0)}
         resolved = _resolved("normal", palette, ["dyn"])
         assert resolved.encode == FLAC_DEFAULT
         spy = _SpyRunner()
@@ -297,7 +293,7 @@ class TestExtensionCorrectness:
         The explicit single-stream ``-map 0:<track_id>`` subsumes the old
         ``-vn/-sn/-dn`` drops (Req 7.5) — anything unmapped cannot leak.
         """
-        palette = {"aac": _fi("encode", codec="aac", bitrate_per_channel="64k", extension="m4a")}
+        palette = {"aac": EncodeInstance(codec="aac", bitrate_per_channel="64k", extension="m4a")}
         resolved = _resolved("enc_only", palette, ["aac"])
         spy = _SpyRunner()
 
@@ -311,8 +307,8 @@ class TestExtensionCorrectness:
     async def test_last_encode_wins(self, source_51: AudioStream, out_dir: Path) -> None:
         """Two encode filters ⇒ the last one's extension/codec wins (bug: first wins)."""
         palette = {
-            "flac_enc": _fi("encode", codec="flac", bitrate_per_channel="0k", extension="flac"),
-            "aac": _fi("encode", codec="aac", bitrate_per_channel="64k", extension="m4a"),
+            "flac_enc": EncodeInstance(codec="flac", bitrate_per_channel="0k", extension="flac"),
+            "aac": EncodeInstance(codec="aac", bitrate_per_channel="64k", extension="m4a"),
         }
         resolved = _resolved("dual", palette, ["flac_enc", "aac"])
         assert resolved.encode.extension == "m4a"
@@ -339,8 +335,8 @@ class TestAfJoining:
         like ``,dynaudnorm=…`` or ``dynaudnorm=…,``.
         """
         palette = {
-            "down": _fi("downmix", to="2.0"),   # source is stereo → no-op
-            "dyn": _fi("dynaudnorm", framelen=150, gausssize=15, peak=0.9, maxgain=9.0, targetrms=0.0),
+            "down": DownmixInstance(to="2.0"),   # source is stereo → no-op
+            "dyn": DynAudNormInstance(framelen=150, gausssize=15, peak=0.9, maxgain=9.0, targetrms=0.0),
         }
         resolved = _resolved("norm2", palette, ["down", "dyn"])
         spy = _SpyRunner()
@@ -359,7 +355,7 @@ class TestAfJoining:
 
         Bug: emitting ``-af ""`` (empty filter chain) which ffmpeg rejects.
         """
-        palette = {"aac": _fi("encode", codec="aac", bitrate_per_channel="64k", extension="m4a")}
+        palette = {"aac": EncodeInstance(codec="aac", bitrate_per_channel="64k", extension="m4a")}
         resolved = _resolved("enc_only", palette, ["aac"])
         spy = _SpyRunner()
 
@@ -372,8 +368,8 @@ class TestAfJoining:
     async def test_downmix_active_then_dyn_joined_with_single_comma(self, source_51: AudioStream, out_dir: Path) -> None:
         """An active downmix (5.1→2.0) then dynaudnorm join with exactly one comma."""
         palette = {
-            "down": _fi("downmix", to="2.0", matrix="std"),
-            "dyn": _fi("dynaudnorm", framelen=150, gausssize=15, peak=0.9, maxgain=9.0, targetrms=0.0),
+            "down": DownmixInstance(to="2.0", matrix="std"),
+            "dyn": DynAudNormInstance(framelen=150, gausssize=15, peak=0.9, maxgain=9.0, targetrms=0.0),
         }
         resolved = _resolved("down_norm", palette, ["down", "dyn"])
         spy = _SpyRunner()
@@ -386,62 +382,12 @@ class TestAfJoining:
         assert ",," not in af
 
 
-class TestExecutorHasNoFilterTypeBranch:
-    """A test-only two-pass filter drives K+1 with no executor change (Req 6.5)."""
-
-    @pytest.fixture
-    def two_pass_type(self) -> Iterator[str]:
-        """Register a throwaway two-pass filter type; unregister after the test."""
-        test_id = "test_two_pass"
-
-        class _Params(BaseModel):
-            model_config = ConfigDict(extra="forbid")
-
-        @register_filter
-        class _TwoPass(FilterType):
-            type_id      = test_id
-            params_model = _Params
-
-            def resolve(
-                self,
-                layout: ChannelLayout,
-                last_output: FFmpegRunResult | None,
-            ) -> FilterStep:
-                if last_output is None:
-                    return FilterStep(af="astats", needs_pass=True, out_layout=layout)
-                return FilterStep(af="volume=1.0", needs_pass=False, out_layout=layout)
-
-        try:
-            yield test_id
-        finally:
-            _FILTER_REGISTRY.pop(test_id, None)
-
-    @pytest.mark.asyncio
-    async def test_custom_two_pass_drives_kplus1(self, source: AudioStream, out_dir: Path, two_pass_type: str) -> None:
-        """A brand-new two-pass type gets its measurement + application with no loop edit.
-
-        Bug: the executor special-casing known filter types instead of driving
-        the generic ``resolve``/``FilterStep`` contract.
-        """
-        palette = {"tp": _fi(two_pass_type)}
-        resolved = _resolved("custom", palette, ["tp"])
-        spy = _SpyRunner(stderr_per_call=[["astats output"]])
-
-        await execute_chain(resolved, source, out_dir, runner=spy)
-
-        assert len(spy.calls) == 2               # K=1 ⇒ K+1
-        assert spy.af_of(0) == "astats"          # measurement fragment
-        assert spy.calls[0].output is None       # measurement writes no file
-        assert spy.af_of(1) == "volume=1.0"      # final measured fragment
-        assert spy.calls[1].output is not None   # application writes a file
-
-
 class TestResolveChain:
     """Chain resolution computes the effective encode without a synthetic filter."""
 
     def test_no_encode_resolves_to_flac_default(self) -> None:
         """A chain with no encode filter resolves ``encode`` to FLAC_DEFAULT."""
-        palette = {"dyn": _fi("dynaudnorm", framelen=150, gausssize=15, peak=0.9, maxgain=9.0, targetrms=0.0)}
+        palette = {"dyn": DynAudNormInstance(framelen=150, gausssize=15, peak=0.9, maxgain=9.0, targetrms=0.0)}
         resolved = _resolved("n", palette, ["dyn"])
         assert resolved.encode == FLAC_DEFAULT
         # No synthetic FLAC filter is appended.
@@ -450,7 +396,7 @@ class TestResolveChain:
 
     def test_encode_filter_sets_encode_target(self) -> None:
         """An encode filter's params become the resolved encode target."""
-        palette = {"aac": _fi("encode", codec="aac", bitrate_per_channel="64k", extension="m4a")}
+        palette = {"aac": EncodeInstance(codec="aac", bitrate_per_channel="64k", extension="m4a")}
         resolved = _resolved("a", palette, ["aac"])
         assert resolved.encode.codec == "aac"
         assert resolved.encode.extension == "m4a"
@@ -532,7 +478,7 @@ class TestChainCommandGolden:
 
     @pytest.mark.asyncio
     async def test_measurement_pass_golden_argv(self, source: AudioStream, out_dir: Path) -> None:
-        palette = {"peak": _fi("peaknorm", target_dbfs=-1.0)}
+        palette = {"peak": PeakNormInstance(target_dbfs=-1.0)}
         resolved = _resolved("peak", palette, ["peak"])
         spy = _SpyRunner(stderr_per_call=[["[Parsed_astats_0 @ 0x1] Peak level dB: -6.0"]])
 
@@ -549,7 +495,7 @@ class TestChainCommandGolden:
 
     @pytest.mark.asyncio
     async def test_application_pass_golden_argv(self, source: AudioStream, out_dir: Path) -> None:
-        palette = {"aac": _fi("encode", codec="aac", bitrate_per_channel="64k", extension="m4a")}
+        palette = {"aac": EncodeInstance(codec="aac", bitrate_per_channel="64k", extension="m4a")}
         resolved = _resolved("enc_only", palette, ["aac"])
         spy = _SpyRunner()
 
