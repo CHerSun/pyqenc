@@ -41,7 +41,7 @@ from pyqenc.utils.yaml_utils import load_model, save_model
 # ---------------------------------------------------------------------------
 
 _APP_CONFIG = load_app_config(default_only=True)
-_ALL_STRATS = _APP_CONFIG.resolve_encoding().strategies
+_ALL_STRATS = _APP_CONFIG.resolve_encoding(optimize=True).strategies
 
 _STRATEGY = next(
     s for s in _ALL_STRATS
@@ -296,7 +296,7 @@ class TestScanWinnerSidecars:
         from pyqenc.phases.probe import ProbePhase, ProbePhaseResult
 
         config = load_app_config(default_only=True)
-        plan = config.resolve_encoding(
+        plan = config.resolve_encoding(optimize=True,
             strategies=["h265-aq+slow"], targets=["ssim-median:90.0"],
         )
         probe = ProbePhase(
@@ -374,12 +374,12 @@ def _make_encoding_phase(tmp_path: Path, probe_frames: int) -> EncodingPhase:
     """An EncodingPhase wired to a completed ProbePhase with a known frame count."""
     probe = ProbePhase(
         _APP_CONFIG, {}, collector=MagicMock(), crop_params=None,
-        plan=_APP_CONFIG.resolve_encoding(),
+        plan=_APP_CONFIG.resolve_encoding(optimize=True),
     )
     probe.result = ProbePhaseResult(
         outcome = PhaseOutcome.COMPLETED,
         message = "probe complete",
-        plan    = _APP_CONFIG.resolve_encoding(),
+        plan    = _APP_CONFIG.resolve_encoding(optimize=True),
         stream  = Artifact(
             payload = ExtendedVideoStream(
                 stream = VideoStream(

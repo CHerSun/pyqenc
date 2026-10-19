@@ -381,7 +381,7 @@ class ProbePhase(Phase[ProbePhaseResult]):
         log_disk_space_info(
             stream         = video,
             work_dir       = self._deps[JobPhase].work_dir,
-            min_strategies = 1 if (self._config.encoding.optimize or n_strategies == 0) else n_strategies,
+            min_strategies = 1 if (self._plan.optimize or n_strategies == 0) else n_strategies,
             max_strategies = max(1, n_strategies),
         )
 

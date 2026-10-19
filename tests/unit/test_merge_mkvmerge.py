@@ -200,7 +200,7 @@ def _make_merge_phase(
     """
     collector = NoOpMetricsCollector()
     config    = _APP_CONFIG.model_copy(deep=True)
-    plan      = config.resolve_encoding()
+    plan      = config.resolve_encoding(optimize=True)
 
     job = JobPhase(
         config, {},
@@ -1071,7 +1071,7 @@ class TestFixedMergeRecoveryNaming:
         config = phase._config
         probe_result = phase._phases[ProbePhase].result
         assert probe_result is not None
-        probe_result.plan = config.resolve_encoding(
+        probe_result.plan = config.resolve_encoding(optimize=True,
             strategies = ["h265-aq+slow"],
             quality    = (Decimal("18"), Decimal("18")),
         )
@@ -1126,7 +1126,7 @@ def _wire_fixed_merge(merge: MergePhase, chunk: Path, anchor: str | None) -> Non
     config = merge._config
     probe_result = merge._phases[ProbePhase].result
     assert probe_result is not None
-    probe_result.plan = config.resolve_encoding(
+    probe_result.plan = config.resolve_encoding(optimize=True,
         strategies = ["h265-aq+slow"],
         quality    = (Decimal("18"), Decimal("18")),
     )
@@ -1336,7 +1336,7 @@ class TestUnifiedMergeSummary:
         # The targets ride the source row as the row's absolute values —
         # every configured target value appears on the source row.
         source_row = next(ln for ln in rows if "test" in ln and "(src)" in ln)
-        for target in _APP_CONFIG.resolve_encoding().targets:
+        for target in _APP_CONFIG.resolve_encoding(optimize=True).targets:
             assert str(target.value) in source_row
         # Strategy table rows carry live verdicts; the vif target is
         # unmeasured here, so the strategy row shows the miss verdict.
@@ -1441,7 +1441,7 @@ class TestPerFileAcceptance:
         config = merge._config
         probe_result = merge._phases[ProbePhase].result
         assert probe_result is not None
-        probe_result.plan = config.resolve_encoding(
+        probe_result.plan = config.resolve_encoding(optimize=True,
             strategies = ["h265-aq+slow"],
             targets    = ["vmaf-min:99.0"],
             quality    = (Decimal("18"), Decimal("18")),
@@ -1480,7 +1480,7 @@ class TestPerFileAcceptance:
         config = merge._config
         probe_result = merge._phases[ProbePhase].result
         assert probe_result is not None
-        probe_result.plan = config.resolve_encoding(
+        probe_result.plan = config.resolve_encoding(optimize=True,
             strategies = ["h265-aq+slow"],
             targets    = ["vmaf-min:99.0"],
         )

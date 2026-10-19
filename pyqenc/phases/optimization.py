@@ -74,7 +74,7 @@ from pyqenc.utils.visualization import QualityMeasurer
 from pyqenc.utils.yaml_utils import load_model, save_model
 
 if TYPE_CHECKING:
-    from pyqenc.app_config import AppConfig
+    from pyqenc.app_config import AppConfig, TestBasisConfig
     from pyqenc.metrics import MetricsCollector
     from pyqenc.phases.encoding import ChunkEncoder
 
@@ -339,7 +339,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         # All-strategies mode: triggered by the optimize flag being off or a
         # single strategy given (nothing to optimize against) — search runs
         # only; the fixed case returned above.
-        if self._config.encoding.optimize and len(strategies) > 1:
+        if plan.optimize and len(strategies) > 1:
             return None
 
         return self._all_strategies(dry_run)
@@ -394,8 +394,13 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         """Log the optimization phase key input params."""
         plan = self._deps[ProbePhase].plan
 
+        basis = self._config.optimization.basis
         kv: dict[str, object] = {
-            "Tolerance:":  self._config.encoding.optimize_tolerance,
+            "Tolerance:":  self._config.optimization.tolerance,
+            "Basis:":      (
+                f"{basis.coverage:g}% of chunks (min {basis.min_chunks}), "
+                f"skip {basis.skip_start:g}%/{basis.skip_end:g}%"
+            ),
         }
         if self._config.encoding.concurrency > 1:
             kv["Concurrency:"] = self._config.encoding.concurrency
@@ -452,7 +457,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
             RecoveryError: When ChunkingPhase produced no chunks.
         """
         work_dir  = self._deps[JobPhase].work_dir
-        tolerance = self._config.encoding.optimize_tolerance
+        tolerance = self._config.optimization.tolerance
         plan      = self._deps[ProbePhase].plan
 
         strategies = plan.strategies
@@ -498,7 +503,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
                 # all measured rows for `--no-optimize` fixed runs, §123) and
                 # re-derive the anchor and its targets from the persisted
                 # measurements.
-                if self._config.encoding.optimize:
+                if plan.optimize:
                     self._selected_names = self._dominance_survivors(table_rows, tolerance)
                 else:
                     self._selected_names = [r.strategy for r in table_rows if r.size_bytes > 0]
@@ -751,7 +756,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
                 "Persisted test-chunk selection no longer fully present "
                 "(re-chunk) — re-selecting a fresh full test basis"
             )
-        return _select_test_chunks(chunks)
+        return _select_test_chunks(chunks, self._config.optimization.basis)
 
     def _pair_ledger(self, work_dir: Path, strategies: list[Strategy]) -> list[Artifact]:
         """The per-pair ledger plus orphaned-strategy rows."""
@@ -791,7 +796,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         job_result = self._deps[JobPhase]
         work_dir   = job_result.work_dir
         opt_yaml   = work_dir / OptimizationPhase.SIDECAR_NAME
-        tolerance  = self._config.encoding.optimize_tolerance
+        tolerance  = self._config.optimization.tolerance
         plan       = self._deps[ProbePhase].plan
 
         fixed      = plan.fixed_quality
@@ -909,7 +914,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
             # changed comparison stat set re-projects old measurements
             # correctly.
             resolved_names = [s.display_name() for s in plan.strategies]
-            if self._config.encoding.optimize:
+            if plan.optimize:
                 selected = self._dominance_survivors(final_results, tolerance)
             else:
                 selected = [r.strategy for r in final_results if r.size_bytes > 0]
@@ -1367,7 +1372,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
             resolved_names: Strategy names in resolved order (dominator pick).
         """
         plan      = self._deps[ProbePhase].plan
-        tolerance = self._config.encoding.optimize_tolerance
+        tolerance = self._config.optimization.tolerance
         all_rows  = list(results)
         if plan.fixed_quality:
             table = ComparisonTable(
@@ -1388,7 +1393,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         for line in render_comparison_table(table):
             logger.info(line)
 
-        if plan.fixed_quality and self._config.encoding.optimize:
+        if plan.fixed_quality and plan.optimize:
             dominator_for = self._dominator_map(results, resolved_names, tolerance)
             for beaten, dominator in dominator_for.items():
                 if beaten not in selected:
@@ -1482,38 +1487,34 @@ def _wipe_encoded_dir(work_dir: Path, strategies: list[Strategy]) -> None:
 
 
 def _select_test_chunks(
-    chunks:                list[VideoStreamChunk],
-    percentage:            float = 0.01,
-    min_chunks:            int   = 3,
-    exclude_start_percent: float = 0.10,
-    exclude_end_percent:   float = 0.10,
+    chunks: list[VideoStreamChunk],
+    basis:  TestBasisConfig,
 ) -> list[VideoStreamChunk]:
-    """Select representative test chunks for optimization.
+    """Select the optimization test basis from all chunks.
 
-    Selects approximately 1% of chunks (minimum 3) from the middle 80% of
-    the video, excluding the first 10% and last 10% which may not be
-    representative.
+    Rules come from ``optimization.basis`` in ``default_config.yaml`` — the
+    single source of truth, percent values throughout: ``coverage`` percent
+    of all chunks, at least ``min_chunks``, drawn from the span left after
+    skipping the first/last ``skip_start``/``skip_end`` percent (opening
+    and closing segments are rarely representative of the whole).
 
     Args:
-        chunks:                List of all chunks.
-        percentage:            Percentage of chunks to select (default 1%).
-        min_chunks:            Minimum number of chunks to select.
-        exclude_start_percent: Percentage to exclude from start (default 10%).
-        exclude_end_percent:   Percentage to exclude from end (default 10%).
+        chunks: List of all chunks.
+        basis:  Selection rules (``optimization.basis``).
 
     Returns:
-        List of selected test chunks sorted by chunk ID.
+        List of selected chunks sorted by chunk ID.
     """
-    total = len(chunks)
-    start_idx = int(total * exclude_start_percent)
-    end_idx   = int(total * (1.0 - exclude_end_percent))
+    total     = len(chunks)
+    start_idx = int(total * basis.skip_start / 100)
+    end_idx   = int(total * (1 - basis.skip_end / 100))
     eligible  = chunks[start_idx:end_idx]
 
     if not eligible:
-        logger.warning("No eligible chunks after exclusion — using all chunks")
+        logger.warning("No eligible chunks after exclusions — using all chunks")
         eligible = chunks
 
-    num = max(min_chunks, int(total * percentage))
+    num = max(basis.min_chunks, int(total * basis.coverage / 100))
     num = min(num, len(eligible))
 
     selected = random.sample(eligible, num)

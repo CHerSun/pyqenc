@@ -673,12 +673,16 @@ class EncodingPlan(BaseModel):
     Attributes:
         strategies: Resolved strategies (identity + effective codec each).
         targets:    Resolved quality targets.
+        optimize:   Whether the run size-selects strategies via the
+                    optimization phase (``--no-optimize`` encodes every
+                    strategy full-length instead).
     """
 
     model_config = ConfigDict(frozen=True)
 
     strategies: list[Strategy]
     targets:    list[QualityTarget]
+    optimize:   bool
 
     # Whether the run pins the quality knob — derived once at construction
     # in the after-validator (plain private-attr assignment works there

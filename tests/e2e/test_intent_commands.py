@@ -38,7 +38,7 @@ class TestAutoEndToEnd:
         work = tmp_path / "work"
 
         first = api.run_pipeline(
-            config, config.resolve_encoding(), source, work,
+            config, config.resolve_encoding(optimize=True), source, work,
             no_metrics=True, dry_run=False,
         )
         assert first.success, first.error
@@ -50,7 +50,7 @@ class TestAutoEndToEnd:
             "auto must process audio (default chains)"
 
         second = api.run_pipeline(
-            config, config.resolve_encoding(), source, work,
+            config, config.resolve_encoding(optimize=True), source, work,
             no_metrics=True, dry_run=False,
         )
         assert second.success, second.error
@@ -67,7 +67,7 @@ class TestVideoIntent:
         work = tmp_path / "work"
 
         result = api.merge_final(
-            config, config.resolve_encoding(), source, work,
+            config, config.resolve_encoding(optimize=True), source, work,
             no_metrics=True, dry_run=False,
         )
         assert result.success, result.error
@@ -106,7 +106,7 @@ class TestTwoPassComposition:
         work = tmp_path / "work"
 
         video = api.merge_final(
-            config, config.resolve_encoding(), source, work,
+            config, config.resolve_encoding(optimize=True), source, work,
             no_metrics=True, dry_run=False,
         )
         assert video.success, video.error
@@ -118,7 +118,7 @@ class TestTwoPassComposition:
         assert audio.success, audio.error
 
         final = api.run_pipeline(
-            config, config.resolve_encoding(), source, work,
+            config, config.resolve_encoding(optimize=True), source, work,
             no_metrics=True, dry_run=False,
         )
         assert final.success, final.error

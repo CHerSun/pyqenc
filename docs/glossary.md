@@ -74,3 +74,13 @@ gate as new packages/dependencies. Established 2026-10-17 (TODO §129).
 - **phase sidecar** — `<Phase>Sidecar`, the phase's own record
   (`<phase>.yaml`); key-bearing (optimization, probe, chunking) or replay-only
   (encoding, merge) per phase.
+
+## Optimization
+
+- **test basis** — the chunks the strategies are tested on before full-length
+  encoding: the selection *rules* (config `optimization.basis`,
+  `TestBasisConfig`) and the concept; the selected chunk ids themselves are
+  the optimization sidecar's `test_chunks` list. Distinct from *comparison
+  basis* (table deltas).
+- **selection / selected** — the strategy-size pruning of the optimization
+  phase (`tolerance` band); `--no-optimize` runs skip it (`plan.optimize`).

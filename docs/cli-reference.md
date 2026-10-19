@@ -252,7 +252,7 @@ Presets control encoder speed vs quality tradeoff and are defined per codec. Eac
 
 ### Optimization Phase
 
-By default, pyqenc tests all specified strategies on ~1% of chunks (minimum 3, from the middle 80% of the video), then encodes the full video using only the strategy(ies) with the smallest output size that still meets quality targets. Strategies within 5% (`optimize_tolerance`) of the best size are also selected.
+By default, pyqenc tests all specified strategies on a subset of chunks (the test basis — `optimization.basis` in the config: coverage % of chunks, minimum count, head/tail skips), then encodes the full video using only the strategy(ies) with the smallest output size that still meets quality targets. Strategies within the size tolerance (`optimization.tolerance`) of the best size are also selected.
 
 Use `--no-optimize` to skip optimization and produce one output per strategy.
 

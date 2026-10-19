@@ -59,7 +59,7 @@ _QUALITY_TARGETS = [QualityTarget(metric="vmaf", statistic="min", value=93.0)]
 _APP_CONFIG = load_app_config(default_only=True)
 
 # Resolve a few specific strategies for use in tests.
-_ALL_STRATEGIES = _APP_CONFIG.resolve_encoding().strategies
+_ALL_STRATEGIES = _APP_CONFIG.resolve_encoding(optimize=True).strategies
 _STRATEGY_MAP = {s.display_name(): s for s in _ALL_STRATEGIES}
 
 # Pick 3 well-known strategies that exist in the default config.
@@ -82,9 +82,8 @@ def _make_job_phase(
     work_dir = tmp_path / "work"
 
     config = _APP_CONFIG.model_copy(deep=True)
-    config.encoding.optimize = optimize
-    config.encoding.optimize_tolerance = tolerance
-    plan = config.resolve_encoding(
+    config.optimization.tolerance = tolerance
+    plan = config.resolve_encoding(optimize=optimize,
         targets    = ["vmaf-min:93.0"],
         strategies = [f"{s.profile}+{s.preset}" for s in strategies],
     )
@@ -714,8 +713,7 @@ def _make_fixed_phase(
 
 
     config = _APP_CONFIG.model_copy(deep=True)
-    config.encoding.optimize = optimize
-    plan = config.resolve_encoding(
+    plan = config.resolve_encoding(optimize=optimize,
         strategies = strategy_names,
         quality    = (Decimal("18"), Decimal("18")),
     )
@@ -768,11 +766,11 @@ class TestRunBoundaryGuard:
     @staticmethod
     def _plan(fixed: bool) -> EncodingPlan:
         if fixed:
-            return _APP_CONFIG.resolve_encoding(
+            return _APP_CONFIG.resolve_encoding(optimize=True,
                 strategies=["h265-aq+slow"],
                 quality=(Decimal(18), Decimal(18)),
             )
-        return _APP_CONFIG.resolve_encoding(
+        return _APP_CONFIG.resolve_encoding(optimize=True,
             targets=["vmaf-min:93.0"], strategies=["h265-aq+slow", "h264+slow"],
         )
 
@@ -962,7 +960,7 @@ class TestFixedQualityBanner:
         config_dict["profiles"]["h264"]["quality_range"] = [20.0, 20.0]
         config_dict["encoding"]["strategies"] = ["h265-aq", "h264"]
         config = AppConfig.model_validate(config_dict)
-        plan = config.resolve_encoding()
+        plan = config.resolve_encoding(optimize=True)
         assert plan.fixed_quality
 
         src = tmp_path / "source.mkv"
@@ -1311,7 +1309,7 @@ class TestFixedComparedExecute:
             tmp_path, strategy_names=[f"{n}+slow" for n in strategy_names],
             optimize=True,
         )
-        phase._config.encoding.optimize_tolerance = tolerance
+        phase._config.optimization.tolerance = tolerance
 
         chunks = [_make_chunk(float(i * 10), float((i + 1) * 10), tmp_path) for i in range(2)]
         from pyqenc.phases.chunking import ChunkingPhaseResult

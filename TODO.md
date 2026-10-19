@@ -38,15 +38,6 @@ Warning is enough, but maybe make it log rarer, like exponential delay (first fa
 
 ---
 
-## 20. (fast) Optimization test-chunk selection parameters are hardcoded
-
-- `_select_test_chunks(chunks, percentage=0.01, min_chunks=3, exclude_start_percent=0.10, exclude_end_percent=0.10)` — hardcoded defaults (`pyqenc/phases/optimization.py:838-843`), called with no overrides (`:390,392`). `app_config.py` has only `optimize_tolerance` (`:188`) — the selection percentage is not configurable.
-
-**Questions to think about:** config fields (percentage / min_chunks /
-exclusions) under an `optimization:` subconfig?
-
----
-
 ## 21. (HIGH) Quality-target presets (ultra, high / medium / low) don't exist
 
 - CLI accepts only raw pairs `--targets vmaf-min:95,...`

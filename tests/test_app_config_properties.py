@@ -716,12 +716,22 @@ class TestAppConfigRoundTrip:
     """
 
     @given(
-        optimize=st.booleans(),
         concurrency=st.integers(min_value=1, max_value=16),
         measurement_sampling=st.integers(min_value=1, max_value=20),
         visual_hash=st.booleans(),
         optimize_tolerance=st.floats(
             min_value=0.0, max_value=50.0, allow_nan=False, allow_infinity=False
+        ),
+        basis_coverage=st.floats(
+            min_value=0.0,
+            max_value=100.0,
+            exclude_min=True,
+            allow_nan=False,
+            allow_infinity=False,
+        ),
+        basis_min_chunks=st.integers(min_value=1, max_value=50),
+        basis_skip=st.floats(
+            min_value=0.0, max_value=49.0, allow_nan=False, allow_infinity=False
         ),
         extraction_include=st.one_of(st.none(), st.text(min_size=1, max_size=30)),
         extraction_exclude=st.one_of(st.none(), st.text(min_size=1, max_size=30)),
@@ -733,11 +743,13 @@ class TestAppConfigRoundTrip:
     @settings(max_examples=50)
     def test_scalar_fields_survive_round_trip(
         self,
-        optimize: bool,
         concurrency: int,
         measurement_sampling: int,
         visual_hash: bool,
         optimize_tolerance: float,
+        basis_coverage: float,
+        basis_min_chunks: int,
+        basis_skip: float,
         extraction_include: str | None,
         extraction_exclude: str | None,
         chunking_scene_threshold: float,
@@ -763,13 +775,16 @@ class TestAppConfigRoundTrip:
         assume(cpus is None or concurrency <= cpus)
 
         # Apply Hypothesis-generated mutations to simple scalar fields.
-        config.encoding.optimize          = optimize
         config.encoding.concurrency       = concurrency
         config.audio.concurrency          = concurrency
         config.measurement.concurrency    = concurrency
         config.measurement.sampling       = measurement_sampling
         config.encoding.visual_hash       = visual_hash
-        config.encoding.optimize_tolerance = optimize_tolerance
+        config.optimization.tolerance     = optimize_tolerance
+        config.optimization.basis.coverage        = basis_coverage
+        config.optimization.basis.min_chunks      = basis_min_chunks
+        config.optimization.basis.skip_start      = basis_skip
+        config.optimization.basis.skip_end        = basis_skip
         config.extraction.include         = extraction_include
         config.extraction.exclude         = extraction_exclude
         config.chunking.scene_threshold   = chunking_scene_threshold
@@ -780,11 +795,6 @@ class TestAppConfigRoundTrip:
         round_tripped = AppConfig.model_validate(dumped)
 
         # Verify every mutated scalar field survived the round-trip.
-        assert round_tripped.encoding.optimize == optimize, (
-            f"encoding.optimize changed during round-trip.\n"
-            f"  expected : {optimize!r}\n"
-            f"  got      : {round_tripped.encoding.optimize!r}"
-        )
         assert round_tripped.encoding.concurrency == concurrency, (
             f"encoding.concurrency changed during round-trip.\n"
             f"  expected : {concurrency!r}\n"
@@ -810,10 +820,30 @@ class TestAppConfigRoundTrip:
             f"  expected : {visual_hash!r}\n"
             f"  got      : {round_tripped.encoding.visual_hash!r}"
         )
-        assert round_tripped.encoding.optimize_tolerance == optimize_tolerance, (
-            f"encoding.optimize_tolerance changed during round-trip.\n"
+        assert round_tripped.optimization.tolerance == optimize_tolerance, (
+            f"optimization.tolerance changed during round-trip.\n"
             f"  expected : {optimize_tolerance!r}\n"
-            f"  got      : {round_tripped.encoding.optimize_tolerance!r}"
+            f"  got      : {round_tripped.optimization.tolerance!r}"
+        )
+        assert round_tripped.optimization.basis.coverage == basis_coverage, (
+            f"optimization.basis.coverage changed during round-trip.\n"
+            f"  expected : {basis_coverage!r}\n"
+            f"  got      : {round_tripped.optimization.basis.coverage!r}"
+        )
+        assert round_tripped.optimization.basis.min_chunks == basis_min_chunks, (
+            f"optimization.basis.min_chunks changed during round-trip.\n"
+            f"  expected : {basis_min_chunks!r}\n"
+            f"  got      : {round_tripped.optimization.basis.min_chunks!r}"
+        )
+        assert round_tripped.optimization.basis.skip_start == basis_skip, (
+            f"optimization.basis.skip_start changed during round-trip.\n"
+            f"  expected : {basis_skip!r}\n"
+            f"  got      : {round_tripped.optimization.basis.skip_start!r}"
+        )
+        assert round_tripped.optimization.basis.skip_end == basis_skip, (
+            f"optimization.basis.skip_end changed during round-trip.\n"
+            f"  expected : {basis_skip!r}\n"
+            f"  got      : {round_tripped.optimization.basis.skip_end!r}"
         )
         assert round_tripped.extraction.include == extraction_include, (
             f"extraction.include changed during round-trip.\n"
@@ -895,7 +925,7 @@ class TestAppConfigRoundTrip:
         )
 
         # The round-tripped config must still resolve from its raw strings.
-        round_tripped.resolve_encoding()
+        round_tripped.resolve_encoding(optimize=True)
 
     def test_default_config_round_trips_without_mutation(self) -> None:
         """load_app_config() round-trips cleanly with all defaults intact.
@@ -914,10 +944,11 @@ class TestAppConfigRoundTrip:
 
         assert round_tripped.encoding.targets          == config.encoding.targets
         assert round_tripped.encoding.strategies        == config.encoding.strategies
-        assert round_tripped.encoding.optimize          == config.encoding.optimize
         assert round_tripped.encoding.concurrency       == config.encoding.concurrency
         assert round_tripped.measurement.sampling       == config.measurement.sampling
         assert round_tripped.encoding.visual_hash       == config.encoding.visual_hash
+        assert round_tripped.optimization.tolerance     == config.optimization.tolerance
+        assert round_tripped.optimization.basis         == config.optimization.basis
         assert round_tripped.extraction.include         == config.extraction.include
         assert round_tripped.extraction.exclude         == config.extraction.exclude
         assert round_tripped.chunking.scene_threshold   == config.chunking.scene_threshold
@@ -941,6 +972,71 @@ class TestAppConfigRoundTrip:
         assert isinstance(config.audio.concurrency, int)
         assert isinstance(config.measurement.concurrency, int)
         assert isinstance(config.encoding.concurrency, int)
+
+    def test_default_config_carries_optimization_section(self) -> None:
+        """The bundled defaults provide the optimization section (tolerance + basis).
+
+        Bug condition: a field missing from default_config.yaml makes every
+        load fail validation (all fields are required) or silently falls
+        back to a Python-level default — either way the
+        single-source-of-truth rule for defaults is broken.
+        """
+        config = load_app_config(default_only=True)
+
+        assert isinstance(config.optimization.tolerance, float)
+        assert isinstance(config.optimization.basis.coverage, float)
+        assert isinstance(config.optimization.basis.min_chunks, int)
+        assert isinstance(config.optimization.basis.skip_start, float)
+        assert isinstance(config.optimization.basis.skip_end, float)
+
+
+class TestOptimizationBasisValidation:
+    """Test-basis knobs: bounds rejection and the head+tail skip sum guard."""
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("coverage", 0.0),
+            ("coverage", -1.0),
+            ("coverage", 100.5),
+            ("min_chunks", 0),
+            ("min_chunks", -3),
+            ("skip_start", -0.5),
+            ("skip_start", 101.0),
+            ("skip_end", -0.5),
+            ("skip_end", 101.0),
+        ],
+    )
+    def test_out_of_bounds_rejected_on_assignment(self, field: str, value: float) -> None:
+        """Out-of-bounds basis values raise ValidationError on assignment.
+
+        Bug condition: an invalid basis reaching the selection code produces
+        an empty basis (coverage ≤ 0), a zero-worker pick (min_chunks < 1),
+        or an eligibility window sliced outside the chunk list (skips > 100).
+        """
+        config = _BASE_CONFIG.model_copy(deep=True)
+
+        with pytest.raises(ValidationError):
+            setattr(config.optimization.basis, field, value)
+
+    @pytest.mark.parametrize(
+        ("skip_start", "skip_end"),
+        [(100.0, 0.0), (60.0, 40.0), (49.5, 50.5)],
+    )
+    def test_skips_summing_to_hundred_rejected(
+        self, skip_start: float, skip_end: float
+    ) -> None:
+        """Head + tail skips summing to 100 or more raise ValidationError.
+
+        Bug condition: skips consuming the whole chunk list silently empty
+        the eligibility window, degrading every run to the "use all chunks"
+        fallback instead of failing the config at load.
+        """
+        config = _BASE_CONFIG.model_copy(deep=True)
+        config.optimization.basis.skip_end = skip_end  # valid alone…
+
+        with pytest.raises(ValidationError):
+            config.optimization.basis.skip_start = skip_start  # …but sums to ≥ 100
 
 
 class TestConcurrencyValidation:
@@ -1093,8 +1189,8 @@ class TestStrategyResolutionDeterministic:
         config = _BASE_CONFIG.model_copy(deep=True)
         config.encoding.strategies = strategy_patterns
 
-        first  = config.resolve_encoding()
-        second = config.resolve_encoding()
+        first  = config.resolve_encoding(optimize=True)
+        second = config.resolve_encoding(optimize=True)
 
         assert first == second, (
             f"resolve_encoding() returned different plans on two calls.\n"
@@ -1120,7 +1216,7 @@ class TestStrategyResolutionDeterministic:
         config = _BASE_CONFIG.model_copy(deep=True)
         config.encoding.strategies = strategy_patterns
 
-        resolved: list[Strategy] = config.resolve_encoding().strategies
+        resolved: list[Strategy] = config.resolve_encoding(optimize=True).strategies
 
         # Every resolved strategy must carry one of the (preset, profile) pairs
         # that come from the given patterns.  Since the patterns are all explicit
@@ -1154,8 +1250,8 @@ class TestStrategyResolutionDeterministic:
         """
         config = _BASE_CONFIG
 
-        first_read:  list[Strategy] = config.resolve_encoding().strategies
-        second_read: list[Strategy] = config.resolve_encoding().strategies
+        first_read:  list[Strategy] = config.resolve_encoding(optimize=True).strategies
+        second_read: list[Strategy] = config.resolve_encoding(optimize=True).strategies
 
         assert first_read == second_read, (
             "resolve_encoding() changed between calls on the loaded config.\n"
@@ -1217,7 +1313,7 @@ class TestStrategyDeduplicationByPresetProfile:
         config.encoding.strategies = patterns
 
         # Force fresh resolution with the (possibly duplicate) pattern list.
-        resolved: list[Strategy] = config.resolve_encoding().strategies
+        resolved: list[Strategy] = config.resolve_encoding(optimize=True).strategies
         actual_pairs: list[tuple[str, str]] = [
             (s.preset, s.profile) for s in resolved
         ]
@@ -1263,7 +1359,7 @@ class TestStrategyDeduplicationByPresetProfile:
         config.encoding.strategies = patterns
 
         # Force fresh resolution.
-        resolved: list[Strategy] = config.resolve_encoding().strategies
+        resolved: list[Strategy] = config.resolve_encoding(optimize=True).strategies
 
         # Build the expected first-occurrence order: iterate through the
         # expanded pairs in the same order resolution would produce them
@@ -1318,7 +1414,7 @@ class TestStrategyDeduplicationByPresetProfile:
         # ("slow", "h265"). Any profile matching both patterns is a duplicate.
         config.encoding.strategies = ["h265*+slow", "h265+slow", "h265-aq+slow"]
 
-        resolved: list[Strategy] = config.resolve_encoding().strategies
+        resolved: list[Strategy] = config.resolve_encoding(optimize=True).strategies
         actual_pairs: list[tuple[str, str]] = [
             (s.preset, s.profile) for s in resolved
         ]
@@ -1388,7 +1484,7 @@ class TestValidationErrorOnInvalidStrings:
 
         import pytest
         with pytest.raises(ValueError) as exc_info:
-            config.resolve_encoding()
+            config.resolve_encoding(optimize=True)
 
         # The error must mention the offending field or value
         error_str = str(exc_info.value)
@@ -1415,7 +1511,7 @@ class TestValidationErrorOnInvalidStrings:
 
         import pytest
         with pytest.raises(ValueError) as exc_info:
-            config.resolve_encoding()
+            config.resolve_encoding(optimize=True)
 
         error_str = str(exc_info.value)
         assert "badstat" in error_str.lower() or "targets" in error_str.lower() or "encoding" in error_str.lower(), (
@@ -1442,7 +1538,7 @@ class TestValidationErrorOnInvalidStrings:
 
         import pytest
         with pytest.raises(ValueError) as exc_info:
-            config.resolve_encoding()
+            config.resolve_encoding(optimize=True)
 
         error_str = str(exc_info.value)
         assert (
@@ -1474,7 +1570,7 @@ class TestValidationErrorOnInvalidStrings:
 
         import pytest
         with pytest.raises(ValueError) as exc_info:
-            config.resolve_encoding()
+            config.resolve_encoding(optimize=True)
 
         error_str = str(exc_info.value)
         assert (
@@ -1543,7 +1639,7 @@ class TestLoadAppConfigWithBundledDefault:
         **Validates: Requirements 1.2, 1.3**
         """
         config = load_app_config(default_only=True)
-        targets = config.resolve_encoding().targets
+        targets = config.resolve_encoding(optimize=True).targets
         assert len(targets) > 0, (
             "load_app_config() returned a config resolving to no quality targets. "
             "plan.targets is empty — the bundled default must define "
@@ -1562,7 +1658,7 @@ class TestLoadAppConfigWithBundledDefault:
         **Validates: Requirements 1.2, 1.3**
         """
         config = load_app_config(default_only=True)
-        strategies = config.resolve_encoding().strategies
+        strategies = config.resolve_encoding(optimize=True).strategies
         assert len(strategies) > 0, (
             "load_app_config() returned a config resolving to no strategies. "
             "plan.strategies is empty — the bundled default must "

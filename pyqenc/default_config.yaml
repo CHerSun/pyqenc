@@ -32,12 +32,19 @@ encoding:
     # - "av1*"          # AV1: limited hardware decoding support on older devices
     # - "nvenc-h265-10bit-cq"  # NVENC: requires NVIDIA GPU
     # - "vulkan*"       # Vulkan: requires GPU with Vulkan support
-  optimize: true          # false = encode all strategies, skip size-based selection
-  optimize_tolerance: 5.0 # strategies within this % of the best size are all kept
   concurrency: 1          # max simultaneous (chunk, strategy) encode+measure jobs; clamped to CPU count
                          # measured: no benefit above 1 (ffmpeg already scales across the CPU);
                          # raise only under observed CPU underutilization
   visual_hash: true        # emoji prefix on chunk log lines for visual identification
+
+optimization:
+  # Runs unless disabled per-run with --no-optimize (the plan carries the mode, not this config).
+  tolerance: 5.0 # strategies within this % of the best size are all kept
+  basis:                   # rules picking the chunks the strategies are tested on
+    coverage: 1.0          # % of all chunks forming the basis
+    min_chunks: 3          # floor for small videos
+    skip_start: 10.0       # % of the chunk list skipped at the head —
+    skip_end: 10.0         #   and at the tail; opening/closing segments are unrepresentative
 
 measurement:
   sampling: 1  # measure every N-th frame; 1 = every frame; higher = faster but less precise

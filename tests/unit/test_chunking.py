@@ -105,10 +105,10 @@ def _make_registry(
         ),
     )
 
-    probe = ProbePhase(config, {}, collector=collector, plan=config.resolve_encoding())
+    probe = ProbePhase(config, {}, collector=collector, plan=config.resolve_encoding(optimize=True))
     probe.result = ProbePhaseResult(
         outcome=PhaseOutcome.COMPLETED, message="probe",
-        plan=config.resolve_encoding(),
+        plan=config.resolve_encoding(optimize=True),
         stream=(
             Artifact(payload=stream, state=ArtifactState.COMPLETE)
             if stream is not None else None

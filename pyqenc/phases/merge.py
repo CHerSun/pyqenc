@@ -1303,7 +1303,7 @@ class MergePhase(Phase[MergePhaseResult]):
         marks:  dict[str, Mark] = {}
         anchor: str | None      = None
         if plan.fixed_quality:
-            tolerance    = self._config.encoding.optimize_tolerance
+            tolerance    = self._config.optimization.tolerance
             names        = [r.strategy for r in summaries]
             survivors    = OptimizationPhase._dominance_survivors(summaries, tolerance)
             merge_anchor = OptimizationPhase._select_anchor(summaries, names, survivors)

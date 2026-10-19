@@ -325,8 +325,9 @@ def _add_quality_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--no-optimize",
-        action="store_true",
-        dest="no_optimize",
+        action="store_false",
+        dest="optimize",
+        default=True,
         help="Disable optimization phase and produce output for all strategies.",
     )
     parser.add_argument(
@@ -394,9 +395,6 @@ def _build_config(args: argparse.Namespace) -> AppConfig:
         config.chunking.min_scene_length = args.min_scene_length
 
     # --- plain encoding flags (no resolution coupling) ---
-    if getattr(args, "no_optimize", False):
-        config.encoding.optimize = False
-
     concurrency = getattr(args, "concurrency", None)
     if concurrency is not None:
         # One flag, every knob (Req 5): each phase consumes only its own
@@ -419,8 +417,9 @@ def _resolve_plan(args: argparse.Namespace, config: AppConfig) -> EncodingPlan:
     """Resolve the run's encoding plan from quality args + the config's raws.
 
     The resolution-coupled overrides — ``--strategies``, ``--targets``,
-    ``-q`` — are arguments to the single ``resolve_encoding`` call. Called by
-    the video subcommands only; the plan is video-work state.
+    ``-q``, ``--no-optimize`` — are arguments to the single
+    ``resolve_encoding`` call. Called by the video subcommands only; the
+    plan is video-work state.
 
     Raises:
         ValueError: If any override value is invalid (unknown profile, quality
@@ -429,6 +428,7 @@ def _resolve_plan(args: argparse.Namespace, config: AppConfig) -> EncodingPlan:
             set, no strategies, or a searched run without targets).
     """
     return config.resolve_encoding(
+        optimize   = args.optimize,
         strategies = _parse_strategies(getattr(args, "strategies", None)),
         targets    = _parse_targets(getattr(args, "targets", None)),
         quality    = _parse_quality_override(getattr(args, "quality", None)),

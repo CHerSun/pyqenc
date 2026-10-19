@@ -2615,7 +2615,7 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
         # never silently elected around. The uncompared case (all-strategies
         # path — no test work, no measurements at optimization) elects here:
         # the smallest-total-size strategy with measured metrics.
-        compared = self._config.encoding.optimize and len(plan.strategies) > 1
+        compared = plan.optimize and len(plan.strategies) > 1
         measured = [
             name for name, rows in (scan.frames if scan is not None else {}).items()
             if rows

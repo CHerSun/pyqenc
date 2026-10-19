@@ -413,7 +413,7 @@ row shape, one renderer, identical mechanics (`pyqenc/summary_tables.py`).
   one-sided selection band, optimization tables only).
 - **Anchors are elected per population**: the test anchor at optimization
   (smallest survivor of tolerance-epsilon dominance pruning — size within
-  `optimize_tolerance`, every compared statistic within the metric's
+  `optimization.tolerance`, every compared statistic within the metric's
   `acceptance_delta`, size as the tiebreak), the merge anchor over the
   full-movie rows at merge. The test anchor's identity flows to merge for
   the anchor-audit line only; its values participate nowhere there.

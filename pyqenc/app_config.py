@@ -221,23 +221,69 @@ class EncodingConfig(BaseModel):
     lives here and no field is written after load.
 
     Attributes:
-        targets:            Raw quality target strings (e.g. ``"vmaf-min:95"``).
-        strategies:         Raw strategy pattern strings (e.g. ``"h265*"``).
-        optimize:           Whether to run the strategy optimisation phase.
-        concurrency:        Maximum concurrent encoding processes; clamped to
-                            the CPU count at validation.
-        optimize_tolerance: Tolerance percentage for strategy selection.
-        visual_hash:        Whether to display emoji visual hash in chunk logs.
+        targets:      Raw quality target strings (e.g. ``"vmaf-min:95"``).
+        strategies:   Raw strategy pattern strings (e.g. ``"h265*"``).
+        concurrency:  Maximum concurrent encoding processes; clamped to
+                      the CPU count at validation.
+        visual_hash:  Whether to display emoji visual hash in chunk logs.
     """
 
     model_config = ConfigDict(validate_assignment=True)
 
-    targets:            list[str]
-    strategies:         list[str]
-    optimize:           bool
-    concurrency:        _Concurrency
-    optimize_tolerance: float
-    visual_hash:        bool
+    targets:      list[str]
+    strategies:   list[str]
+    concurrency:  _Concurrency
+    visual_hash:  bool
+
+
+class TestBasisConfig(BaseModel):
+    """Optimization test-basis selection rules (``optimization.basis``).
+
+    The rules that pick which chunks form the basis the strategies are
+    tested on; the selected chunk ids themselves are the sidecar's
+    ``test_chunks`` list. Percent values throughout — ``100.0`` means the
+    whole chunk list. Single source of truth for every default:
+    ``default_config.yaml``.
+
+    Attributes:
+        coverage:    Percent of all chunks forming the basis.
+        min_chunks:  Minimum basis size, floor for small videos.
+        skip_start:  Percent of the chunk list skipped at the head
+                     (unrepresentative opening segments).
+        skip_end:    Percent of the chunk list skipped at the tail.
+    """
+
+    model_config = ConfigDict(validate_assignment=True)
+
+    coverage:    Annotated[float, Field(gt=0.0, le=100.0)]
+    min_chunks:  Annotated[int, Field(ge=1)]
+    skip_start:  Annotated[float, Field(ge=0.0, le=100.0)]
+    skip_end:    Annotated[float, Field(ge=0.0, le=100.0)]
+
+    @model_validator(mode="after")
+    def _skips_leave_room(self) -> Self:
+        """Head and tail skips together must leave eligible chunks."""
+        if self.skip_start + self.skip_end >= 100.0:
+            raise ValueError(
+                f"skip_start + skip_end must stay below 100 "
+                f"(got {self.skip_start} + {self.skip_end})"
+            )
+        return self
+
+
+class OptimizationConfig(BaseModel):
+    """Optimization phase configuration: strategy-selection tuning.
+
+    Attributes:
+        tolerance:  Tolerance percentage for strategy selection — strategies
+                    within this percent of the best size are all kept.
+        basis:      Test-basis selection rules (:class:`TestBasisConfig`).
+    """
+
+    model_config = ConfigDict(validate_assignment=True)
+
+    tolerance:  float
+    basis:      TestBasisConfig
 
 
 class ChainSpec(BaseModel):
@@ -390,13 +436,14 @@ class AppConfig(BaseModel):
     using a stale Python-level fallback.
 
     Attributes:
-        extraction:  Stream filter settings for the extraction phase.
-        chunking:    Chunking strategy and scene-detection tuning.
-        encoding:    Quality targets, strategy selection, and encoding tuning.
-        audio:       Audio processing settings (filter palette, chains, select).
-        measurement: Measurement phase settings (sampling factor).
-        codecs:      Map of codec name → :class:`~pyqenc.models.CodecConfig`.
-        profiles:    Map of profile name → :class:`ProfileConfig`.
+        extraction:   Stream filter settings for the extraction phase.
+        chunking:     Chunking strategy and scene-detection tuning.
+        encoding:     Quality targets, strategies, and encoding tuning.
+        optimization: Strategy-selection tuning (tolerance, test basis).
+        audio:        Audio processing settings (filter palette, chains, select).
+        measurement:  Measurement phase settings (sampling factor).
+        codecs:       Map of codec name → :class:`~pyqenc.models.CodecConfig`.
+        profiles:     Map of profile name → :class:`ProfileConfig`.
 
     After the full model is assembled by Pydantic, a ``model_validator``
     normalizes and validates every declared profile ``quality_range``
@@ -413,13 +460,14 @@ class AppConfig(BaseModel):
     display them without calling a separate discovery function.
     """
 
-    extraction:  ExtractionConfig
-    chunking:    ChunkingConfig
-    encoding:    EncodingConfig
-    audio:       AudioConfig
-    measurement: MeasurementConfig
-    codecs:      dict[str, CodecConfig]
-    profiles:    dict[str, ProfileConfig]
+    extraction:   ExtractionConfig
+    chunking:     ChunkingConfig
+    encoding:     EncodingConfig
+    optimization: OptimizationConfig
+    audio:        AudioConfig
+    measurement:  MeasurementConfig
+    codecs:       dict[str, CodecConfig]
+    profiles:     dict[str, ProfileConfig]
 
     # Populated by load_app_config() after model construction; not serialised.
     # Holds the paths of all config files that were actually loaded, in
@@ -547,6 +595,7 @@ class AppConfig(BaseModel):
     def resolve_encoding(
         self,
         *,
+        optimize:   bool,
         strategies: Sequence[str] | None = None,
         targets:    Sequence[str] | None = None,
         quality:    tuple[Decimal, Decimal] | None = None,
@@ -567,6 +616,9 @@ class AppConfig(BaseModel):
         uniform quality labels across the matched strategies.
 
         Args:
+            optimize:   The run's optimization mode (``--no-optimize`` →
+                        ``False``). Explicit and required: volatile per-run
+                        intent with no config home.
             strategies: Strategy patterns; ``None`` → ``encoding.strategies``.
             targets:    Quality target strings; ``None`` → ``encoding.targets``.
             quality:    The ``-q`` bounds in input order; ``None`` → no override.
@@ -640,7 +692,9 @@ class AppConfig(BaseModel):
                 f"--strategies or the profile quality_range settings."
             )
 
-        return EncodingPlan(strategies=unique, targets=resolved_targets)
+        return EncodingPlan(
+            strategies=unique, targets=resolved_targets, optimize=optimize
+        )
 
     def _expand_strategy_pattern(
         self,
