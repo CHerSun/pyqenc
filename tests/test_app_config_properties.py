@@ -12,12 +12,21 @@ from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 from pydantic import ValidationError
 
-from pyqenc.app_config import _deep_merge
+from pyqenc.app_config import _deep_merge, load_app_config
 from pyqenc.audio.filters import PeakNormParams
 
 # ---------------------------------------------------------------------------
 # Shared strategies
 # ---------------------------------------------------------------------------
+
+# Concrete (non-wildcard) profile+preset pairs that resolve to exactly one
+# Strategy each — derived from the bundled config so profile renames cannot
+# stale this alphabet.
+_BUNDLED_CONFIG = load_app_config(default_only=True)
+_VALID_STRATEGY_PATTERNS: list[str] = [
+    f"{profile}+{_BUNDLED_CONFIG.codecs[profile_cfg.codec].default_preset}"
+    for profile, profile_cfg in sorted(_BUNDLED_CONFIG.profiles.items())
+]
 
 # Scalars: booleans, integers, floats, strings (but not dicts or lists)
 _scalar = st.one_of(
@@ -845,13 +854,7 @@ class TestAppConfigRoundTrip:
             unique=True,
         ),
         strategies=st.lists(
-            st.sampled_from([
-                "h265+slow",
-                "h265-aq+slow",
-                "h265-anime+slow",
-                "h264+veryslow",
-                "h265+medium",
-            ]),
+            st.sampled_from(_VALID_STRATEGY_PATTERNS),
             min_size=1,
             max_size=5,
             unique=True,
@@ -1053,19 +1056,6 @@ class TestConcurrencyValidation:
 # ---------------------------------------------------------------------------
 
 from pyqenc.models import Strategy
-
-# Known valid strategy patterns from the bundled default config.
-# These are concrete (non-wildcard) profile+preset pairs that are guaranteed
-# to resolve to exactly one Strategy each against the bundled codecs/profiles.
-_VALID_STRATEGY_PATTERNS: list[str] = [
-    "h265+slow",
-    "h265-aq+slow",
-    "h265-anime+slow",
-    "h264+veryslow",
-    "h265+medium",
-    "h265-aq+medium",
-    "h265+slower",
-]
 
 # Hypothesis strategy: pick a non-empty subset of known valid patterns (unique,
 # order preserved). Using st.lists with unique=True gives us all orderings.
@@ -1324,10 +1314,9 @@ class TestStrategyDeduplicationByPresetProfile:
         """
         config = _BASE_CONFIG.model_copy(deep=True)
 
-        # "h265*+slow" expands to all profiles whose name starts with "h265":
-        # e.g. h265, h265-aq, h265-anime (depending on default_config.yaml).
-        # "h265+slow" also expands to exactly ("slow", "h265").
-        # Any profile that matches both patterns would be a duplicate.
+        # "h265*+slow" expands to all profiles whose name starts with "h265"
+        # (per default_config.yaml); "h265+slow" also expands to exactly
+        # ("slow", "h265"). Any profile matching both patterns is a duplicate.
         config.encoding.strategies = ["h265*+slow", "h265+slow", "h265-aq+slow"]
 
         resolved: list[Strategy] = config.resolve_encoding().strategies
