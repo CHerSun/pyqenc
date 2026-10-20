@@ -55,7 +55,7 @@ _STUB_SOURCE_FP = SizedFingerprint(token="0" * 32, size=64)
 # ---------------------------------------------------------------------------
 
 _APP_CONFIG = load_app_config(default_only=True)
-_PLAN        = _APP_CONFIG.resolve_encoding(optimize=True)
+_PLAN        = _APP_CONFIG.resolve_encoding(optimize=True, measure=True)
 
 
 def _make_job_result(work_dir: Path, source: Path) -> JobPhaseResult:

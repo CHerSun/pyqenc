@@ -322,17 +322,6 @@ Real-data observation (2026-10-03 smoke test, `-q 18` over h264 + three h265 pro
 
 ---
 
-## 83. (fast) Metrics-absence tolerance across consumers — prerequisite for measurement-skip
-
-Born from the fixed-quality spec design (2026-10-02). Decision there: the measure_attempts control ships with default = measure (current behavior kept). Flipping the default — or skipping per-chunk measurements in fixed encoding runs — additionally requires every consumer of attempt/winner metrics to tolerate their absence: ChunkEncodingResult fields, winner sidecars, the winner-scan limiter tallies (those self-extinguish — empty metrics -> find_worst_target returns None), summary/log formatting, optimization's reads of encoding results, metrics-collector keys / dashboards. A deliberate sweep, not just the flag. Reference: fixed-quality spec (2026-10-02) defers this here; adjacent: §82 scoring research.
-
-For fast encoding profiles - measuring can take the same time that the encoding takes. For fixed runs ability to omit attempt measurements could save significant time.
-
-Base mechanics look to be already implemented for optimization/encoding - flag & tolerance. Just need to implement the passthrough of the flag to skip metrics?
-And summary table tolerance validation (already should be done).
-
----
-
 ## 84. Re-home quality ranges: codec = actual codec range, profile = reasonable working band
 
 **Status note (2026-10-05, post-config-resolution):** range VALIDATION is now one direction-free rule on `AppConfig` (`_validate_quality_range` + `_codec_ordered_range`) — the re-homed values land in exactly one check site. The value re-homing itself (default_config.yaml codec/profile bounds) remains open.

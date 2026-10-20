@@ -64,9 +64,29 @@ These options apply to `auto` and `video` (the video chain resolvers).
 | `--targets TARGETS`       | Quality targets (see [Quality Target Format](#quality-target-format))                                                                                                          | from config (8 targets, see below) |
 | `--strategies STRATEGIES` | Encoding strategies (see [Strategy Format](#strategy-format))                                                                                                                  | from config (`h264*,h265*`)        |
 | `-q, --quality V`         | Quality knob override for every matched strategy: a single value (`18`) pins it — a [fixed-quality run](./quality-targeting.md#fixed-quality-mode-q) with the per-chunk search disabled; a pair (`18:24`, `18-24`, `18..24`, order-free) constrains the search band. Replaces profile-level `quality_range` | off (config ranges) |
-| `--no-optimize`           | Disable optimization — produce output for all strategies                                                                                                                       | `False` (optimization enabled)     |
+| `--no-optimize`           | Disable optimization — produce output for all strategies (no elimination; measurements still run, including the optimization-phase anchor that feeds the winner-limiter table) | `False` (optimization enabled)     |
+| `--no-measure`            | Skip quality measurements nothing consumes — see [Measurement Opt-Out](#measurement-opt-out---no-measure) | `False` (measurements enabled)    |
 | `--sampling N`            | Frame sampling for quality measurement: every N-th frame. Lower = more precise but slower. Measurements precision directly affect encoding results. sampling=1 is recommended. | from config (`1`)                  |
 | `--no-visual-hash`        | Disable emoji visual-hash prefix on chunk log lines                                                                                                                            | off                                |
+
+### Measurement Opt-Out (`--no-measure`)
+
+One rule decides every skip: measurement runs iff something consumes it — a
+decision (the per-chunk search steering, optimization's strategy comparison)
+or reporting. `--no-measure` opts out of the reporting half.
+
+- **Searched runs:** merged-output measurement is skipped; everything else is
+  unchanged — the search itself still measures (it steers by the results).
+- **Fixed runs:** merged-output measurement is always skipped. Attempt
+  measurement is skipped iff `--no-optimize` was also passed. The
+  optimization phase is skipped when no decision is needed there —
+  `--no-optimize` or a single strategy; with optimize on and multiple
+  strategies it runs normally (dominance pruning, anchor election, judged
+  attempts, winner-limiter table).
+
+When measurements are skipped the log says so and points at the escape hatch:
+run `pyqenc measure <output>` afterwards for quality metrics on exactly the
+outputs you care about.
 
 ### Cropping
 

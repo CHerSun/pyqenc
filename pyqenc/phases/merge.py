@@ -790,11 +790,14 @@ class MergePhase(Phase[MergePhaseResult]):
                     if reason == "sampling":
                         # Sampling-only difference (Req 49): the concat is
                         # current — re-measure in place, never re-merge.
-                        logger.info(
-                            "%s%s%s (%d of %d): starting quality measurement",
-                            BRACKET_LEFT, strategy_name, BRACKET_RIGHT,
-                            pending_idx, pending_count,
-                        )
+                        # Under the measurement opt-out there is nothing to
+                        # redo for this row — the concat is already current.
+                        if plan.measure:
+                            logger.info(
+                                "%s%s%s (%d of %d): starting quality measurement",
+                                BRACKET_LEFT, strategy_name, BRACKET_RIGHT,
+                                pending_idx, pending_count,
+                            )
                     else:
                         chunk_count = len(encoded_chunks.get(strategy_name, []))
                         logger.info(
@@ -842,22 +845,30 @@ class MergePhase(Phase[MergePhaseResult]):
                     except (OSError, FrameCountError) as exc:
                         logger.warning("  Could not verify frame count: %s", exc)
 
-                    # Measure quality UNCONDITIONALLY (Req 52): measurement needs
-                    # the file, the reference, and the sampling — no target set
-                    # gates or parameterizes it. Verdicts are live (Req 51).
+                    # Measure quality (Req 52): measurement needs the file, the
+                    # reference, and the sampling — no target set gates or
+                    # parameterizes it. Verdicts are live (Req 51). The
+                    # `--no-measure` opt-out is the one exception: the user
+                    # explicitly traded reporting for speed.
                     metrics_dict: dict[str, float] = {}
                     plot_path:    Path | None       = None
-                    try:
-                        with self._collector.time(MetricKey.MERGE, METRIC_KEY_MEASURE):
-                            metrics_dict, plot_path = self._measure_quality(
-                                final_result  = output_file,
-                                source_stream = source_stream,
-                                ref_crop      = crop,
-                                output_dir    = merged_dir,
-                                show_progress = advance,
-                            )
-                    except (OSError, ValueError) as exc:
-                        logger.warning("  Could not measure quality: %s", exc)
+                    if plan.measure:
+                        try:
+                            with self._collector.time(MetricKey.MERGE, METRIC_KEY_MEASURE):
+                                metrics_dict, plot_path = self._measure_quality(
+                                    final_result  = output_file,
+                                    source_stream = source_stream,
+                                    ref_crop      = crop,
+                                    output_dir    = merged_dir,
+                                    show_progress = advance,
+                                )
+                        except (OSError, ValueError) as exc:
+                            logger.warning("  Could not measure quality: %s", exc)
+                    else:
+                        logger.info(
+                            "  Measurement opted out — merged output unmeasured; "
+                            "run 'pyqenc measure <output>' for quality metrics"
+                        )
 
                     # Quality distribution plot — reads the typed winners field
                     quality_data = MergePhase._collect_quality_data(

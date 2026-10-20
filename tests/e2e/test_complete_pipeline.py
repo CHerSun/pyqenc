@@ -21,7 +21,7 @@ def _make_config(
     Strategies and targets are injected into the dumped default config and
     re-validated. Optimisation is disabled to keep the encoding phase
     deterministic for e2e. Resolution happens per-run via
-    ``config.resolve_encoding(optimize=True)`` — the raw fields carry the overrides.
+    ``config.resolve_encoding(optimize=True, measure=True)`` — the raw fields carry the overrides.
     """
     config_dict = load_app_config(default_only=True).model_dump()
     config_dict["encoding"]["strategies"] = strategies
@@ -47,7 +47,7 @@ class TestCompletePipeline:
         config = _make_config(strategies=["h265+fast"], targets=["vmaf-min:90.0"])
         result = api.run_pipeline(
             config,
-            config.resolve_encoding(optimize=True),
+            config.resolve_encoding(optimize=True, measure=True),
             get_sample_video_path(),
             tmp_path / "work",
             no_metrics = True,
@@ -67,7 +67,7 @@ class TestCompletePipeline:
         config = _make_config(strategies=["h265+fast"], targets=["vmaf-min:90.0"])
         result = api.run_pipeline(
             config,
-            config.resolve_encoding(optimize=True),
+            config.resolve_encoding(optimize=True, measure=True),
             get_sample_video_path(),
             tmp_path / "work",
             no_metrics  = True,
@@ -93,7 +93,7 @@ class TestPipelineValidation:
         with pytest.raises(FileNotFoundError):
             api.run_pipeline(
                 config,
-                config.resolve_encoding(optimize=True),
+                config.resolve_encoding(optimize=True, measure=True),
                 tmp_path / "nonexistent.mkv",
                 tmp_path / "work",
                 no_metrics = True,
@@ -106,4 +106,4 @@ class TestPipelineValidation:
         config_dict["encoding"]["strategies"] = ["invalid+nonexistent"]
         config = AppConfig.model_validate(config_dict)
         with pytest.raises(ValueError):
-            config.resolve_encoding(optimize=True)
+            config.resolve_encoding(optimize=True, measure=True)

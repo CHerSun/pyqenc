@@ -596,6 +596,7 @@ class AppConfig(BaseModel):
         self,
         *,
         optimize:   bool,
+        measure:    bool,
         strategies: Sequence[str] | None = None,
         targets:    Sequence[str] | None = None,
         quality:    tuple[Decimal, Decimal] | None = None,
@@ -610,13 +611,16 @@ class AppConfig(BaseModel):
 
         The ``quality`` override (``-q``) replaces every matched profile's
         effective range: input order is free (canonical ``(lower, upper)``
-        order is derived here), and each codec's own direction convention
-        is applied during expansion. Because one shared number must never
-        be silently reinterpreted per codec, an override also requires
+        order is derived here), and each codec's own direction convention is
+        applied during expansion. Because one shared number must never be
+        silently reinterpreted per codec, an override also requires
         uniform quality labels across the matched strategies.
 
         Args:
             optimize:   The run's optimization mode (``--no-optimize`` →
+                        ``False``). Explicit and required: volatile per-run
+                        intent with no config home.
+            measure:    The run's measurement mode (``--no-measure`` →
                         ``False``). Explicit and required: volatile per-run
                         intent with no config home.
             strategies: Strategy patterns; ``None`` → ``encoding.strategies``.
@@ -693,7 +697,8 @@ class AppConfig(BaseModel):
             )
 
         return EncodingPlan(
-            strategies=unique, targets=resolved_targets, optimize=optimize
+            strategies=unique, targets=resolved_targets,
+            optimize=optimize, measure=measure,
         )
 
     def _expand_strategy_pattern(

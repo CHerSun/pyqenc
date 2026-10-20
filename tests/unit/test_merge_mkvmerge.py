@@ -37,6 +37,8 @@ from fractions import Fraction
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from pyqenc.app_config import load_app_config
 from pyqenc.constants import EXTRACTED_DIR, MERGED_OUTPUT_DIR, TIMESTAMPS_FILENAME
 from pyqenc.metrics import NoOpMetricsCollector
@@ -200,7 +202,7 @@ def _make_merge_phase(
     """
     collector = NoOpMetricsCollector()
     config    = _APP_CONFIG.model_copy(deep=True)
-    plan      = config.resolve_encoding(optimize=True)
+    plan      = config.resolve_encoding(optimize=True, measure=True)
 
     job = JobPhase(
         config, {},
@@ -1071,7 +1073,7 @@ class TestFixedMergeRecoveryNaming:
         config = phase._config
         probe_result = phase._phases[ProbePhase].result
         assert probe_result is not None
-        probe_result.plan = config.resolve_encoding(optimize=True,
+        probe_result.plan = config.resolve_encoding(optimize=True, measure=True,
             strategies = ["h265-aq+slow"],
             quality    = (Decimal("18"), Decimal("18")),
         )
@@ -1113,7 +1115,9 @@ _STUB_SOURCE_FP = SizedFingerprint(token="0" * 32, size=64)
 """Stub source identity — phases read the job File's fingerprint."""
 
 
-def _wire_fixed_merge(merge: MergePhase, chunk: Path, anchor: str | None) -> None:
+def _wire_fixed_merge(
+    merge: MergePhase, chunk: Path, anchor: str | None, *, measure: bool = True,
+) -> None:
     """Wire a fixed-mode plan + encoding/optimization results on *merge*.
 
     The wiring half of :func:`_run_full_merge`, reusable for a FRESH phase
@@ -1126,7 +1130,7 @@ def _wire_fixed_merge(merge: MergePhase, chunk: Path, anchor: str | None) -> Non
     config = merge._config
     probe_result = merge._phases[ProbePhase].result
     assert probe_result is not None
-    probe_result.plan = config.resolve_encoding(optimize=True,
+    probe_result.plan = config.resolve_encoding(optimize=True, measure=measure,
         strategies = ["h265-aq+slow"],
         quality    = (Decimal("18"), Decimal("18")),
     )
@@ -1242,6 +1246,65 @@ class TestPerOutputSidecarShape:
         assert record.targets, "search runs carry the targets basis"
 
 
+class TestMeasureOptOut:
+    """``--no-measure`` at merge: merged outputs are produced unmeasured."""
+
+    def test_merged_outputs_unmeasured(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """The measurer is never invoked; the acceptance record persists with
+        empty metrics (size-vs-source run); the advice line points at
+        ``pyqenc measure``."""
+        import logging
+
+        work_dir = tmp_path / "work"
+        work_dir.mkdir(parents=True, exist_ok=True)
+        source = tmp_path / "test.mkv"
+        source.write_bytes(b"\x00" * 64)
+        ts_file = work_dir / EXTRACTED_DIR / TIMESTAMPS_FILENAME
+        ts_file.parent.mkdir(parents=True, exist_ok=True)
+        ts_file.write_text("# timestamp format v2\n0\n42\n", encoding="utf-8")
+        chunk = work_dir / "chunk1.mkv"
+        chunk.write_bytes(b"\x00" * 64)
+
+        merge = _make_merge_phase(work_dir, source, chunk, timestamps_path=ts_file)
+        _wire_fixed_merge(merge, chunk, anchor=None, measure=False)
+
+        def fake_subprocess_run(cmd: list, **kwargs: object) -> MagicMock:
+            result = MagicMock()
+            result.returncode = 0
+            result.stderr = ""
+            if cmd[0] == "mkvmerge":
+                import json as _json
+
+                options_path = Path(str(cmd[1])[1:])
+                args = _json.loads(options_path.read_text(encoding="utf-8"))
+                tmp_out = Path(args[args.index("-o") + 1])
+                tmp_out.parent.mkdir(parents=True, exist_ok=True)
+                tmp_out.write_bytes(b"\x00" * 128)
+            return result
+
+        measurer = MagicMock(return_value=({}, None))
+        with (
+            caplog.at_level(logging.INFO, logger="pyqenc.phases.merge"),
+            patch("pyqenc.phases.merge.subprocess.run", side_effect=fake_subprocess_run),
+            patch("pyqenc.phases.merge.get_frame_count", return_value=100),
+            patch.object(MergePhase, "_measure_quality", measurer),
+        ):
+            result = merge.run(dry_run=False)
+        assert result.outcome == PhaseOutcome.COMPLETED, result.message
+        measurer.assert_not_called()
+        assert "pyqenc measure" in caplog.text
+
+        from pyqenc.phases.merge import FixedMergedOutputSidecar, load_merged_output_sidecar
+
+        record = load_merged_output_sidecar(
+            next((work_dir / MERGED_OUTPUT_DIR).glob("*.yaml")),
+        )
+        assert isinstance(record, FixedMergedOutputSidecar)
+        assert record.metrics == {}
+
+
 class TestMergeYamlReplayAggregate:
     """merge.yaml = the summary replay rows only (Req 28/61)."""
 
@@ -1336,7 +1399,7 @@ class TestUnifiedMergeSummary:
         # The targets ride the source row as the row's absolute values —
         # every configured target value appears on the source row.
         source_row = next(ln for ln in rows if "test" in ln and "(src)" in ln)
-        for target in _APP_CONFIG.resolve_encoding(optimize=True).targets:
+        for target in _APP_CONFIG.resolve_encoding(optimize=True, measure=True).targets:
             assert str(target.value) in source_row
         # Strategy table rows carry live verdicts; the vif target is
         # unmeasured here, so the strategy row shows the miss verdict.
@@ -1441,7 +1504,7 @@ class TestPerFileAcceptance:
         config = merge._config
         probe_result = merge._phases[ProbePhase].result
         assert probe_result is not None
-        probe_result.plan = config.resolve_encoding(optimize=True,
+        probe_result.plan = config.resolve_encoding(optimize=True, measure=True,
             strategies = ["h265-aq+slow"],
             targets    = ["vmaf-min:99.0"],
             quality    = (Decimal("18"), Decimal("18")),
@@ -1480,7 +1543,7 @@ class TestPerFileAcceptance:
         config = merge._config
         probe_result = merge._phases[ProbePhase].result
         assert probe_result is not None
-        probe_result.plan = config.resolve_encoding(optimize=True,
+        probe_result.plan = config.resolve_encoding(optimize=True, measure=True,
             strategies = ["h265-aq+slow"],
             targets    = ["vmaf-min:99.0"],
         )

@@ -22,7 +22,7 @@ from pyqenc.utils.yaml_utils import write_yaml_atomic
 # ---------------------------------------------------------------------------
 
 _STRATEGY_OBJ = next(
-    s for s in load_app_config(default_only=True).resolve_encoding(optimize=True).strategies
+    s for s in load_app_config(default_only=True).resolve_encoding(optimize=True, measure=True).strategies
     if s.preset == "slow" and s.profile == "h265-aq"
 )
 _CHUNK_ID   = "00꞉00꞉00․000-00꞉01꞉30․000"
@@ -299,14 +299,14 @@ class TestMeasureAttemptsSeam:
         assert sidecar["metrics"]["vmaf_min"] == 95.0
 
     def test_seam_threaded_explicitly_at_both_call_sites(self) -> None:
-        """Optimization always measures; the encoding phase passes its value."""
+        """Optimization always measures; the encoding phase reads the plan."""
         import inspect
 
         from pyqenc.phases.encoding import EncodingPhase
         from pyqenc.phases.optimization import _make_encoder
 
         assert "measure_attempts  = True" in inspect.getsource(_make_encoder)
-        assert "measure_attempts = True" in inspect.getsource(EncodingPhase._execute)
+        assert "plan.measures_attempts" in inspect.getsource(EncodingPhase._execute)
 
 
 # ---------------------------------------------------------------------------
@@ -565,17 +565,19 @@ class TestEncodingPresentationTargets:
         anchor_targets: list[QualityTarget],
         winner_metrics: dict[str, float] | None = None,
         winner_targets_met: bool = True,
-    ) -> tuple[EncodingPhaseResult, list[QualityTarget]]:
+        optimize: bool = True,
+        measure: bool = True,
+    ) -> tuple[EncodingPhaseResult, dict[str, object]]:
         """Run EncodingPhase through run() with a stubbed encode pool.
 
-        Returns the phase result and the ``quality_targets`` the pool
+        Returns the phase result and the kwargs the pool (``encode_all_chunks``)
         received. When *winner_metrics* is given, a winner result sidecar is
         written next to the winner file so the real winner scan reads it.
         """
         from pyqenc.app_config import load_app_config
 
         config = load_app_config(default_only=True).model_copy(deep=True)
-        plan = config.resolve_encoding(optimize=True,
+        plan = config.resolve_encoding(optimize=optimize, measure=measure,
             strategies = ["h265-aq+slow"],
             targets    = ["vmaf-min:93.0"],
             quality    = quality_range_override,
@@ -679,31 +681,49 @@ class TestEncodingPresentationTargets:
         )
         result = phase.run(dry_run=False)
         assert result.is_complete
-        received = _cast(list[QualityTarget], captured["quality_targets"])
-        return result, received
+        return result, captured
 
     def test_fixed_compared_uses_anchor_targets(self, tmp_path: Path, monkeypatch) -> None:
         anchor_targets_fixture = [
             QualityTarget(metric="vmaf", statistic="median", value=91.0),
             QualityTarget(metric="vif", statistic="median", value=84.0),
         ]
-        _, received = self._run_phase(
+        _, captured = self._run_phase(
             tmp_path, monkeypatch,
             quality_range_override=(_D("18"), _D("18")),
             anchor_targets=anchor_targets_fixture,
         )
+        received = _cast(list[QualityTarget], captured["quality_targets"])
         assert received == anchor_targets_fixture
 
     def test_fixed_uncompared_uses_no_anchor_targets(self, tmp_path: Path, monkeypatch) -> None:
-        _, received = self._run_phase(
+        _, captured = self._run_phase(
             tmp_path, monkeypatch,
             quality_range_override=(_D("18"), _D("18")),
             anchor_targets=[],
         )
-        assert received == []
+        assert captured["quality_targets"] == []
+
+    def test_measurement_optout_judges_and_measures_nothing(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        """``--no-measure --no-optimize`` fixed run: attempts are not
+        measured, so nothing is judged either — the pool receives empty
+        targets (guarding the search-steering crash on empty metrics) and
+        the measurement opt-out, and the pinned attempt is accepted."""
+        result, captured = self._run_phase(
+            tmp_path, monkeypatch,
+            quality_range_override=(_D("18"), _D("18")),
+            anchor_targets=[QualityTarget(metric="vmaf", statistic="median", value=91.0)],
+            optimize=False,
+            measure=False,
+        )
+        assert result.is_complete
+        assert captured["quality_targets"] == []
+        assert captured["measure_attempts"] is False
 
     def test_searched_uses_config_targets_unchanged(self, tmp_path: Path, monkeypatch) -> None:
-        result, received = self._run_phase(
+        result, captured = self._run_phase(
             tmp_path, monkeypatch,
             quality_range_override=None,
             anchor_targets=[],
@@ -712,7 +732,7 @@ class TestEncodingPresentationTargets:
         # The config targets flow through verbatim — searched behavior is
         # byte-identical to before the spec.
         from pyqenc.models import QualityTarget as _QT
-        assert received == [
+        assert captured["quality_targets"] == [
             _QT(metric="vmaf", statistic="min", value=93.0),
         ]
 
@@ -767,7 +787,7 @@ class TestSuboptimalOutcome:
         *,
         missed: bool,
         metrics: dict[str, float] | None = None,
-    ) -> tuple[EncodingPhaseResult, list[QualityTarget]]:
+    ) -> tuple[EncodingPhaseResult, dict[str, object]]:
         if metrics is None and missed:
             metrics = {"vmaf_min": 80.0}
         return TestEncodingPresentationTargets()._run_phase(
@@ -822,7 +842,7 @@ class TestWinningLimiterBasisLine:
         from pyqenc.stream_model import VideoStream, VideoStreamChunk, VideoStreamInfo
 
         config = load_app_config(default_only=True).model_copy(deep=True)
-        plan = config.resolve_encoding(optimize=True,
+        plan = config.resolve_encoding(optimize=True, measure=True,
             strategies = ["h265-aq+slow"],
             targets    = plan_targets,
             quality    = (_D("18"), _D("18")) if fixed else None,

@@ -331,6 +331,19 @@ def _add_quality_arguments(parser: argparse.ArgumentParser) -> None:
         help="Disable optimization phase and produce output for all strategies.",
     )
     parser.add_argument(
+        "--no-measure",
+        action="store_false",
+        dest="measure",
+        default=True,
+        help=(
+            "Skip quality measurements nothing consumes: merged-output "
+            "measurement always; attempt measurement when the fixed run also "
+            "passed --no-optimize; the optimization phase when no elimination "
+            "applies (--no-optimize or a single strategy). Run 'pyqenc "
+            "measure <output>' afterwards for quality metrics."
+        ),
+    )
+    parser.add_argument(
         "--sampling",
         type=int,
         default=None,
@@ -417,7 +430,7 @@ def _resolve_plan(args: argparse.Namespace, config: AppConfig) -> EncodingPlan:
     """Resolve the run's encoding plan from quality args + the config's raws.
 
     The resolution-coupled overrides — ``--strategies``, ``--targets``,
-    ``-q``, ``--no-optimize`` — are arguments to the single
+    ``-q``, ``--no-optimize``, ``--no-measure`` — are arguments to the single
     ``resolve_encoding`` call. Called by the video subcommands only; the
     plan is video-work state.
 
@@ -429,6 +442,7 @@ def _resolve_plan(args: argparse.Namespace, config: AppConfig) -> EncodingPlan:
     """
     return config.resolve_encoding(
         optimize   = args.optimize,
+        measure    = args.measure,
         strategies = _parse_strategies(getattr(args, "strategies", None)),
         targets    = _parse_targets(getattr(args, "targets", None)),
         quality    = _parse_quality_override(getattr(args, "quality", None)),

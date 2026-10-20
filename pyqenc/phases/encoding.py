@@ -2051,12 +2051,16 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
         Fixed compared runs judge the anchor targets (config targets are
         search-tuned vocabulary); searched runs judge the configured
         targets.  Uncompared fixed runs carry no basis — the empty set
-        extinguishes the winning-limiter table.
+        extinguishes the winning-limiter table.  Measurement-skipping
+        runs (``--no-measure --no-optimize``) judge nothing: no anchor
+        was elected and no attempt metrics exist to judge.
 
         Returns:
             The judging target set.
         """
         plan = self._deps[ProbePhase].plan
+        if not plan.measures_attempts:
+            return []
         if plan.fixed_quality:
             return self._deps[OptimizationPhase].anchor_targets
         return plan.targets
@@ -2442,7 +2446,7 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
             cleanup_level    = self._deps[JobPhase].cleanup,
             visual_hash      = self._config.encoding.visual_hash,
             sampling = self._config.measurement.sampling,
-            measure_attempts = True,  # default-flipping is TODO §83's decision
+            measure_attempts = self._deps[ProbePhase].plan.measures_attempts,
         )
 
         # Winners come from the fresh encode result — every complete pair,

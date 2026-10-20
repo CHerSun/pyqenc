@@ -676,6 +676,10 @@ class EncodingPlan(BaseModel):
         optimize:   Whether the run size-selects strategies via the
                     optimization phase (``--no-optimize`` encodes every
                     strategy full-length instead).
+        measure:    Whether reporting measurements are kept (``--no-measure``
+                    opts out: merged-output measurement always; attempt
+                    measurement when the fixed run also opted out of
+                    optimization).
     """
 
     model_config = ConfigDict(frozen=True)
@@ -683,6 +687,7 @@ class EncodingPlan(BaseModel):
     strategies: list[Strategy]
     targets:    list[QualityTarget]
     optimize:   bool
+    measure:    bool
 
     # Whether the run pins the quality knob — derived once at construction
     # in the after-validator (plain private-attr assignment works there
@@ -736,6 +741,17 @@ class EncodingPlan(BaseModel):
         construction; this property is the read contract.
         """
         return self._fixed_quality
+
+    @property
+    def measures_attempts(self) -> bool:
+        """Whether encoding attempts get quality measurements.
+
+        The search always steers by measurements; a fixed run measures
+        its attempts unless the user opted out of both measurement and
+        optimization (``--no-measure --no-optimize``) — without the
+        optimization phase there is no anchor to judge against.
+        """
+        return (not self._fixed_quality) or self.measure or self.optimize
 
 
 def _coerce_decimal_pair(v: tuple | list) -> tuple[Decimal, Decimal]:

@@ -55,7 +55,7 @@ _STUB_SOURCE_FP = SizedFingerprint(token="0" * 32, size=64)
 _SHARED_APP_CONFIG: AppConfig = load_app_config(default_only=True)
 
 # Resolve a couple of known strategies once at module level for use in tests.
-_resolved = _SHARED_APP_CONFIG.resolve_encoding(optimize=True).strategies
+_resolved = _SHARED_APP_CONFIG.resolve_encoding(optimize=True, measure=True).strategies
 _STRATEGY_SLOW_H265 = next((s for s in _resolved if s.preset == "slow" and "h265" in s.profile and "aq" not in s.profile), _resolved[0])
 _STRATEGY_H265_AQ   = next((s for s in _resolved if "h265" in s.profile and "aq" in s.profile), _resolved[min(1, len(_resolved) - 1)])
 
@@ -626,7 +626,7 @@ class TestChunkingPhaseTiming:
         probe_mock = MagicMock(spec=ProbePhase)
         probe_mock.result = ProbePhaseResult(
             outcome=PhaseOutcome.COMPLETED, message="ok",
-            plan=_SHARED_APP_CONFIG.resolve_encoding(optimize=True),
+            plan=_SHARED_APP_CONFIG.resolve_encoding(optimize=True, measure=True),
             stream=Artifact(payload=stream, state=ArtifactState.COMPLETE),
         )
 
@@ -964,7 +964,7 @@ class TestOptimizationPhaseTiming:
         config = _make_config(tmp_path)
         work_dir = tmp_path / "work"
         work_dir.mkdir(parents=True, exist_ok=True)
-        plan = config.resolve_encoding(optimize=optimize,
+        plan = config.resolve_encoding(optimize=optimize, measure=True,
             strategies = [
                 f"{s.profile}+{s.preset}"
                 for s in [_STRATEGY_SLOW_H265, _STRATEGY_H265_AQ]
@@ -1243,7 +1243,7 @@ class TestEncodingPhaseTiming:
         probe_result = ProbePhaseResult(
             outcome   = PhaseOutcome.COMPLETED,
             message   = "ok",
-            plan      = config.resolve_encoding(optimize=True),
+            plan      = config.resolve_encoding(optimize=True, measure=True),
             stream    = None,
         )
         probe_mock = MagicMock(spec=ProbePhase)
@@ -1592,7 +1592,7 @@ class TestMergePhaseTiming:
         probe_mock.result = ProbePhaseResult(
             outcome   = PhaseOutcome.COMPLETED,
             message   = "probe complete",
-            plan      = _SHARED_APP_CONFIG.resolve_encoding(optimize=True),
+            plan      = _SHARED_APP_CONFIG.resolve_encoding(optimize=True, measure=True),
             stream    = Artifact(payload=probe_stream, state=ArtifactState.COMPLETE),
         )
 

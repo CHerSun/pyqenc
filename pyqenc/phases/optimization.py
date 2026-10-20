@@ -329,16 +329,26 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
 
         if plan.fixed_quality:
             self._log_fixed_quality_banner(strategies)
-            # §123: fixed runs always run the test population — single-
-            # strategy and `--no-optimize` included (the latter with
-            # dominance pruning disabled at selection); the anchor mechanics
-            # and its anchor targets behave identically to any compared
-            # fixed run.
-            return None
+            # §123: fixed runs keep the test population — single-strategy
+            # and `--no-optimize` included (the latter with dominance
+            # pruning disabled at selection); the anchor mechanics and its
+            # anchor targets behave identically to any compared fixed run.
+            # The `--no-measure` exception: the phase runs only when a
+            # decision is needed (optimize on, multiple strategies) — an
+            # anchor nothing judges (attempts unmeasured, merge unmeasured)
+            # is not a decision.
+            if plan.measure or (plan.optimize and len(strategies) > 1):
+                return None
+            logger.info(
+                "measurement opted out and no strategy decision is needed — "
+                "optimization phase skipped; run 'pyqenc measure <output>' "
+                "afterwards for quality metrics"
+            )
+            return self._all_strategies(dry_run)
 
         # All-strategies mode: triggered by the optimize flag being off or a
         # single strategy given (nothing to optimize against) — search runs
-        # only; the fixed case returned above.
+        # only.
         if plan.optimize and len(strategies) > 1:
             return None
 

@@ -142,7 +142,7 @@ class TestClosureDerivedRegistry:
         assert registry[ExtractionPhase]._video_required is False
 
     def test_merge_registry_walks_video_chain_with_video_need(self, tmp_path) -> None:
-        plan = _APP_CONFIG.resolve_encoding(optimize=True)
+        plan = _APP_CONFIG.resolve_encoding(optimize=True, measure=True)
         registry = self._registry((MergePhase,), plan, tmp_path)
         assert list(registry) == [
             JobPhase,

@@ -59,7 +59,7 @@ _QUALITY_TARGETS = [QualityTarget(metric="vmaf", statistic="min", value=93.0)]
 _APP_CONFIG = load_app_config(default_only=True)
 
 # Resolve a few specific strategies for use in tests.
-_ALL_STRATEGIES = _APP_CONFIG.resolve_encoding(optimize=True).strategies
+_ALL_STRATEGIES = _APP_CONFIG.resolve_encoding(optimize=True, measure=True).strategies
 _STRATEGY_MAP = {s.display_name(): s for s in _ALL_STRATEGIES}
 
 # Pick 3 well-known strategies that exist in the default config.
@@ -83,7 +83,7 @@ def _make_job_phase(
 
     config = _APP_CONFIG.model_copy(deep=True)
     config.optimization.tolerance = tolerance
-    plan = config.resolve_encoding(optimize=optimize,
+    plan = config.resolve_encoding(optimize=optimize, measure=True,
         targets    = ["vmaf-min:93.0"],
         strategies = [f"{s.profile}+{s.preset}" for s in strategies],
     )
@@ -547,6 +547,69 @@ class TestAllStrategiesMode:
 
         assert result.winners == []
 
+
+class TestMeasureOptOut:
+    """The ``--no-measure`` opt-out on the optimization phase's skip decision.
+
+    The phase is skipped when no decision is needed — ``--no-optimize`` or a
+    single strategy — AND measurement was opted out; measurement kept (the
+    default) preserves §123: fixed runs always run the test population.
+    """
+
+    _SKIP_MESSAGE = "all-strategies mode — skipping optimization"
+
+    def _run_fixed(
+        self,
+        tmp_path: Path,
+        *,
+        optimize: bool,
+        measure: bool,
+        strategy_names: list[str],
+    ):
+        phase, _, _ = _make_fixed_phase(
+            tmp_path, strategy_names=strategy_names,
+            optimize=optimize, measure=measure,
+        )
+        return phase.run(dry_run=True)
+
+    def test_no_measure_no_optimize_skips_phase(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        with caplog.at_level(logging.INFO, logger="pyqenc.phases.optimization"):
+            result = self._run_fixed(
+                tmp_path, optimize=False, measure=False,
+                strategy_names=["h265-aq+slow", "h264+slow"],
+            )
+        assert result.message == self._SKIP_MESSAGE
+        assert "no strategy decision is needed" in caplog.text
+        assert "pyqenc measure" in caplog.text
+
+    def test_no_measure_single_strategy_skips_phase(self, tmp_path: Path) -> None:
+        result = self._run_fixed(
+            tmp_path, optimize=True, measure=False,
+            strategy_names=["h265-aq+slow"],
+        )
+        assert result.message == self._SKIP_MESSAGE
+
+    def test_no_measure_optimize_multi_runs_phase(self, tmp_path: Path) -> None:
+        """A strategy decision is wanted — the test population runs even
+        under the measurement opt-out (dominance + anchor need it)."""
+        result = self._run_fixed(
+            tmp_path, optimize=True, measure=False,
+            strategy_names=["h265-aq+slow", "h264+slow"],
+        )
+        assert result.message != self._SKIP_MESSAGE
+
+    def test_measure_keeps_no_optimize_running_phase(self, tmp_path: Path) -> None:
+        """§123 unchanged: ``--no-optimize`` alone still runs the anchor
+        machinery (winner-limiter tuning data stays available)."""
+        result = self._run_fixed(
+            tmp_path, optimize=False, measure=True,
+            strategy_names=["h265-aq+slow", "h264+slow"],
+        )
+        assert result.message != self._SKIP_MESSAGE
+
+
 # ---------------------------------------------------------------------------
 # The per-pair ledger (Req 8 — Correctness Property 5)
 # ---------------------------------------------------------------------------
@@ -697,6 +760,7 @@ def _make_fixed_phase(
     strategy_names: list[str],
     cleanup: CleanupLevel = CleanupLevel.NONE,
     optimize: bool = True,
+    measure: bool = True,
 ) -> tuple[OptimizationPhase, Path, EncodingPlan]:
     """An OptimizationPhase harness whose run plan pins the knob via -q semantics.
 
@@ -713,7 +777,7 @@ def _make_fixed_phase(
 
 
     config = _APP_CONFIG.model_copy(deep=True)
-    plan = config.resolve_encoding(optimize=optimize,
+    plan = config.resolve_encoding(optimize=optimize, measure=measure,
         strategies = strategy_names,
         quality    = (Decimal("18"), Decimal("18")),
     )
@@ -766,11 +830,11 @@ class TestRunBoundaryGuard:
     @staticmethod
     def _plan(fixed: bool) -> EncodingPlan:
         if fixed:
-            return _APP_CONFIG.resolve_encoding(optimize=True,
+            return _APP_CONFIG.resolve_encoding(optimize=True, measure=True,
                 strategies=["h265-aq+slow"],
                 quality=(Decimal(18), Decimal(18)),
             )
-        return _APP_CONFIG.resolve_encoding(optimize=True,
+        return _APP_CONFIG.resolve_encoding(optimize=True, measure=True,
             targets=["vmaf-min:93.0"], strategies=["h265-aq+slow", "h264+slow"],
         )
 
@@ -960,7 +1024,7 @@ class TestFixedQualityBanner:
         config_dict["profiles"]["h264"]["quality_range"] = [20.0, 20.0]
         config_dict["encoding"]["strategies"] = ["h265-aq", "h264"]
         config = AppConfig.model_validate(config_dict)
-        plan = config.resolve_encoding(optimize=True)
+        plan = config.resolve_encoding(optimize=True, measure=True)
         assert plan.fixed_quality
 
         src = tmp_path / "source.mkv"

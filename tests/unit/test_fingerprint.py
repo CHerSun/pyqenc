@@ -291,8 +291,8 @@ class TestStrategyFingerprint:
         from pyqenc.app_config import load_app_config
 
         cfg = load_app_config(default_only=True)
-        search = cfg.resolve_encoding(optimize=True, strategies=["h265+slow"], targets=["vmaf-min:93.0"])
-        fixed = cfg.resolve_encoding(optimize=True,
+        search = cfg.resolve_encoding(optimize=True, measure=True, strategies=["h265+slow"], targets=["vmaf-min:93.0"])
+        fixed = cfg.resolve_encoding(optimize=True, measure=True,
             strategies=["h265+slow"], quality=(Decimal("18"), Decimal("18")),
         )
         assert search.strategies[0].fingerprint == fixed.strategies[0].fingerprint
