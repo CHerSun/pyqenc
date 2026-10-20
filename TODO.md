@@ -865,7 +865,15 @@ Measure time it takes, resulting sizes, quality. Run in both fixed and search mo
 
 ---
 
-## Last known = 140
+## 141. No CLI way to discover available strategies (profiles/presets)
+
+The user must name strategies as `profile[+preset]` patterns (`--strategies`, `cli.py:299-304`; format and wildcard rules documented only inside `default_config.yaml:28-31`), yet the CLI offers no way to SEE what can be named — available profiles, per-codec presets, default presets, or what the default `strategies:` selection (`default_config.yaml:30-31`) actually expands to. The only in-CLI listing is error-driven: a wrong profile name raises "Available profiles: …" (`app_config.py:764-774` — names only, no presets, no defaults). Otherwise the user has to open the config yaml — not user-friendly.
+
+**Questions to think about:** a listing subcommand — `pyqenc config show`? (`config` today is only the copy workflow, `cli.py:675-715`.) What to show per profile: codec, presets, default preset, plus the resolved default strategy selection? Teach the pattern syntax (wildcards `h265*`, `*+*`) there too?
+
+---
+
+## Last known = 141
 
 Keep this updated, so we can keep continuous numbering even on last todo item deletion.
 Keep this the last entry for easy human updates.
