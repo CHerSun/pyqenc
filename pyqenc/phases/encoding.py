@@ -417,119 +417,6 @@ def _write_winner_sidecar(
 
 
 # ---------------------------------------------------------------------------
-# The per-pair ledger — one Artifact[EncodedChunk] per (chunk, strategy)
-# ---------------------------------------------------------------------------
-
-def _pair_placeholder(work_dir: Path, chunk: VideoStreamChunk, strategy: Strategy) -> EncodedChunk:
-    """A placeholder payload for a pair row with no winner on disk.
-
-    The pair identity (chunk + strategy) is real; the attempt-specific facts
-    (the file) are unknown until a winner exists — the row's
-    ``ABSENT``/``PARTIAL`` state says so. Consumers read attempt facts from
-    ``COMPLETE`` rows only. The placeholder file path uses the static winner
-    name (the identity-derived destination the promotion writes to).
-    """
-    source_info = chunk.stream.stream.info
-    winner = (
-        work_dir / ENCODED_OUTPUT_DIR / strategy.safe_name()
-        / EncodedChunk.format_winner_file_name(chunk.safe_name())
-    )
-    return EncodedChunk(
-        stream = ExtendedVideoStream(
-            stream      = VideoStream(
-                file = StreamFile(path=winner),
-                info = VideoStreamInfo(
-                    track_id     = 0,
-                    resolution   = source_info.resolution,
-                    fps          = source_info.fps,
-                    fps_fraction = source_info.fps_fraction,
-                ),
-            ),
-            frame_count = 0,
-            crop        = CropParams(),
-        ),
-        chunk    = chunk,
-        strategy = strategy,
-    )
-
-
-def _pair_rows(
-    work_dir:   Path,
-    chunks:     list[VideoStreamChunk],
-    strategies: list[Strategy],
-    *,
-    require_winner_sidecar: bool = True,
-) -> list[Artifact[EncodedChunk]]:
-    """Build the per-pair ledger: one row per (chunk, strategy) pair.
-
-    States come from the shared attempt-recovery machinery — a row is
-    ``COMPLETE`` only when that pair's winner actually exists on disk
-    (per the attempt-aware rule: the winning file, plus the result
-    sidecar when attempts are measured); such rows carry the composed
-    winner payload.  Rows without a winner carry the placeholder pair
-    payload. Shared by OptimizationPhase (test pairs) and EncodingPhase
-    (full set).
-    """
-    chunk_ids      = [c.safe_name() for c in chunks]
-    strategy_names = [s.display_name() for s in strategies]
-    pair_recovery  = _recover_encoding_attempts(
-        work_dir, chunk_ids, strategies,
-        require_winner_sidecar = require_winner_sidecar,
-    )
-    chunk_by_id    = {c.safe_name(): c for c in chunks}
-    strategy_by_name = {s.display_name(): s for s in strategies}
-
-    rows: list[Artifact[EncodedChunk]] = []
-    for chunk_id in chunk_ids:
-        for name in strategy_names:
-            # Every (chunk_id, name) combination has a row — direct index.
-            pair = pair_recovery.pairs[(chunk_id, name)]
-            if pair.state == ArtifactState.COMPLETE and pair.winning_file is not None:
-                rows.append(Artifact(
-                    payload = _build_encoded_chunk(
-                        chunk      = chunk_by_id[chunk_id],
-                        strategy   = strategy_by_name[name],
-                        path       = pair.winning_file,
-                        frame_count= 0,     # unknown on recovery
-                    ),
-                    state   = ArtifactState.COMPLETE,
-                ))
-            else:
-                rows.append(Artifact(
-                    payload = _pair_placeholder(work_dir, chunk_by_id[chunk_id], strategy_by_name[name]),
-                    state   = pair.state,
-                ))
-    return rows
-
-
-def _orphan_strategy_rows(work_dir: Path, strategies: list[Strategy]) -> list[Artifact[StreamFile]]:
-    """Rows for orphaned ``encoded/<strategy>/`` directories (surfaced at optimization).
-
-    A strategy directory absent from the current plan has no reconstructible
-    entity (its Strategy object is gone) — the on-disk product itself is the
-    only identity left. Ledger-only rows (``wanted=False``), surfaced by
-    optimization's pair ledger for honest reporting; encoding's winner-layer
-    curation deletes the directories themselves on its recovery (Req 17).
-    """
-    out_dir = work_dir / ENCODED_OUTPUT_DIR
-    if not out_dir.exists():
-        return []
-    expected = {s.safe_name() for s in strategies}
-    rows: list[Artifact[StreamFile]] = []
-    for strategy_dir in sorted(out_dir.iterdir()):
-        if strategy_dir.is_dir() and strategy_dir.name not in expected:
-            rows.append(Artifact(
-                payload = StreamFile(path=strategy_dir),
-                state   = ArtifactState.COMPLETE,
-                wanted  = False,
-            ))
-            logger.debug(
-                "encoded/%s is orphaned (strategy no longer selected) — unwanted", strategy_dir.name,
-            )
-    return rows
-
-
-# ---------------------------------------------------------------------------
 # Encoding recovery helpers
 # ---------------------------------------------------------------------------
 
@@ -644,6 +531,195 @@ def _recover_encoding_attempts(
     return _PhaseRecovery(pairs=pairs, pending=pending)
 
 
+# ---------------------------------------------------------------------------
+# The per-pair ledger — one Artifact[EncodedChunk] per (chunk, strategy)
+# ---------------------------------------------------------------------------
+
+def _pair_placeholder(work_dir: Path, chunk: VideoStreamChunk, strategy: Strategy) -> EncodedChunk:
+    """A placeholder payload for a pair row with no winner on disk.
+
+    The pair identity (chunk + strategy) is real; the attempt-specific facts
+    (the file) are unknown until a winner exists — the row's
+    ``ABSENT``/``PARTIAL`` state says so. Consumers read attempt facts from
+    ``COMPLETE`` rows only. The placeholder file path uses the static winner
+    name (the identity-derived destination the promotion writes to).
+    """
+    source_info = chunk.stream.stream.info
+    winner = (
+        work_dir / ENCODED_OUTPUT_DIR / strategy.safe_name()
+        / EncodedChunk.format_winner_file_name(chunk.safe_name())
+    )
+    return EncodedChunk(
+        stream = ExtendedVideoStream(
+            stream      = VideoStream(
+                file = StreamFile(path=winner),
+                info = VideoStreamInfo(
+                    track_id     = 0,
+                    resolution   = source_info.resolution,
+                    fps          = source_info.fps,
+                    fps_fraction = source_info.fps_fraction,
+                ),
+            ),
+            frame_count = 0,
+            crop        = CropParams(),
+        ),
+        chunk    = chunk,
+        strategy = strategy,
+    )
+
+
+def _pair_rows(
+    work_dir:   Path,
+    chunks:     list[VideoStreamChunk],
+    strategies: list[Strategy],
+    *,
+    require_winner_sidecar: bool = True,
+) -> list[Artifact[EncodedChunk]]:
+    """Build the per-pair ledger: one row per (chunk, strategy) pair.
+
+    States come from the shared attempt-recovery machinery — a row is
+    ``COMPLETE`` only when that pair's winner actually exists on disk
+    (per the attempt-aware rule: the winning file, plus the result
+    sidecar when attempts are measured); such rows carry the composed
+    winner payload.  Rows without a winner carry the placeholder pair
+    payload. Shared by OptimizationPhase (test pairs) and EncodingPhase
+    (full set).
+    """
+    chunk_ids      = [c.safe_name() for c in chunks]
+    strategy_names = [s.display_name() for s in strategies]
+    pair_recovery  = _recover_encoding_attempts(
+        work_dir, chunk_ids, strategies,
+        require_winner_sidecar = require_winner_sidecar,
+    )
+    chunk_by_id    = {c.safe_name(): c for c in chunks}
+    strategy_by_name = {s.display_name(): s for s in strategies}
+
+    rows: list[Artifact[EncodedChunk]] = []
+    for chunk_id in chunk_ids:
+        for name in strategy_names:
+            # Every (chunk_id, name) combination has a row — direct index.
+            pair = pair_recovery.pairs[(chunk_id, name)]
+            if pair.state == ArtifactState.COMPLETE and pair.winning_file is not None:
+                rows.append(Artifact(
+                    payload = _build_encoded_chunk(
+                        chunk      = chunk_by_id[chunk_id],
+                        strategy   = strategy_by_name[name],
+                        path       = pair.winning_file,
+                        frame_count= 0,     # unknown on recovery
+                    ),
+                    state   = ArtifactState.COMPLETE,
+                ))
+            else:
+                rows.append(Artifact(
+                    payload = _pair_placeholder(work_dir, chunk_by_id[chunk_id], strategy_by_name[name]),
+                    state   = pair.state,
+                ))
+    return rows
+
+
+def _orphaned_strategy_dirs(work_dir: Path, strategies: list[Strategy]) -> list[Path]:
+    """``encoded/`` subdirectories no selected strategy owns, in sorted order.
+
+    A strategy directory absent from the current plan has no reconstructible
+    entity (its Strategy object is gone) — the on-disk product itself is the
+    only identity left. Shared by the two orphan consumers: optimization's
+    ledger rows (reporting) and encoding's winner-layer curation (deletion,
+    Req 17).
+    """
+    out_dir = work_dir / ENCODED_OUTPUT_DIR
+    if not out_dir.exists():
+        return []
+    expected = {s.safe_name() for s in strategies}
+    return sorted(
+        d for d in out_dir.iterdir() if d.is_dir() and d.name not in expected
+    )
+
+
+def _orphan_strategy_rows(work_dir: Path, strategies: list[Strategy]) -> list[Artifact[StreamFile]]:
+    """Rows for orphaned ``encoded/<strategy>/`` directories (surfaced at optimization).
+
+    Ledger-only rows (``wanted=False``), surfaced by optimization's pair
+    ledger for honest reporting; encoding's winner-layer curation deletes
+    the directories themselves on its recovery (Req 17).
+    """
+    rows: list[Artifact[StreamFile]] = []
+    for strategy_dir in _orphaned_strategy_dirs(work_dir, strategies):
+        rows.append(Artifact(
+            payload = StreamFile(path=strategy_dir),
+            state   = ArtifactState.COMPLETE,
+            wanted  = False,
+        ))
+        logger.debug(
+            "encoded/%s is orphaned (strategy no longer selected) — unwanted", strategy_dir.name,
+        )
+    return rows
+
+
+def _curate_winner_layer(
+    work_dir:   Path,
+    strategies: list[Strategy],
+    chunks:     list[VideoStreamChunk],
+) -> list[Artifact]:
+    """Winner-layer curation: delete what no pair consumed (Req 13/17).
+
+    Two leftovers classes, both deleted automatically (the winner layer
+    re-derives from the attempt substrate):
+
+    - orphan strategy directories (a strategy removed from the
+      selection — its attempts stay in ``encoding/``);
+    - names inside selected strategy dirs that no expected pair
+      consumed (old-chunk-id winners after a re-chunk, stray sidecars).
+
+    Curation rows (``wanted=False``) surface what was deleted for the
+    recovery line; nothing is retained in place — that policy belongs
+    to the deliverable layer.
+    """
+    curated: list[Artifact] = []
+    chunk_ids = {c.safe_name() for c in chunks}
+
+    out_dir = work_dir / ENCODED_OUTPUT_DIR
+    if not out_dir.exists():
+        return curated
+
+    orphaned = {d.name for d in _orphaned_strategy_dirs(work_dir, strategies)}
+    for strategy_dir in sorted(out_dir.iterdir()):
+        if not strategy_dir.is_dir():
+            continue
+        if strategy_dir.name in orphaned:
+            logger.info(
+                "encoded/%s is orphaned (strategy is no longer selected) — "
+                "pruning its winners.",
+                strategy_dir.name,
+            )
+            shutil.rmtree(strategy_dir, ignore_errors=True)
+            curated.append(Artifact(
+                payload = StreamFile(path=strategy_dir),
+                state   = ArtifactState.ABSENT,
+                wanted  = False,
+            ))
+            continue
+
+        expected_names = set()
+        for chunk_id in chunk_ids:
+            expected_names.add(EncodedChunk.format_winner_file_name(chunk_id))
+            expected_names.add(EncodedChunk.format_winner_sidecar_name(chunk_id))
+            expected_names.add(f"{chunk_id}.png")
+        for path in sorted(strategy_dir.iterdir()):
+            if path.name.endswith(TEMP_SUFFIX) or path.name in expected_names:
+                continue
+            try:
+                path.unlink()
+                logger.debug("Deleted unconsumed winner-layer name: %s", path.name)
+                curated.append(Artifact(
+                    payload = StreamFile(path=path),
+                    state   = ArtifactState.ABSENT,
+                    wanted  = False,
+                ))
+            except OSError as exc:
+                logger.warning("Could not delete %s: %s", path, exc)
+    return curated
+
+
 @dataclass
 class _ChunkEncodingResult:
     """Result of encoding a single chunk.
@@ -679,32 +755,6 @@ class _ChunkEncodingResult:
 
 
 @dataclass
-class _WinnerScan:
-    """End-of-run scan over the winner result sidecars.
-
-    One read per winner feeds two consumers: the winning-limiter tallies
-    (when targets are configured) and the frame accounting behind the
-    frame-preservation invariant and its persisted aggregate.
-
-    Attributes:
-        summaries:    Per-strategy limiter summaries, or ``None`` when there
-                      is nothing to show (no targets, or no readable sidecars).
-        frames_known: Whether every winner contributed a frame count.
-        frames:       Strategy display name -> ``[(chunk safe name, frames)]``
-                      per winner with a readable sidecar — the violation-detail
-                      source; partial when ``frames_known`` is ``False``.
-    """
-
-    summaries:    list[LimiterSummary] | None
-    frames_known: bool
-    frames:       dict[str, list[tuple[str, int]]]
-
-    def frame_totals(self) -> dict[str, int]:
-        """Per-strategy Σ winner frame counts (valid only when ``frames_known``)."""
-        return {name: sum(n for _, n in pairs) for name, pairs in self.frames.items()}
-
-
-@dataclass
 class _EncodingResult:
     """Result of encoding all chunks.
 
@@ -721,6 +771,51 @@ class _EncodingResult:
     reused_count:   int                         = 0
     encoded_count:  int                         = 0
     failed_chunks:  list[str]                   = field(default_factory=list)
+
+
+def _build_encoded_chunk(
+    chunk:        VideoStreamChunk,
+    strategy:     Strategy,
+    path:         Path,
+    frame_count:  int,
+) -> EncodedChunk:
+    """Compose the winning attempt as an :class:`EncodedChunk`.
+
+    The attempt's own video stream: crop empty by construction (applied
+    during the encode), frame count from the encode run, fps from the
+    source — path and size are read through ``stream.file``, never
+    duplicated. The winning quality is deliberately NOT composed: it lives
+    on the winner sidecar as a fact for processing-path consumers only
+    (Req 4). The output resolution is likewise not composed — derivable
+    (source − crop, by construction of the crop filter) and never carried.
+
+    Args:
+        chunk:        The source window the attempt encodes.
+        strategy:     The strategy used.
+        path:         The winner file.
+        frame_count:  Frames from the winning encode run (0 = unknown).
+
+    Returns:
+        The composed :class:`~pyqenc.stream_model.EncodedChunk`.
+    """
+    source_info = chunk.stream.stream.info
+    attempt_info = VideoStreamInfo(
+        track_id     = 0,
+        fps          = source_info.fps,
+        fps_fraction = source_info.fps_fraction,
+    )
+    return EncodedChunk(
+        stream = ExtendedVideoStream(
+            stream      = VideoStream(
+                file = StreamFile(path=path),
+                info = attempt_info,
+            ),
+            frame_count = frame_count,
+            crop        = CropParams(),
+        ),
+        chunk    = chunk,
+        strategy = strategy,
+    )
 
 
 class ChunkEncoder:
@@ -1434,52 +1529,6 @@ class ChunkEncoder:
             )
 
 
-
-def _build_encoded_chunk(
-    chunk:        VideoStreamChunk,
-    strategy:     Strategy,
-    path:         Path,
-    frame_count:  int,
-) -> EncodedChunk:
-    """Compose the winning attempt as an :class:`EncodedChunk`.
-
-    The attempt's own video stream: crop empty by construction (applied
-    during the encode), frame count from the encode run, fps from the
-    source — path and size are read through ``stream.file``, never
-    duplicated. The winning quality is deliberately NOT composed: it lives
-    on the winner sidecar as a fact for processing-path consumers only
-    (Req 4). The output resolution is likewise not composed — derivable
-    (source − crop, by construction of the crop filter) and never carried.
-
-    Args:
-        chunk:        The source window the attempt encodes.
-        strategy:     The strategy used.
-        path:         The winner file.
-        frame_count:  Frames from the winning encode run (0 = unknown).
-
-    Returns:
-        The composed :class:`~pyqenc.stream_model.EncodedChunk`.
-    """
-    source_info = chunk.stream.stream.info
-    attempt_info = VideoStreamInfo(
-        track_id     = 0,
-        fps          = source_info.fps,
-        fps_fraction = source_info.fps_fraction,
-    )
-    return EncodedChunk(
-        stream = ExtendedVideoStream(
-            stream      = VideoStream(
-                file = StreamFile(path=path),
-                info = attempt_info,
-            ),
-            frame_count = frame_count,
-            crop        = CropParams(),
-        ),
-        chunk    = chunk,
-        strategy = strategy,
-    )
-
-
 async def _encode_chunk_async(
     encoder:         ChunkEncoder,
     chunk:           VideoStreamChunk,
@@ -1708,6 +1757,32 @@ def _assert_one_winner_per_chunk(
 # ---------------------------------------------------------------------------
 # Winning-limiter distribution summary
 # ---------------------------------------------------------------------------
+
+
+@dataclass
+class _WinnerScan:
+    """End-of-run scan over the winner result sidecars.
+
+    One read per winner feeds two consumers: the winning-limiter tallies
+    (when targets are configured) and the frame accounting behind the
+    frame-preservation invariant and its persisted aggregate.
+
+    Attributes:
+        summaries:    Per-strategy limiter summaries, or ``None`` when there
+                      is nothing to show (no targets, or no readable sidecars).
+        frames_known: Whether every winner contributed a frame count.
+        frames:       Strategy display name -> ``[(chunk safe name, frames)]``
+                      per winner with a readable sidecar — the violation-detail
+                      source; partial when ``frames_known`` is ``False``.
+    """
+
+    summaries:    list[LimiterSummary] | None
+    frames_known: bool
+    frames:       dict[str, list[tuple[str, int]]]
+
+    def frame_totals(self) -> dict[str, int]:
+        """Per-strategy Σ winner frame counts (valid only when ``frames_known``)."""
+        return {name: sum(n for _, n in pairs) for name, pairs in self.frames.items()}
 
 
 @dataclass
@@ -2259,73 +2334,8 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
             work_dir, chunks, strategies,
             require_winner_sidecar = self._deps[ProbePhase].plan.measures_attempts,
         )
-        rows += self._curate_winner_layer(work_dir, strategies, chunks)
+        rows += _curate_winner_layer(work_dir, strategies, chunks)
         return Recovery.from_artifacts(rows)
-
-    def _curate_winner_layer(
-        self,
-        work_dir:   Path,
-        strategies: list[Strategy],
-        chunks:     list[VideoStreamChunk],
-    ) -> list[Artifact]:
-        """Winner-layer curation: delete what no pair consumed (Req 13/17).
-
-        Two leftovers classes, both deleted automatically (the winner layer
-        re-derives from the attempt substrate):
-
-        - orphan strategy directories (a strategy removed from the
-          selection — its attempts stay in ``encoding/``);
-        - names inside selected strategy dirs that no expected pair
-          consumed (old-chunk-id winners after a re-chunk, stray sidecars).
-
-        Curation rows (``wanted=False``) surface what was deleted for the
-        recovery line; nothing is retained in place — that policy belongs
-        to the deliverable layer.
-        """
-        curated: list[Artifact] = []
-        expected_dirs = {s.safe_name() for s in strategies}
-        chunk_ids     = {c.safe_name() for c in chunks}
-
-        out_dir = work_dir / ENCODED_OUTPUT_DIR
-        if not out_dir.exists():
-            return curated
-
-        for strategy_dir in sorted(out_dir.iterdir()):
-            if not strategy_dir.is_dir():
-                continue
-            if strategy_dir.name not in expected_dirs:
-                logger.info(
-                    "encoded/%s is orphaned (strategy is no longer selected) — "
-                    "pruning its winners.",
-                    strategy_dir.name,
-                )
-                shutil.rmtree(strategy_dir, ignore_errors=True)
-                curated.append(Artifact(
-                    payload = StreamFile(path=strategy_dir),
-                    state   = ArtifactState.ABSENT,
-                    wanted  = False,
-                ))
-                continue
-
-            expected_names = set()
-            for chunk_id in chunk_ids:
-                expected_names.add(EncodedChunk.format_winner_file_name(chunk_id))
-                expected_names.add(EncodedChunk.format_winner_sidecar_name(chunk_id))
-                expected_names.add(f"{chunk_id}.png")
-            for path in sorted(strategy_dir.iterdir()):
-                if path.name.endswith(TEMP_SUFFIX) or path.name in expected_names:
-                    continue
-                try:
-                    path.unlink()
-                    logger.debug("Deleted unconsumed winner-layer name: %s", path.name)
-                    curated.append(Artifact(
-                        payload = StreamFile(path=path),
-                        state   = ArtifactState.ABSENT,
-                        wanted  = False,
-                    ))
-                except OSError as exc:
-                    logger.warning("Could not delete %s: %s", path, exc)
-        return curated
 
     def _reused_result(self, wanted: list[Artifact], message: str) -> EncodingPhaseResult:
         """Resurface the persisted aggregates on a fully-reused run.
