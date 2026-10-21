@@ -909,7 +909,22 @@ transitions like the four in the §83 rework e2e.
 
 ---
 
-## Last known = 142
+## 143. --no-measure log/verdict cosmetics (survivors of the 0.30.3 rework)
+
+From the §83 e2e matrices (2026-10-20/21, `D:\_encoding\tmp\nomeasure-e2e\RESULTS.md`):
+
+- The fixed-mode banner line "merged-output measurement remains the final quality
+  check" is stale under `--no-measure` (merge measurement is skipped) — the banner
+  should drop or reword that line when the plan opts out.
+- Search + `--no-measure` still persists merged rows with `metrics: {}`, and the
+  live verdict renders a ✘ mark on them (empty metrics → False) — an opted-out row
+  arguably should carry no verdict at all.
+- Search + `--no-optimize` takes the all-strategies path with NO log line at all
+  (fixed mode logs its skip line) — one teaching line for symmetry.
+
+---
+
+## Last known = 143
 
 Keep this updated, so we can keep continuous numbering even on last todo item deletion.
 Keep this the last entry for easy human updates.
