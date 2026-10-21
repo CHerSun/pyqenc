@@ -422,10 +422,12 @@ def _write_winner_sidecar(
 
 @dataclass
 class _PairRecovery:
-    """Recovery state for one ``(chunk_id, strategy)`` pair: is its winner there?"""
+    """Recovery state for one ``(chunk_id, strategy)`` pair: is its winner there?
 
-    chunk_id:     str
-    strategy:     str
+    The pair identity lives in the owning map's key (``pairs[(chunk_id,
+    strategy_name)]``) — never repeated as fields.
+    """
+
     state:        ArtifactState
     winning_file: Path | None = None
 
@@ -507,16 +509,12 @@ def _recover_pairs(
             )
             if complete:
                 pairs[(chunk_id, name)] = _PairRecovery(
-                    chunk_id     = chunk_id,
-                    strategy     = name,
                     state        = ArtifactState.COMPLETE,
                     winning_file = encoded_dir / EncodedChunk.format_winner_file_name(chunk_id),
                 )
                 complete_count += 1
             else:
                 pairs[(chunk_id, name)] = _PairRecovery(
-                    chunk_id = chunk_id,
-                    strategy = name,
                     state    = ArtifactState.PARTIAL
                     if EncodedChunk.format_winner_file_name(chunk_id) in present_names
                     else ArtifactState.ABSENT,
@@ -759,13 +757,15 @@ class _EncodingResult:
                         the payload carries its own chunk + strategy identity).
         reused_count:   Number of chunks reused from previous runs.
         encoded_count:  Number of chunks newly encoded.
-        failed_chunks:  List of chunk IDs that failed.
+        failed_chunks:  Failed ``(chunk safe name, strategy display name)``
+                        pairs — pair-keyed: a chunk may fail under one
+                        strategy and win under another.
     """
 
     encoded_chunks: dict[str, list[EncodedChunk]] = field(default_factory=dict)
     reused_count:   int                         = 0
     encoded_count:  int                         = 0
-    failed_chunks:  list[str]                   = field(default_factory=list)
+    failed_chunks:  list[tuple[str, str]]       = field(default_factory=list)
 
 
 def _build_encoded_chunk(
@@ -939,7 +939,7 @@ class ChunkEncoder:
         metrics:         dict[str, float],
         frame_count:     int,
         quality_targets: list[QualityTarget],
-        targets_met:     bool = True,
+        targets_met:     bool,
     ) -> None:
         """Promote the winning attempt to the static winner name and write the sidecar.
 
@@ -1097,7 +1097,6 @@ class ChunkEncoder:
         chunk:            VideoStreamChunk,
         strategy:         Strategy,
         quality_targets:  list[QualityTarget],
-        initial_quality:      Decimal,
     ) -> _ChunkEncodingResult:
         """Encode the chunk window, adjusting quality until targets are met.
 
@@ -1106,13 +1105,15 @@ class ChunkEncoder:
         the attempt, the detected crop for the source window). An existing
         attempt at the proposed address is accepted from its sidecar whenever
         it is complete — attempt reuse is never bypassed (``--force`` is
-        wipe permission at JobPhase, not a re-encode command).
+        wipe permission at JobPhase, not a re-encode command). The search
+        starts at the codec's quantized default quality — a predictable
+        starting point means a predictable recovery path when parameters
+        change.
 
         Args:
             chunk:           The chunk window to encode.
             strategy:        Encoding strategy.
             quality_targets: Quality targets to meet.
-            initial_quality:     Initial quality value (if no history available).
 
         Returns:
             ChunkEncodingResult with encoding outcome.
@@ -1126,7 +1127,9 @@ class ChunkEncoder:
             granularity      = strategy.codec.quality_granularity,
             quality_max_step = strategy.codec.quality_max_step,
         )
-        current_q      = initial_quality
+        current_q = strategy.codec.default_quality.quantize(
+            strategy.codec.quality_granularity
+        )
         attempt_number = 0
         final_attempt:     AttemptMetadata | None = None
         best_fail_attempt: AttemptMetadata | None = None
@@ -1235,14 +1238,11 @@ class ChunkEncoder:
                 if existing is not None
                 else None
             )
-            sidecar_valid = (
-                existing is not None
-                and sidecar is not None
-                and sidecar.sampling == self._sampling
+            if existing is not None and sidecar is not None and (
+                sidecar.sampling == self._sampling
                 and sidecar.frame_count > 0
                 and {f"{t.metric}_{t.statistic}" for t in quality_targets}.issubset(sidecar.metrics)
-            )
-            if sidecar_valid and sidecar is not None:
+            ):
                 # Full cache hit — no real work performed.
                 all_metrics = dict(sidecar.metrics)
                 targets_met = all(
@@ -1481,7 +1481,6 @@ async def _encode_chunk_async(
     chunk:           VideoStreamChunk,
     strategy:        Strategy,
     quality_targets: list[QualityTarget],
-    initial_quality:     Decimal,
 ) -> _ChunkEncodingResult:
     """Async wrapper for chunk encoding.
 
@@ -1490,7 +1489,6 @@ async def _encode_chunk_async(
         chunk:           The chunk window to encode.
         strategy:        Encoding strategy.
         quality_targets: Quality targets.
-        initial_quality:     Initial quality value.
 
     Returns:
         ChunkEncodingResult
@@ -1502,7 +1500,6 @@ async def _encode_chunk_async(
         chunk,
         strategy,
         quality_targets,
-        initial_quality,
     )
 
 
@@ -1590,17 +1587,11 @@ async def _encode_pairs(
         """One (chunk, strategy) job: the quality search, then bookkeeping."""
         chunk, strategy = pair
 
-        # Encode chunk using the codec's default quality as the fixed starting point.
-        # Predictable initial quality = predictable recovery path when parameters change.
-        gran = strategy.codec.quality_granularity
-        chunk_initial_quality = strategy.codec.default_quality.quantize(gran)
-
         chunk_result = await _encode_chunk_async(
             encoder,
             chunk,
             strategy,
             quality_targets,
-            chunk_initial_quality,
         )
 
         if chunk_result.success:
@@ -1633,7 +1624,7 @@ async def _encode_pairs(
                     ),
                 )
         else:
-            result.failed_chunks.append(chunk.safe_name())
+            result.failed_chunks.append((chunk.safe_name(), strategy.display_name()))
             if advance is not None:
                 advance(0, AdvanceState.FAILED)
 
@@ -1658,9 +1649,10 @@ def _assert_one_winner_per_chunk(
     Two checks per strategy, each catching what the other cannot: the span
     set comparison catches lost and foreign winners (a frozenset would
     silently coalesce duplicates), and the count comparison catches
-    same-span duplicates (invisible to set equality). Spans of failed pairs
-    are excluded: a failed pair legitimately has no winner and is reported
-    through ``failed_chunks``.
+    same-span duplicates (invisible to set equality). Spans of failed
+    PAIRS are excluded per-strategy: a pair may fail while the same chunk
+    wins under another strategy (``failed_chunks`` is pair-keyed) — only
+    that strategy's expectation drops the chunk.
 
     Args:
         result:     The concluded encode result.
@@ -1669,14 +1661,14 @@ def _assert_one_winner_per_chunk(
 
     Raises:
         AssertionError: When any strategy's winner count or spans diverge
-            from the non-failed chunks.
+            from its non-failed chunks.
     """
-    failed_ids = set(result.failed_chunks)
-    expected = frozenset(
-        (c.start_timestamp, c.end_timestamp) for c in chunks
-        if c.safe_name() not in failed_ids
-    )
+    failed = set(result.failed_chunks)
     for strategy in strategies:
+        expected = frozenset(
+            (c.start_timestamp, c.end_timestamp) for c in chunks
+            if (c.safe_name(), strategy.display_name()) not in failed
+        )
         winners = result.encoded_chunks.get(strategy.display_name(), [])
         actual = frozenset(
             (w.chunk.start_timestamp, w.chunk.end_timestamp) for w in winners
@@ -1840,6 +1832,8 @@ def _scan_winner_sidecars(
                     ],
                 ))
     return _WinnerScan(summaries=summaries, frames_known=frames_known, frames=frames)
+
+
 # ---------------------------------------------------------------------------
 # EncodingPhase — Phase object
 # ---------------------------------------------------------------------------
@@ -2299,9 +2293,9 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
         total_seconds   = sum(c.end_timestamp - c.start_timestamp for c in chunks) * len(strategies)
         with ProgressBar(total_seconds, title="Encoding", total_count=len(chunks) * len(strategies)) as advance:
             # Pre-advance the bar for already-complete pairs (their full duration)
-            for r in pairs.pairs.values():
+            for (chunk_id, _name), r in pairs.pairs.items():
                 if r.state == ArtifactState.COMPLETE:
-                    c = chunks_by_id[r.chunk_id]
+                    c = chunks_by_id[chunk_id]
                     advance(c.end_timestamp - c.start_timestamp, AdvanceState.SKIPPED)
 
             enc_result = asyncio.run(
@@ -2320,9 +2314,12 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
             advance(0, AdvanceState.COMPLETE)
 
         if enc_result.failed_chunks:
-            # Chunk names at ERROR severity; the phase-level closer carries the
-            # outcome verdict with the counts folded into its message.
-            logger.error("Failed chunks: %s", ", ".join(enc_result.failed_chunks))
+            # Pair identities at ERROR severity; the phase-level closer carries
+            # the outcome verdict with the counts folded into its message.
+            logger.error(
+                "Failed pairs: %s",
+                ", ".join(f"{cid}/{name}" for cid, name in enc_result.failed_chunks),
+            )
 
         # Winners come from the fresh encode result — every complete pair,
         # with freshly measured payloads (frame counts from the run itself).
@@ -2336,15 +2333,9 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
                 key=lambda p: (p.chunk.start_timestamp, p.strategy.display_name()),
             )
         ]
-        complete_pairs = {
-            (p.chunk.safe_name(), p.strategy.display_name()) for p in
-            (row.payload for row in winners)
-        }
-        failed_pairs = [
-            f"{c.safe_name()}/{st.display_name()}"
-            for c in chunks for st in strategies
-            if (c.safe_name(), st.display_name()) not in complete_pairs
-        ]
+        # The contract guard upstream guarantees consistency: the failed
+        # pairs are exactly the pairs without a winner.
+        failed_pairs = [f"{cid}/{name}" for cid, name in enc_result.failed_chunks]
 
         # Log phase summary
         complete_count = len(winners)
@@ -2352,7 +2343,7 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
         if failed_pairs:
             final_rows = _pair_rows(
                 work_dir, chunks, strategies,
-                require_winner_sidecar = self._deps[ProbePhase].plan.measures_attempts,
+                require_winner_sidecar = probe_result.plan.measures_attempts,
             )
             return self._make_result(
                 PhaseOutcome.FAILED,
@@ -2382,7 +2373,7 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
                 [s.display_name() for s in strategies],
                 presentation_targets,
             )
-            if self._deps[ProbePhase].plan.measures_attempts
+            if probe_result.plan.measures_attempts
             else None
         )
         if source_total > 0 and scan is not None:
@@ -2426,7 +2417,7 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
         # election at all — and no winner-sizes stat sweep either.
         presentation_anchor = (
             self._resolve_presentation_anchor(
-                optimization_result, scan, self._deps[ProbePhase].plan,
+                optimization_result, scan, probe_result.plan,
                 winner_sizes={
                     name: sum(
                         safe_stat_size(p.stream.stream.file.path) or 0
@@ -2460,7 +2451,7 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
         missed_winners = sum(
             row.missed for group in (summaries or []) for row in group.rows
         )
-        search_mode    = not self._deps[ProbePhase].plan.fixed_quality
+        search_mode    = not probe_result.plan.fixed_quality
         if enc_result.encoded_count > 0:
             outcome = (
                 PhaseOutcome.SUBOPTIMAL

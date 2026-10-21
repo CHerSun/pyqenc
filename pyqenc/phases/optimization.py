@@ -880,9 +880,9 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
             with ProgressBar(total_seconds, title="Optimization", total_count=total_count) as advance:
                 # Pre-advance the bar for already-complete pairs (their full duration)
                 chunks_by_id = {c.safe_name(): c for c in test_chunks}
-                for r in phase_recovery.pairs.values():
+                for (chunk_id, _name), r in phase_recovery.pairs.items():
                     if r.state == ArtifactState.COMPLETE:
-                        c = chunks_by_id[r.chunk_id]
+                        c = chunks_by_id[chunk_id]
                         advance(c.end_timestamp - c.start_timestamp, AdvanceState.SKIPPED)
 
                 asyncio.run(

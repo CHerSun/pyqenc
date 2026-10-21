@@ -238,7 +238,6 @@ class TestEncodeChunkQualitySearchV2Integration:
                 chunk           = chunk,
                 strategy        = strategy,
                 quality_targets = [target],
-                initial_quality     = Decimal("18.0"),
             )
 
         assert isinstance(result, _ChunkEncodingResult)
@@ -250,7 +249,6 @@ class TestEncodeChunkQualitySearchV2Integration:
     @pytest.mark.skip(reason="ChunkEncoder constructor signature changed (collector arg added); needs update")
     def test_encode_chunk_calls_finalize_on_convergence(self, tmp_path: Path) -> None:
         """encode_chunk calls _finalize_winning_attempt when search converges with a pass."""
-        from decimal import Decimal
         from unittest.mock import MagicMock, patch
 
         from pyqenc.models import QualityTarget
@@ -307,7 +305,6 @@ class TestEncodeChunkQualitySearchV2Integration:
                 chunk           = chunk,
                 strategy        = strategy,
                 quality_targets = [target],
-                initial_quality     = Decimal("18.0"),
             )
 
         assert result.success is True

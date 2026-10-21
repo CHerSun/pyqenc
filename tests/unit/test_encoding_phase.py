@@ -25,6 +25,10 @@ _STRATEGY_OBJ = next(
     s for s in load_app_config(default_only=True).build_encoding_plan(optimize=True, measure=True).strategies
     if s.preset == "slow" and s.profile == "h265-aq"
 )
+_STRATEGY_ALT = next(
+    s for s in load_app_config(default_only=True).build_encoding_plan(optimize=True, measure=True).strategies
+    if s.preset == "slow" and s.profile == "h265"
+)
 _CHUNK_ID   = "00꞉00꞉00․000-00꞉01꞉30․000"
 _STRATEGY   = _STRATEGY_OBJ.display_name()
 _SAFE_STRAT = _STRATEGY_OBJ.safe_name()
@@ -168,6 +172,7 @@ def _fixed_strategy() -> _Strategy:
     codec = _MM()
     codec.quality_better      = _D("18.0")
     codec.quality_worse       = _D("18.0")
+    codec.default_quality     = _D("18.0")
     codec.quality_granularity = _D("0.5")
     codec.quality_max_step    = None
     codec.quality_label       = "CRF"
@@ -258,7 +263,6 @@ def _run_encode(
             chunk           = chunk,
             strategy        = strategy,
             quality_targets = [],
-            initial_quality     = _D("18.0"),
         )
     return result, evaluator
 
@@ -351,7 +355,6 @@ class TestMeasureAttemptsSeam:
                 chunk       = chunk,
                 strategy     = strategy,
                 quality_targets = [],
-                initial_quality = _D("18.0"),
             )
 
         encode_mock.assert_not_called()
@@ -449,6 +452,7 @@ class TestFixedDegenerateSinglePoint:
         codec = _MM()
         codec.quality_better      = _D("18.0")
         codec.quality_worse       = _D("19.0")   # narrow range: exhausts fast
+        codec.default_quality     = _D("18.0")
         codec.quality_granularity = _D("0.5")
         codec.quality_max_step    = None
         codec.quality_label       = "CRF"
@@ -523,7 +527,7 @@ def _run_encode_with_targets(
     ):
         result = encoder.encode_chunk(
             chunk=chunk, strategy=strategy, quality_targets=targets,
-            initial_quality=_D("18.0"),        )
+        )
     return result, evaluator
 
 
@@ -591,7 +595,6 @@ class TestAttemptFrameCountSourcing:
                 chunk           = _chunk_mock(tmp_path),
                 strategy        = _fixed_strategy(),
                 quality_targets = self._target(),
-                initial_quality     = _D("18.0"),
             )
 
         assert result.success is True
@@ -615,7 +618,6 @@ class TestAttemptFrameCountSourcing:
                 chunk           = _chunk_mock(tmp_path),
                 strategy        = _fixed_strategy(),
                 quality_targets = self._target(),
-                initial_quality     = _D("18.0"),
             )
 
         assert result.success is True
@@ -1115,13 +1117,15 @@ class TestOneWinnerPerChunkGuard:
             stream=stream, start_timestamp=start, end_timestamp=end, frame_count=24,
         )
 
-    def _winner(self, chunk: _VSC, tmp_path: Path) -> _EncodedChunk:
+    def _winner(
+        self, chunk: _VSC, tmp_path: Path, strategy=None,
+    ) -> _EncodedChunk:
         from pyqenc.phases.encoding import _build_encoded_chunk
 
         mkv = tmp_path / _EC.format_winner_file_name(chunk.safe_name())
         mkv.write_bytes(b"x" * 64)
         return _build_encoded_chunk(
-            chunk=chunk, strategy=_STRATEGY_OBJ,
+            chunk=chunk, strategy=strategy or _STRATEGY_OBJ,
             path=mkv, frame_count=24,
         )
 
@@ -1154,9 +1158,28 @@ class TestOneWinnerPerChunkGuard:
         with pytest.raises(AssertionError, match="unexpected"):
             _assert_one_winner_per_chunk(result, chunks, [_STRATEGY_OBJ])
 
-    def test_failed_chunk_excluded(self, tmp_path: Path) -> None:
+    def test_failed_pair_excluded(self, tmp_path: Path) -> None:
         chunks = [self._chunk(0.0, 10.0), self._chunk(10.0, 20.0)]
         result = _EncodingResult()
-        result.failed_chunks = [chunks[1].safe_name()]
+        result.failed_chunks = [(chunks[1].safe_name(), _STRATEGY)]
         result.encoded_chunks[_STRATEGY] = [self._winner(chunks[0], tmp_path)]
         _assert_one_winner_per_chunk(result, chunks, [_STRATEGY_OBJ])
+
+    def test_mixed_failure_across_strategies_passes(self, tmp_path: Path) -> None:
+        """A chunk that failed under one strategy but won under another is
+        legitimate — failures are pair-keyed, never chunk-keyed.
+
+        Bug guarded: the pre-pair-keying guard treated a chunk failed under
+        ANY strategy as failed for every strategy, so a mixed outcome tripped
+        ``unexpected=`` on the winning strategy's legitimate winner.
+        """
+        chunks = [self._chunk(0.0, 10.0), self._chunk(10.0, 20.0)]
+        result = _EncodingResult()
+        result.failed_chunks = [(chunks[1].safe_name(), _STRATEGY)]
+        result.encoded_chunks[_STRATEGY] = [self._winner(chunks[0], tmp_path)]
+        result.encoded_chunks[_STRATEGY_ALT.display_name()] = [
+            self._winner(c, tmp_path, strategy=_STRATEGY_ALT) for c in chunks
+        ]
+        _assert_one_winner_per_chunk(
+            result, chunks, [_STRATEGY_OBJ, _STRATEGY_ALT],
+        )
