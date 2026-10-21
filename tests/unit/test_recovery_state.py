@@ -1,7 +1,7 @@
 """Unit tests for recovery state classification and yaml_utils.
 
 Covers:
-- 10.1  ArtifactState classification in _recover_encoding_attempts — the
+- 10.1  ArtifactState classification in _recover_pairs — the
         static-name consumption over one listing per strategy dir: COMPLETE
         iff both ``<chunk_id>.mkv`` and ``<chunk_id>.yaml`` are present;
         PARTIAL when only the winner file exists (the conclusion record is
@@ -17,7 +17,7 @@ import pytest
 import yaml
 
 from pyqenc.app_config import load_app_config
-from pyqenc.phases.encoding import _recover_encoding_attempts as recover_attempts
+from pyqenc.phases.encoding import _recover_pairs as recover_attempts
 from pyqenc.state import ArtifactState
 from pyqenc.stream_model import EncodedChunk
 from pyqenc.utils.yaml_utils import write_yaml_atomic

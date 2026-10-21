@@ -1,6 +1,6 @@
 """Unit tests for encoding phase recovery.
 
-Covers the fast presence-based recovery in ``_recover_encoding_attempts``:
+Covers the fast presence-based recovery in ``_recover_pairs``:
 - A pair is COMPLETE when both a winning .mkv and its .yaml sidecar exist in
   ``encoded/<strategy>/``.
 - A pair is ABSENT when neither is present.
@@ -12,7 +12,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from pyqenc.app_config import load_app_config
-from pyqenc.phases.encoding import _recover_encoding_attempts
+from pyqenc.phases.encoding import _recover_pairs
 from pyqenc.state import ArtifactState
 from pyqenc.stream_model import EncodedChunk as _EC
 from pyqenc.utils.yaml_utils import write_yaml_atomic
@@ -58,7 +58,7 @@ class TestRecoverEncodingAttempts:
         encoded_dir = tmp_path / "encoded" / _SAFE_STRAT
         winning     = _make_complete_pair(encoded_dir)
 
-        recovery = _recover_encoding_attempts(
+        recovery = _recover_pairs(
             work_dir  = tmp_path,
             chunk_ids = [_CHUNK_ID],
             strategies = [_STRATEGY_OBJ],
@@ -71,7 +71,7 @@ class TestRecoverEncodingAttempts:
 
     def test_absent_pair_when_no_encoded_dir(self, tmp_path: Path) -> None:
         """A pair with no encoded/ directory is ABSENT."""
-        recovery = _recover_encoding_attempts(
+        recovery = _recover_pairs(
             work_dir  = tmp_path,
             chunk_ids = [_CHUNK_ID],
             strategies = [_STRATEGY_OBJ],
@@ -89,7 +89,7 @@ class TestRecoverEncodingAttempts:
         (encoded_dir / f"{stem}.mkv").write_bytes(b"\x00" * 512)
         # no .yaml written
 
-        recovery = _recover_encoding_attempts(
+        recovery = _recover_pairs(
             work_dir  = tmp_path,
             chunk_ids = [_CHUNK_ID],
             strategies = [_STRATEGY_OBJ],
@@ -106,7 +106,7 @@ class TestRecoverEncodingAttempts:
         _make_complete_pair(encoded_dir, chunk_id=chunk_a)
         # chunk_b has no files
 
-        recovery = _recover_encoding_attempts(
+        recovery = _recover_pairs(
             work_dir  = tmp_path,
             chunk_ids = [chunk_a, chunk_b],
             strategies = [_STRATEGY_OBJ],
@@ -122,7 +122,7 @@ class TestRecoverEncodingAttempts:
         encoded_dir = tmp_path / "encoded" / _SAFE_STRAT
         winning     = _make_complete_pair(encoded_dir)
 
-        recovery = _recover_encoding_attempts(
+        recovery = _recover_pairs(
             work_dir  = tmp_path,
             chunk_ids = [_CHUNK_ID],
             strategies = [_STRATEGY_OBJ],
@@ -245,7 +245,6 @@ def _run_encode(
             strategy        = strategy,
             quality_targets = [],
             initial_quality     = _D("18.0"),
-            force           = False,
         )
     return result, evaluator
 
@@ -335,7 +334,6 @@ class TestMeasureAttemptsSeam:
                 strategy     = strategy,
                 quality_targets = [],
                 initial_quality = _D("18.0"),
-                force       = False,
             )
 
         encode_mock.assert_not_called()
@@ -503,8 +501,7 @@ def _run_encode_with_targets(
     ):
         result = encoder.encode_chunk(
             chunk=chunk, strategy=strategy, quality_targets=targets,
-            initial_quality=_D("18.0"), force=False,
-        )
+            initial_quality=_D("18.0"),        )
     return result, evaluator
 
 
@@ -568,7 +565,6 @@ class TestAttemptFrameCountSourcing:
                 strategy        = _fixed_strategy(),
                 quality_targets = self._target(),
                 initial_quality     = _D("18.0"),
-                force           = False,
             )
 
         assert result.success is True
@@ -593,7 +589,6 @@ class TestAttemptFrameCountSourcing:
                 strategy        = _fixed_strategy(),
                 quality_targets = self._target(),
                 initial_quality     = _D("18.0"),
-                force           = False,
             )
 
         assert result.success is True
@@ -620,7 +615,7 @@ class TestEncodingPresentationTargets:
     ) -> tuple[EncodingPhaseResult, dict[str, object]]:
         """Run EncodingPhase through run() with a stubbed encode pool.
 
-        Returns the phase result and the kwargs the pool (``encode_all_chunks``)
+        Returns the phase result and the kwargs the pool (``_encode_pairs``)
         received. When *winner_metrics* is given, a winner result sidecar is
         written next to the winner file so the real winner scan reads it.
         """
@@ -712,7 +707,7 @@ class TestEncodingPresentationTargets:
 
         captured: dict[str, object] = {}
 
-        def _fake_encode_all(**kwargs: object) -> _EncodingResult:
+        async def _fake_encode_pairs(**kwargs: object) -> _EncodingResult:
             captured.update(kwargs)
             # The winner sidecar materializes DURING the run (a pre-written
             # one would make recovery classify the pair complete and skip
@@ -731,7 +726,7 @@ class TestEncodingPresentationTargets:
             return result
 
         monkeypatch.setattr(
-            "pyqenc.phases.encoding.encode_all_chunks", _fake_encode_all,
+            "pyqenc.phases.encoding._encode_pairs", _fake_encode_pairs,
         )
         result = phase.run(dry_run=False)
         assert result.is_complete
@@ -774,7 +769,6 @@ class TestEncodingPresentationTargets:
         )
         assert result.is_complete
         assert captured["quality_targets"] == []
-        assert captured["measure_attempts"] is False
         # Consequences of the sidecar-free fast path: no encoding.yaml (the
         # replay aggregate holds only measurement-derived data).
         assert not (tmp_path / "work" / "encoding.yaml").exists()

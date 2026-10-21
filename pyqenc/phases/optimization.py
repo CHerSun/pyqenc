@@ -823,7 +823,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
 
         from pyqenc.phases.encoding import (
             _encode_pairs,
-            _recover_encoding_attempts,
+            _recover_pairs,
         )  # deferred: circular import (encoding <-> optimization)
 
         strategies_to_test = self._strategies_to_test
@@ -859,7 +859,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
             )
 
             test_chunk_ids = [c.safe_name() for c in test_chunks]
-            phase_recovery = _recover_encoding_attempts(work_dir, test_chunk_ids, strategies_to_test)
+            phase_recovery = _recover_pairs(work_dir, test_chunk_ids, strategies_to_test)
 
             pending_pairs   = sum(1 for r in phase_recovery.pairs.values() if r.state != ArtifactState.COMPLETE)
             complete_pairs  = len(test_chunks) * len(strategies_to_test) - pending_pairs
@@ -887,7 +887,6 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
                         # results do.
                         quality_targets   = [] if fixed else plan.targets,
                         concurrency       = self._config.encoding.concurrency,
-                        force             = False,
                         collector         = self._collector,
                         phase_recovery    = phase_recovery,
                         advance           = advance,

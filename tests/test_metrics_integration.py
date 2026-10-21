@@ -1104,7 +1104,11 @@ class TestOptimizationPhaseTiming:
         """
         import asyncio
 
-        from pyqenc.phases.encoding import _ChunkEncodingResult, _encode_pairs
+        from pyqenc.phases.encoding import (
+            _ChunkEncodingResult,
+            _encode_pairs,
+            _recover_pairs,
+        )
 
         strategy = _STRATEGY_SLOW_H265
 
@@ -1123,12 +1127,13 @@ class TestOptimizationPhaseTiming:
             reused       = False,
         )
 
-        stub_recovery = MagicMock()
-        stub_recovery.pairs = {}
+        # An empty work dir: the pair classifies ABSENT and runs.
+        stub_recovery = _recover_pairs(
+            tmp_path, [chunk.safe_name()], [strategy],
+        )
 
         def run(collector: MetricsCollector) -> None:
             with (
-                patch("pyqenc.phases.encoding._recover_encoding_attempts", return_value=stub_recovery),
                 patch("pyqenc.phases.encoding._encode_chunk_async", return_value=successful_result),
             ):
                 asyncio.run(
@@ -1138,8 +1143,8 @@ class TestOptimizationPhaseTiming:
                         strategies       = [strategy],
                         quality_targets  = [],
                         concurrency      = 1,
-                        force            = False,
                         collector        = collector,
+                        phase_recovery   = stub_recovery,
                         metric_prefix    = MetricKey.OPTIMIZATION,
                     )
                 )
@@ -1344,7 +1349,11 @@ class TestEncodingPhaseTiming:
         """
         import asyncio
 
-        from pyqenc.phases.encoding import _ChunkEncodingResult, _encode_pairs
+        from pyqenc.phases.encoding import (
+            _ChunkEncodingResult,
+            _encode_pairs,
+            _recover_pairs,
+        )
 
         chunk = _make_chunk_window(tmp_path / "source.mkv", 0.0, 1.0)
 
@@ -1373,8 +1382,10 @@ class TestEncodingPhaseTiming:
                         strategies       = [_STRATEGY_SLOW_H265],
                         quality_targets  = [],
                         concurrency      = 1,
-                        force            = False,
                         collector        = collector,
+                        phase_recovery   = _recover_pairs(
+                            tmp_path, [chunk.safe_name()], [_STRATEGY_SLOW_H265],
+                        ),
                     )
                 )
 
@@ -1403,7 +1414,11 @@ class TestEncodingPhaseTiming:
         """
         import asyncio
 
-        from pyqenc.phases.encoding import _ChunkEncodingResult, _encode_pairs
+        from pyqenc.phases.encoding import (
+            _ChunkEncodingResult,
+            _encode_pairs,
+            _recover_pairs,
+        )
 
         chunk = _make_chunk_window(tmp_path / "source.mkv", 0.0, 1.0)
 
@@ -1429,8 +1444,10 @@ class TestEncodingPhaseTiming:
                         strategies       = [_STRATEGY_SLOW_H265],
                         quality_targets  = [],
                         concurrency      = 1,
-                        force            = False,
                         collector        = collector,
+                        phase_recovery   = _recover_pairs(
+                            tmp_path, [chunk.safe_name()], [_STRATEGY_SLOW_H265],
+                        ),
                     )
                 )
 

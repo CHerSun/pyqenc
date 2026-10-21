@@ -234,7 +234,6 @@ class TestEncodeChunkQualitySearchV2Integration:
                 strategy        = strategy,
                 quality_targets = [target],
                 initial_quality     = Decimal("18.0"),
-                force           = False,
             )
 
         assert isinstance(result, _ChunkEncodingResult)
@@ -298,7 +297,6 @@ class TestEncodeChunkQualitySearchV2Integration:
                 strategy        = strategy,
                 quality_targets = [target],
                 initial_quality     = Decimal("18.0"),
-                force           = False,
             )
 
         assert result.success is True

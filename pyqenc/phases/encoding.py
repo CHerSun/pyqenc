@@ -417,12 +417,12 @@ def _write_winner_sidecar(
 
 
 # ---------------------------------------------------------------------------
-# Encoding recovery helpers
+# Recovery — winner presence classification (the winners layer only)
 # ---------------------------------------------------------------------------
 
 @dataclass
-class _EncodingRecovery:
-    """Recovery state for a ``(chunk_id, strategy)`` pair — the quality search as a whole."""
+class _PairRecovery:
+    """Recovery state for one ``(chunk_id, strategy)`` pair: is its winner there?"""
 
     chunk_id:     str
     strategy:     str
@@ -434,32 +434,32 @@ class _EncodingRecovery:
 class _PhaseRecovery:
     """Recovery result for an entire optimization or encoding phase."""
 
-    pairs:   dict[tuple[str, str], _EncodingRecovery] = field(default_factory=dict)
+    pairs:   dict[tuple[str, str], _PairRecovery] = field(default_factory=dict)
     pending: list[tuple[str, str]]                    = field(default_factory=list)
 
 
-def _recover_encoding_attempts(
+def _recover_pairs(
     work_dir:  Path,
     chunk_ids: list[str],
     strategies: list[Strategy],
     *,
     require_winner_sidecar: bool = True,
 ) -> _PhaseRecovery:
-    """Classify all ``(chunk_id, strategy)`` pairs from a single directory scan per strategy.
+    """Classify all ``(chunk_id, strategy)`` pairs by WINNER presence — a
+    single directory scan per strategy.
 
-    For each strategy, lists ``encoded/<strategy>/`` once and consumes the
-    STATIC expected names: a pair is ``COMPLETE`` iff ``<chunk_id>.mkv`` (the
-    winner file, composed by :class:`EncodedChunk`) is present, plus
-    ``<chunk_id>.yaml`` (the winner result sidecar) when attempts are
-    measured — a run with unmeasured attempts writes no winner sidecars, so
-    its video-only winners are complete as they are. No name parsing, no
-    per-pair globs, no file reads.
-
-    quality history for pending pairs is not pre-loaded: when the encoding worker
-    actually picks a pair up, each attempt the search proposes is checked
-    against the attempt workspace first — an existing file at that
-    (chunk, strategy, quality) is a cache hit (``[reused]``), so replaying an
-    unchanged pair re-runs the search without re-encoding.
+    Phase recovery is winners-only and presence-only: for each strategy, it
+    lists ``encoded/<strategy>/`` once and consumes the STATIC expected
+    names — a pair is ``COMPLETE`` iff ``<chunk_id>.mkv`` (the winner file,
+    composed by :class:`EncodedChunk`) is present, plus ``<chunk_id>.yaml``
+    (the winner result sidecar) when attempts are measured — a run with
+    unmeasured attempts writes no winner sidecars, so its video-only winners
+    are complete as they are. No name parsing, no per-pair globs, no file
+    reads. The attempts workspace (``encoding/``) is NEVER scanned here:
+    attempts are re-production state — each proposed attempt is checked
+    against its exact address (file presence + sidecar contents) when the
+    processing path picks the pair up, so replaying an unchanged pair
+    re-runs the search without re-encoding (``[reused]`` cache hits).
 
     Args:
         work_dir:   Pipeline working directory.
@@ -473,7 +473,7 @@ def _recover_encoding_attempts(
     Returns:
         ``_PhaseRecovery`` with per-pair recovery state and pending list.
     """
-    pairs:   dict[tuple[str, str], _EncodingRecovery] = {}
+    pairs:   dict[tuple[str, str], _PairRecovery] = {}
     pending: list[tuple[str, str]]                    = []
 
     complete_count = absent_count = 0
@@ -506,7 +506,7 @@ def _recover_encoding_attempts(
                 )
             )
             if complete:
-                pairs[(chunk_id, name)] = _EncodingRecovery(
+                pairs[(chunk_id, name)] = _PairRecovery(
                     chunk_id     = chunk_id,
                     strategy     = name,
                     state        = ArtifactState.COMPLETE,
@@ -514,7 +514,7 @@ def _recover_encoding_attempts(
                 )
                 complete_count += 1
             else:
-                pairs[(chunk_id, name)] = _EncodingRecovery(
+                pairs[(chunk_id, name)] = _PairRecovery(
                     chunk_id = chunk_id,
                     strategy = name,
                     state    = ArtifactState.PARTIAL
@@ -585,12 +585,27 @@ def _pair_rows(
     payload. Shared by OptimizationPhase (test pairs) and EncodingPhase
     (full set).
     """
-    chunk_ids      = [c.safe_name() for c in chunks]
-    strategy_names = [s.display_name() for s in strategies]
-    pair_recovery  = _recover_encoding_attempts(
-        work_dir, chunk_ids, strategies,
+    pair_recovery = _recover_pairs(
+        work_dir, [c.safe_name() for c in chunks], strategies,
         require_winner_sidecar = require_winner_sidecar,
     )
+    return _pair_rows_from(work_dir, pair_recovery, chunks, strategies)
+
+
+def _pair_rows_from(
+    work_dir:      Path,
+    pair_recovery: _PhaseRecovery,
+    chunks:        list[VideoStreamChunk],
+    strategies:    list[Strategy],
+) -> list[Artifact[EncodedChunk]]:
+    """Ledger rows over an ALREADY-classified :class:`_PhaseRecovery`.
+
+    The row-composition half of :func:`_pair_rows` for callers that
+    classified once and reuse the result (``EncodingPhase`` — recovery
+    classifies, execute consumes).
+    """
+    chunk_ids      = [c.safe_name() for c in chunks]
+    strategy_names = [s.display_name() for s in strategies]
     chunk_by_id    = {c.safe_name(): c for c in chunks}
     strategy_by_name = {s.display_name(): s for s in strategies}
 
@@ -1102,20 +1117,21 @@ class ChunkEncoder:
         strategy:         Strategy,
         quality_targets:  list[QualityTarget],
         initial_quality:      Decimal,
-        force:            bool  = False,
     ) -> _ChunkEncodingResult:
         """Encode the chunk window, adjusting quality until targets are met.
 
         The window reads the source directly (``chunk.as_input()``); quality
         compares the attempt against the same window (per-side crop: empty for
-        the attempt, the detected crop for the source window).
+        the attempt, the detected crop for the source window). An existing
+        attempt at the proposed address is accepted from its sidecar whenever
+        it is complete — attempt reuse is never bypassed (``--force`` is
+        wipe permission at JobPhase, not a re-encode command).
 
         Args:
             chunk:           The chunk window to encode.
             strategy:        Encoding strategy.
             quality_targets: Quality targets to meet.
             initial_quality:     Initial quality value (if no history available).
-            force:           If ``False``, reuse existing encoding that meets targets.
 
         Returns:
             ChunkEncodingResult with encoding outcome.
@@ -1131,20 +1147,79 @@ class ChunkEncoder:
         )
         current_q      = initial_quality
         attempt_number = 0
-        final_attempt:      AttemptMetadata | None = None
-        best_fail_attempt:  AttemptMetadata | None = None
-        last_frame_count:   int                    = 0
-        frame_counts:  dict[Path, int]             = {}
-        """Attempt file path → its frame count when known this session (fresh
-        encode run, or carried from the attempt sidecar on a cache hit /
-        re-measure; 0 = could not be determined).  Feeds the winner sidecar
-        and the result's frame_count."""
-        all_metrics_by_path: dict[Path, dict[str, float]] = {}
-        """Attempt file path → its full measured metrics (every metric, not
-        target-filtered) — same data the attempt sidecar persists.  Feeds the
-        winner result sidecar, whose metrics contract is "all measured
-        metric values of the winning attempt"."""
-        _any_real_work: bool                       = False
+        final_attempt:     AttemptMetadata | None = None
+        best_fail_attempt: AttemptMetadata | None = None
+        last_frame_count:  int                    = 0
+        _any_real_work:    bool                   = False
+        best_metrics:      dict[str, float]       = {}
+        best_frame_count:  int                    = 0
+        """Winner snapshots — the best attempt's full metrics (every metric,
+        not target-filtered — the same data the attempt sidecar persists) and
+        frame count, taken when the best changes; only the winner's facts are
+        ever read at finalize."""
+
+        def record_attempt(
+            attempt:     AttemptMetadata,
+            all_metrics: dict[str, float],
+            frame_count: int,
+            targets_met: bool,
+            *,
+            reused:      bool,
+        ) -> Decimal | None:
+            """Conclude one attempt: judge it, log the attempt line, feed the
+            search, and snapshot the best.
+
+            Shared by the cache-hit and the fresh/re-measured paths — the
+            judging and presentation are identical, only provenance differs
+            (the ``[reused]`` tag).
+
+            Args:
+                attempt:     The concluded attempt (its quality is the address).
+                all_metrics: Every measured metric of the attempt.
+                frame_count: Frames of the attempt file (0 = unknown).
+                targets_met: The live comparator verdict.
+                reused:      Whether the attempt was accepted from disk.
+
+            Returns:
+                The next proposed quality, or ``None`` when the search is done.
+            """
+            nonlocal final_attempt, best_fail_attempt
+            nonlocal best_metrics, best_frame_count
+            targets_set  = {f"{t.metric}_{t.statistic}" for t in quality_targets}
+            metrics_dict = {k: v for k, v in all_metrics.items() if k in targets_set}
+            prev_best = search.best_quality
+            next_q    = search.record(attempt.quality, metrics_dict)
+            best_string = ""
+            if search.best_targets_met and (prev_best is None or search.best_quality != prev_best):
+                best_string   = " NEW BEST"
+                final_attempt = attempt
+                best_metrics, best_frame_count = all_metrics, frame_count
+            elif not search.best_targets_met and search.best_quality == attempt.quality:
+                best_fail_attempt = attempt
+                best_metrics, best_frame_count = all_metrics, frame_count
+            worst          = QualitySearchBase.find_worst_target(metrics_dict, quality_targets)
+            metric_summary = fmt_metric_summary(
+                metrics_dict,
+                worst_key    = f"{worst[0].metric}_{worst[0].statistic}" if worst else None,
+                worst_passed = (worst[1] >= 0) if worst else True,
+            )
+            pass_fail = (
+                f"{SUCCESS_SYMBOL_MINOR} pass"
+                if targets_met
+                else f"{FAILURE_SYMBOL_MINOR} miss"
+            )
+            summary_suffix = f" ({metric_summary})" if metric_summary else ""
+            reused_tag = " [reused]" if reused else ""
+            logger.info(
+                fmt_chunk_attempt_result(
+                    strategy.display_name(), chunk.safe_name(), attempt_number,
+                    f"{pass_fail} with {strategy.codec.quality_label} "
+                    f"{str(attempt.quality).rjust(strategy.codec.quality_log_padding)}"
+                    f"{summary_suffix}{best_string}{reused_tag}",
+                    self._visual_hash,
+                )
+            )
+            return next_q
 
         while True:
             attempt_number += 1
@@ -1167,101 +1242,65 @@ class ChunkEncoder:
             output_dir = _attempts_dir(self.work_dir, strategy)
             output_dir.mkdir(parents=True, exist_ok=True)
 
-            # Check for an existing attempt at the exact proposed address
-            # (exact-name compose, no scan — Req 9).
-            goto_eval   = False
+            # Existing attempt at the exact proposed address (exact-name
+            # compose, no scan — Req 9): accepted from its sidecar when the
+            # sidecar is complete; a missing/incomplete/stale sidecar
+            # re-measures below.
             output_file: Path | None = None
-            attempt_frames: int = 0
-            if not force:
-                existing = self._check_existing_encoding(
-                    chunk.safe_name(), strategy, current_q
+            attempt_frames = 0
+            existing = self._check_existing_encoding(
+                chunk.safe_name(), strategy, current_q
+            )
+            sidecar = (
+                load_model(existing.path.with_suffix(".yaml"), AttemptSidecar)
+                if existing is not None
+                else None
+            )
+            sidecar_valid = (
+                existing is not None
+                and sidecar is not None
+                and sidecar.sampling == self._sampling
+                and sidecar.frame_count > 0
+                and {f"{t.metric}_{t.statistic}" for t in quality_targets}.issubset(sidecar.metrics)
+            )
+            if sidecar_valid and sidecar is not None:
+                # Full cache hit — no real work performed.
+                all_metrics = dict(sidecar.metrics)
+                targets_met = all(
+                    all_metrics.get(f"{t.metric}_{t.statistic}", 0.0) >= t.value
+                    for t in quality_targets
                 )
-                if existing is not None:
-                    sidecar = load_model(existing.path.with_suffix(".yaml"), AttemptSidecar)
-                    # Validate sidecar contains all required metric keys.
-                    required_keys  = {f"{t.metric}_{t.statistic}" for t in quality_targets}
-                    sampling_stale = (
-                        sidecar is not None
-                        and sidecar.sampling != self._sampling
-                    )
-                    # The file's frame count survives regardless of sidecar
-                    # staleness — re-measure never changes the encoded file
-                    # (0 = not on record). A 0 count marks the sidecar
-                    # incomplete (Req 9a: frame count present) — the re-measure
-                    # below re-derives it from the metric run's whole-file
-                    # decode.
-                    file_frames  = sidecar.frame_count if sidecar is not None else 0
-                    sidecar_valid = (
-                        sidecar is not None
-                        and not sampling_stale
-                        and file_frames > 0
-                        and required_keys.issubset(sidecar.metrics)
-                    )
-                    if sidecar_valid and sidecar is not None:
-                        # Full cache hit — no real work performed.
-                        frame_counts[existing.path] = file_frames
-                        all_sidecar_metrics: dict[str, float] = dict(sidecar.metrics)
-                        all_metrics_by_path[existing.path] = all_sidecar_metrics
-                        targets_set_reused = {f"{t.metric}_{t.statistic}" for t in quality_targets}
-                        metrics_dict: dict[str, float] = {
-                            k: v for k, v in all_sidecar_metrics.items() if k in targets_set_reused
-                        }
-                        targets_met: bool = all(
-                            all_sidecar_metrics.get(f"{t.metric}_{t.statistic}", 0.0) >= t.value
-                            for t in quality_targets
-                        )
-                        _worst         = QualitySearchBase.find_worst_target(metrics_dict, quality_targets)
-                        metric_summary = fmt_metric_summary(
-                            metrics_dict,
-                            worst_key    = f"{_worst[0].metric}_{_worst[0].statistic}" if _worst else None,
-                            worst_passed = (_worst[1] >= 0) if _worst else True,
-                        )
-                        pass_fail      = (
-                            f"{SUCCESS_SYMBOL_MINOR} pass"
-                            if targets_met
-                            else f"{FAILURE_SYMBOL_MINOR} miss"
-                        )
-                        prev_best = search.best_quality
-                        next_q    = search.record(existing.quality, metrics_dict)
+                next_q = record_attempt(
+                    existing, all_metrics, sidecar.frame_count, targets_met,
+                    reused=True,
+                )
+                if next_q is None:
+                    break
+                current_q = next_q
+                continue
 
-                        best_string = ""
-                        if search.best_targets_met and (prev_best is None or search.best_quality != prev_best):
-                            best_string   = " NEW BEST"
-                            final_attempt = existing
-                        elif not search.best_targets_met and search.best_quality == existing.quality:
-                            best_fail_attempt = existing
-
-                        summary_suffix = f" ({metric_summary})" if metric_summary else ""
-                        logger.info(
-                            fmt_chunk_attempt_result(
-                                strategy.display_name(), chunk.safe_name(), attempt_number,
-                                f"{pass_fail} with {strategy.codec.quality_label} {str(existing.quality).rjust(strategy.codec.quality_log_padding)}{summary_suffix}{best_string} [reused]",
-                                self._visual_hash,
-                            )
-                        )
-
-                        if next_q is None:
-                            break
-                        current_q = next_q
-                        continue
-                    else:
-                        # File exists but sidecar is missing, incomplete, or stale — re-measure.
-                        reason = (
-                            f"sampling changed ({sidecar.sampling if sidecar is not None else '?'} → {self._sampling})"
-                            if sampling_stale
-                            else "sidecar missing or incomplete"
-                        )
-                        logger.info(
-                            fmt_chunk(strategy.display_name(), chunk.safe_name(),
-                                f"existing attempt ({strategy.codec.quality_label.lower()}={str(existing.quality).rjust(strategy.codec.quality_log_padding)}) — re-evaluating metrics ({reason})",
-                                self._visual_hash),
-                        )
-                        _any_real_work  = True
-                        output_file     = existing.path
-                        attempt_frames  = file_frames
-                        goto_eval       = True
-
-            if not goto_eval:
+            if existing is not None:
+                # File exists but sidecar is missing, incomplete, or stale — re-measure.
+                reason = (
+                    f"sampling changed ({sidecar.sampling if sidecar is not None else '?'} → {self._sampling})"
+                    if sidecar is not None and sidecar.sampling != self._sampling
+                    else "sidecar missing or incomplete"
+                )
+                logger.info(
+                    fmt_chunk(strategy.display_name(), chunk.safe_name(),
+                        f"existing attempt ({strategy.codec.quality_label.lower()}={str(existing.quality).rjust(strategy.codec.quality_log_padding)}) — re-evaluating metrics ({reason})",
+                        self._visual_hash),
+                )
+                _any_real_work = True
+                output_file    = existing.path
+                # The file's frame count survives regardless of sidecar
+                # staleness — re-measure never changes the encoded file
+                # (0 = not on record). A 0 count marks the sidecar
+                # incomplete (Req 9a: frame count present) — the re-measure
+                # below re-derives it from the metric run's whole-file
+                # decode.
+                attempt_frames = sidecar.frame_count if sidecar is not None else 0
+            else:
                 # Encode — real work.
                 _any_real_work = True
                 output_file    = self._get_attempt_path(
@@ -1352,62 +1391,26 @@ class ChunkEncoder:
                 all_metrics         = {}
                 attempt_targets_met = True
 
-            # Collect ALL measured metrics (not filtered to current targets) for the sidecar
-            # so the quality history is reusable when quality targets change.
-            # Targeted metrics subset (for search and convergence decisions).
-            targets_set  = {f"{t.metric}_{t.statistic}" for t in quality_targets}
-            metrics_dict = {k: v for k, v in all_metrics.items() if k in targets_set}
-
-            # Record the attempt's in-memory facts; the per-attempt sidecar
-            # persists them atomically — attempts without measurement have
-            # no facts to record (TODO §83: no measurement facts, no sidecars).
-            frame_counts[output_file] = attempt_frames
-            all_metrics_by_path[output_file] = all_metrics
+            # The per-attempt sidecar persists the facts atomically —
+            # attempts without measurement have no facts to record
+            # (TODO §83: no measurement facts, no sidecars).
             if self._measure_attempts:
                 _write_attempt_sidecar(
                     output_file, all_metrics,
                     self._sampling, attempt_frames,
                 )
 
-            # Build AttemptMetadata for this attempt.
-            attempt_meta = AttemptMetadata(
-                path            = output_file,
-                chunk_id        = chunk.safe_name(),
-                strategy        = strategy.display_name(),
-                quality         = current_q,
-                file_size_bytes = output_file.stat().st_size,
+            next_q = record_attempt(
+                AttemptMetadata(
+                    path            = output_file,
+                    chunk_id        = chunk.safe_name(),
+                    strategy        = strategy.display_name(),
+                    quality         = current_q,
+                    file_size_bytes = output_file.stat().st_size,
+                ),
+                all_metrics, attempt_frames, attempt_targets_met,
+                reused=False,
             )
-
-            prev_best = search.best_quality
-            next_q    = search.record(current_q, metrics_dict)
-
-            best_string = ""
-            if search.best_targets_met and (prev_best is None or search.best_quality != prev_best):
-                best_string   = " NEW BEST"
-                final_attempt = attempt_meta
-            elif not search.best_targets_met and search.best_quality == current_q:
-                best_fail_attempt = attempt_meta
-
-            _worst         = QualitySearchBase.find_worst_target(metrics_dict, quality_targets)
-            metric_summary = fmt_metric_summary(
-                metrics_dict,
-                worst_key    = f"{_worst[0].metric}_{_worst[0].statistic}" if _worst else None,
-                worst_passed = (_worst[1] >= 0) if _worst else True,
-            )
-            pass_fail      = (
-                f"{SUCCESS_SYMBOL_MINOR} pass"
-                if attempt_targets_met
-                else f"{FAILURE_SYMBOL_MINOR} miss"
-            )
-            summary_suffix = f" ({metric_summary})" if metric_summary else ""
-            logger.info(
-                fmt_chunk_attempt_result(
-                    strategy.display_name(), chunk.safe_name(), attempt_number,
-                    f"{pass_fail} with {strategy.codec.quality_label} {str(current_q).rjust(strategy.codec.quality_log_padding)}{summary_suffix}{best_string}",
-                    self._visual_hash,
-                )
-            )
-
             if next_q is None:
                 break
 
@@ -1416,80 +1419,56 @@ class ChunkEncoder:
 
         # --- Post-loop: finalize ---
 
-        if search.best_targets_met and final_attempt is not None:
-            assert search.best_quality is not None, "a passing attempt implies a measured quality"
-            worst      = QualitySearchBase.find_worst_target(search.best_metrics, quality_targets) if search.best_metrics else None
-            limited_by = f"{worst[0].metric}_{worst[0].statistic}" if worst is not None else None
-            logger.info(fmt_chunk_final(
-                strategy.display_name(), chunk.safe_name(), search.best_quality, attempt_number,
-                strategy.codec.quality_label, self._visual_hash, strategy.codec.quality_log_padding,
-                limited_by,
-            ))
-            self._finalize_winning_attempt(
-                strategy        = strategy,
-                chunk_id        = chunk.safe_name(),
-                winning_attempt = final_attempt.path,
-                quality         = search.best_quality,
-                metrics         = all_metrics_by_path.get(final_attempt.path, {}),
-                frame_count     = frame_counts.get(final_attempt.path, 0),
-                quality_targets = quality_targets,
-                targets_met     = True,
-            )
-        elif not search.best_targets_met and best_fail_attempt is not None:
+        winner = final_attempt if final_attempt is not None else best_fail_attempt
+        if winner is not None:
             assert search.best_quality is not None, "a surviving attempt implies a measured quality"
-            # Every accepted winner logs an acceptance line in the uniform
-            # success shape, with severity-carrying symbols: a single-point
-            # (fixed) domain misses the anchor targets by construction — a
-            # soft ≈ at INFO (the anchor is an approximation, not a user
-            # target); a ranged domain that exhausted without passing is a
-            # real — if bypassable — problem: ❌ at WARNING, distinct from
-            # per-attempt ✘ misses.
             worst = (
                 QualitySearchBase.find_worst_target(search.best_metrics, quality_targets)
                 if search.best_metrics else None
             )
             limited_by = f"{worst[0].metric}_{worst[0].statistic}" if worst is not None else None
-            if strategy.codec.quality_better == strategy.codec.quality_worse:
-                status, label, emit = (
-                    f"miss {APPROXIMATE_INDICATOR_SYMBOL}",
-                    strategy.codec.quality_label, logger.info,
-                )
+            if search.best_targets_met:
+                logger.info(fmt_chunk_final(
+                    strategy.display_name(), chunk.safe_name(), search.best_quality, attempt_number,
+                    strategy.codec.quality_label, self._visual_hash, strategy.codec.quality_log_padding,
+                    limited_by,
+                ))
             else:
-                status, label, emit = (
-                    f"exhausted {FAILURE_SYMBOL_MAJOR}",
-                    f"best {strategy.codec.quality_label}", logger.warning,
-                )
-            emit(fmt_chunk_final(
-                strategy.display_name(), chunk.safe_name(), search.best_quality, attempt_number,
-                quality_label    = label,
-                use_visual_hash  = self._visual_hash,
-                quality_padding  = strategy.codec.quality_log_padding,
-                limited_by       = limited_by,
-                status           = status,
-            ))
+                # Every accepted winner logs an acceptance line in the uniform
+                # success shape, with severity-carrying symbols: a single-point
+                # (fixed) domain misses the anchor targets by construction — a
+                # soft ≈ at INFO (the anchor is an approximation, not a user
+                # target); a ranged domain that exhausted without passing is a
+                # real — if bypassable — problem: ❌ at WARNING, distinct from
+                # per-attempt ✘ misses.
+                if strategy.codec.quality_better == strategy.codec.quality_worse:
+                    status, label, emit = (
+                        f"miss {APPROXIMATE_INDICATOR_SYMBOL}",
+                        strategy.codec.quality_label, logger.info,
+                    )
+                else:
+                    status, label, emit = (
+                        f"exhausted {FAILURE_SYMBOL_MAJOR}",
+                        f"best {strategy.codec.quality_label}", logger.warning,
+                    )
+                emit(fmt_chunk_final(
+                    strategy.display_name(), chunk.safe_name(), search.best_quality, attempt_number,
+                    quality_label    = label,
+                    use_visual_hash  = self._visual_hash,
+                    quality_padding  = strategy.codec.quality_log_padding,
+                    limited_by       = limited_by,
+                    status           = status,
+                ))
             self._finalize_winning_attempt(
                 strategy        = strategy,
                 chunk_id        = chunk.safe_name(),
-                winning_attempt = best_fail_attempt.path,
+                winning_attempt = winner.path,
                 quality         = search.best_quality,
-                metrics         = all_metrics_by_path.get(best_fail_attempt.path, {}),
-                frame_count     = frame_counts.get(best_fail_attempt.path, 0),
+                metrics         = best_metrics,
+                frame_count     = best_frame_count,
                 quality_targets = quality_targets,
-                targets_met     = False,
+                targets_met     = search.best_targets_met,
             )
-            final_attempt = best_fail_attempt
-        elif search.best_quality is None:
-            logger.warning(
-                "%s search space exhausted for chunk %s strategy %s after %d attempts",
-                strategy.codec.quality_label, chunk.safe_name(), strategy.display_name(), attempt_number,
-            )
-
-        # Progress bar advance — after the loop so ETA reflects actual encode time.
-        if not _any_real_work:
-            # All cache hits — chunk was fully recovered from existing artifacts.
-            # Same winner rule as the fresh path: a passing attempt when one exists,
-            # otherwise the best failing attempt (still the best recovered state).
-            winner = final_attempt if final_attempt is not None else best_fail_attempt
             return _ChunkEncodingResult(
                 chunk_id      = chunk.safe_name(),
                 strategy      = strategy.display_name(),
@@ -1498,35 +1477,26 @@ class ChunkEncoder:
                 final_quality = search.best_quality,
                 attempts      = attempt_number,
                 encoded_file  = winner,
-                frame_count   = frame_counts.get(winner.path, 0) if winner is not None else 0,
-                reused        = True,
+                frame_count   = best_frame_count,
+                reused        = not _any_real_work,
             )
 
-        if final_attempt is not None or best_fail_attempt is not None:
-            winning = final_attempt if final_attempt is not None else best_fail_attempt
-            assert winning is not None, "the branch condition guarantees a winner"
-            return _ChunkEncodingResult(
-                chunk_id      = chunk.safe_name(),
-                strategy      = strategy.display_name(),
-                success       = True,
-                targets_met   = search.best_targets_met,
-                final_quality = search.best_quality,
-                attempts      = attempt_number,
-                encoded_file  = winning,
-                frame_count   = frame_counts.get(winning.path, 0),
-                reused        = False,
-            )
-        else:
-            error_msg = f"Failed to meet quality targets after {attempt_number} attempts"
-            logger.error("Chunk %s: %s", chunk.safe_name(), error_msg)
-            return _ChunkEncodingResult(
-                chunk_id    = chunk.safe_name(),
-                strategy    = strategy.display_name(),
-                success     = False,
-                targets_met = False,
-                attempts    = attempt_number,
-                error       = error_msg,
-            )
+        # No surviving attempt — the search space was exhausted without a
+        # winner to promote.
+        logger.warning(
+            "%s search space exhausted for chunk %s strategy %s after %d attempts",
+            strategy.codec.quality_label, chunk.safe_name(), strategy.display_name(), attempt_number,
+        )
+        error_msg = f"Failed to meet quality targets after {attempt_number} attempts"
+        logger.error("Chunk %s: %s", chunk.safe_name(), error_msg)
+        return _ChunkEncodingResult(
+            chunk_id    = chunk.safe_name(),
+            strategy    = strategy.display_name(),
+            success     = False,
+            targets_met = False,
+            attempts    = attempt_number,
+            error       = error_msg,
+        )
 
 
 async def _encode_chunk_async(
@@ -1535,7 +1505,6 @@ async def _encode_chunk_async(
     strategy:        Strategy,
     quality_targets: list[QualityTarget],
     initial_quality:     Decimal,
-    force:           bool,
 ) -> _ChunkEncodingResult:
     """Async wrapper for chunk encoding.
 
@@ -1545,7 +1514,6 @@ async def _encode_chunk_async(
         strategy:        Encoding strategy.
         quality_targets: Quality targets.
         initial_quality:     Initial quality value.
-        force:           Whether to force re-encoding.
 
     Returns:
         ChunkEncodingResult
@@ -1558,7 +1526,6 @@ async def _encode_chunk_async(
         strategy,
         quality_targets,
         initial_quality,
-        force,
     )
 
 
@@ -1568,9 +1535,8 @@ async def _encode_pairs(
     strategies:       list[Strategy],
     quality_targets:  list[QualityTarget],
     concurrency:      int,
-    force:            bool,
     collector:        MetricsCollector,
-    phase_recovery:   _PhaseRecovery | None                                  = None,
+    phase_recovery:   _PhaseRecovery,
     advance:          Callable[[int | float, AdvanceState], None] | None = None,
     metric_prefix:    MetricKey                                                  = MetricKey.ENCODING,
 ) -> _EncodingResult:
@@ -1593,13 +1559,11 @@ async def _encode_pairs(
         strategies:     List of strategies to use.
         quality_targets: Quality targets to meet.
         concurrency:    Maximum simultaneous (encode+measure) jobs.
-        force:          Whether to force re-encoding.
         collector:      Metrics collector for timing and convergence tracking.
                         ``step(metric_prefix, convergence_update=...)`` is
                         called after each chunk/strategy pair converges.
-        phase_recovery: Optional recovery state from ``recover_attempts``; when
-                        provided, ``COMPLETE`` pairs are skipped and ``PARTIAL``
-                        pairs resume from their recovered ``QualitySearch`` state.
+        phase_recovery: The run's pair classification (``COMPLETE`` pairs
+                        are seeded and skipped).
         advance:        Optional advance callable from ``ProgressBar``; called
                         once per pair completion with the pair's chunk
                         duration — the bar is duration-weighted (Σ chunk
@@ -1614,30 +1578,29 @@ async def _encode_pairs(
 
     # Seed the result with COMPLETE pairs from recovery (skip them in the job list)
     complete_pairs: set[tuple[str, str]] = set()
-    if phase_recovery is not None:
-        for chunk in chunks:
-            for strategy in strategies:
-                pair_recovery = phase_recovery.pairs[(chunk.safe_name(), strategy.display_name())]
-                if pair_recovery.state == ArtifactState.COMPLETE:
-                    logger.debug(
-                        "Skipping COMPLETE pair %s/%s (encoding result sidecar valid)",
-                        chunk.safe_name(), strategy.display_name(),
-                    )
-                    # COMPLETE recovery rows always carry their winning file.
-                    assert pair_recovery.winning_file is not None, (
-                        f"winning file guaranteed for COMPLETE pair "
-                        f"{chunk.safe_name()}/{strategy.display_name()}"
-                    )
-                    result.encoded_chunks.setdefault(
-                        strategy.display_name(), [],
-                    ).append(_build_encoded_chunk(
-                        chunk        = chunk,
-                        strategy     = strategy,
-                        path         = pair_recovery.winning_file,
-                        frame_count  = 0,     # unknown on recovery
-                    ))
-                    result.reused_count += 1
-                    complete_pairs.add((chunk.safe_name(), strategy.display_name()))
+    for chunk in chunks:
+        for strategy in strategies:
+            pair_recovery = phase_recovery.pairs[(chunk.safe_name(), strategy.display_name())]
+            if pair_recovery.state == ArtifactState.COMPLETE:
+                logger.debug(
+                    "Skipping COMPLETE pair %s/%s (encoding result sidecar valid)",
+                    chunk.safe_name(), strategy.display_name(),
+                )
+                # COMPLETE recovery rows always carry their winning file.
+                assert pair_recovery.winning_file is not None, (
+                    f"winning file guaranteed for COMPLETE pair "
+                    f"{chunk.safe_name()}/{strategy.display_name()}"
+                )
+                result.encoded_chunks.setdefault(
+                    strategy.display_name(), [],
+                ).append(_build_encoded_chunk(
+                    chunk        = chunk,
+                    strategy     = strategy,
+                    path         = pair_recovery.winning_file,
+                    frame_count  = 0,     # unknown on recovery
+                ))
+                result.reused_count += 1
+                complete_pairs.add((chunk.safe_name(), strategy.display_name()))
 
     pending = [
         (chunk, strategy)
@@ -1661,7 +1624,6 @@ async def _encode_pairs(
             strategy,
             quality_targets,
             chunk_initial_quality,
-            force,
         )
 
         if chunk_result.success:
@@ -1901,148 +1863,6 @@ def _scan_winner_sidecars(
                     ],
                 ))
     return _WinnerScan(summaries=summaries, frames_known=frames_known, frames=frames)
-
-
-def encode_all_chunks(
-    chunks:            list[VideoStreamChunk],
-    strategies:        list[Strategy],
-    quality_targets:   list[QualityTarget],
-    work_dir:          Path,
-    collector:         MetricsCollector,
-    concurrency:       int,
-    force:           bool              = False,
-    dry_run:         bool              = False,
-    crop_params:     CropParams | None = None,
-    encoding_yaml:   Path | None       = None,
-    cleanup_level:   CleanupLevel      = CleanupLevel.NONE,
-    visual_hash:     bool              = True,
-    sampling: int              = 10,
-    metric_prefix:   MetricKey         = MetricKey.ENCODING,
-    measure_attempts: bool             = True,
-) -> _EncodingResult:
-    """Encode all chunks with the quality-targeted search.
-
-    This is the main entry point for the encoding phase. It handles:
-    - Classifying all ``(chunk, strategy)`` pairs via
-      ``_recover_encoding_attempts``
-    - Skipping ``COMPLETE`` pairs and resuming pending pairs
-    - Bounded encoding of chunks that need work
-
-    ``encoding.yaml`` persistence and probe-mismatch validation are owned by
-    ``EncodingPhase``.
-
-    Args:
-        chunks:            List of chunk windows to encode.
-        strategies:        List of resolved ``Strategy`` objects to use.
-        quality_targets:   Quality targets to meet.
-        work_dir:          Working directory for artifacts.
-        collector:         Metrics collector for timing and convergence tracking.
-        concurrency:       Maximum simultaneous (encode+measure) jobs.
-        force:             If False, reuse existing encodings that meet current targets
-        dry_run:           If True, only report what would be done without encoding
-        crop_params:       Crop parameters to apply uniformly to every chunk attempt.
-                           When ``None``, no cropping is applied.
-        encoding_yaml:     Unused — ``encoding.yaml`` persistence is owned by
-                           ``EncodingPhase``.
-        cleanup_level:     Controls deletion of intermediate attempt files after each
-                           pair converges.
-        sampling:  Frame subsampling factor for quality metric generation.
-                           Passed through to ``ChunkEncoder`` and then to
-                           ``QualityMeasurer.measure_chunk``.
-        measure_attempts:  Whether encoded attempts get quality measurements
-                           (the ``ChunkEncoder`` seam; default = measure).
-
-    Returns:
-        EncodingResult with paths to encoded chunks and statistics
-    """
-    logger.debug(
-        "Encoding phase: %d chunks, %d strategies, %d quality targets",
-        len(chunks), len(strategies), len(quality_targets),
-    )
-
-    # No stale-.tmp scan here: the sole caller (``EncodingPhase._execute``)
-    # always follows ``EncodingPhase._recover()`` — which already cleaned the
-    # identical ``encoding/`` tree — and nothing writes ``.tmp`` under it
-    # between the two (the only intervening write is ``encoding.yaml`` at the
-    # work-dir root, outside this tree).
-
-    # Artifact recovery: classify every (chunk, strategy) pair.
-    chunk_ids      = [c.safe_name() for c in chunks]
-    strategy_names = [s.display_name() for s in strategies]
-    phase_recovery = _recover_encoding_attempts(
-        work_dir, chunk_ids, strategies,
-        require_winner_sidecar = measure_attempts,
-    )
-
-    if dry_run:
-        pending_count  = len(phase_recovery.pending)
-        complete_count = len(chunk_ids) * len(strategy_names) - pending_count
-        logger.info("[DRY-RUN] Encoding recovery: %d COMPLETE, %d pending", complete_count, pending_count)
-        if pending_count == 0:
-            logger.info("[DRY-RUN] Status: Complete (all chunks already encoded)")
-        else:
-            logger.info("[DRY-RUN] Status: Needs work (%d pair(s) pending)", pending_count)
-        result = _EncodingResult()
-        result.reused_count = complete_count
-        return result
-
-    # Create encoder
-    encoder = ChunkEncoder(
-        quality_measurer = QualityMeasurer(work_dir),
-        work_dir          = work_dir,
-        collector         = collector,
-        crop_params       = crop_params,
-        cleanup_level     = cleanup_level,
-        visual_hash       = visual_hash,
-        sampling         = sampling,
-        metric_prefix     = metric_prefix,
-        measure_attempts  = measure_attempts,
-    )
-
-    # Run bounded encoding — COMPLETE pairs are skipped inside _encode_pairs
-    pending_count  = sum(1 for r in phase_recovery.pairs.values() if r.state != ArtifactState.COMPLETE)
-    complete_count = len(chunks) * len(strategies) - pending_count
-    logger.info(
-        "Starting encoding: %d pair(s) to encode, %d already complete",
-        pending_count, complete_count,
-    )
-    logger.debug("Starting bounded encoding with concurrency %d", concurrency)
-    # Duration-weighted bar (Σ chunk durations × strategies): the fraction
-    # and ETA track content duration; progress advances once per completed
-    # pair, by that pair's duration (count-based reporting, weighted basis).
-    chunks_by_id = {c.safe_name(): c for c in chunks}
-    total_seconds = sum(c.end_timestamp - c.start_timestamp for c in chunks) * len(strategies)
-    with ProgressBar(total_seconds, title="Encoding", total_count=len(chunks) * len(strategies)) as advance:
-        # Pre-advance the bar for already-complete pairs (their full duration)
-        for r in phase_recovery.pairs.values():
-            if r.state == ArtifactState.COMPLETE:
-                c = chunks_by_id[r.chunk_id]
-                advance(c.end_timestamp - c.start_timestamp, AdvanceState.SKIPPED)
-
-        # Run bounded encoding
-        result = asyncio.run(
-            _encode_pairs(
-                encoder         = encoder,
-                chunks          = chunks,
-                strategies      = strategies,
-                quality_targets = quality_targets,
-                concurrency     = concurrency,
-                force           = force,
-                phase_recovery  = phase_recovery,
-                advance         = advance,
-                collector       = collector,
-                metric_prefix   = metric_prefix,
-            )
-        )
-        advance(0, AdvanceState.COMPLETE)
-
-    if result.failed_chunks:
-        # Chunk names at ERROR severity; the phase-level closer carries the
-        # outcome verdict with the counts folded into its message.
-        logger.error("Failed chunks: %s", ", ".join(result.failed_chunks))
-
-    return result
-
 # ---------------------------------------------------------------------------
 # EncodingPhase — Phase object
 # ---------------------------------------------------------------------------
@@ -2084,8 +1904,8 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
     """Phase object for quality-search chunk encoding.
 
     Owns artifact enumeration, recovery, invalidation, execution, and logging
-    for the encoding phase.  Execution delegates to the ``encode_all_chunks``
-    helper. The uniform run footprint is inherited from :class:`Phase`.
+    for the encoding phase. The uniform run footprint is inherited from
+    :class:`Phase`.
 
     Args:
         config: Full pipeline configuration.
@@ -2111,6 +1931,10 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
         self._persisted:    EncodingSidecar | None   = None
         """The replay aggregate loaded from ``encoding.yaml`` during recovery
         (``None`` when absent) — the fast-exit source for the summary."""
+        self._pairs:        _PhaseRecovery | None    = None
+        """The pair classification produced by the last ``_recover()`` —
+        consumed by ``_execute()`` so the run classifies once (nothing
+        writes ``encoded/`` between the two hooks within one ``run()``)."""
         self.quality_labels: dict[str, str]           = {}
         """Maps strategy name → quality_label (e.g. ``'CRF'``, ``'CQ'``) for all
         strategies resolved during the last ``run()`` call.  Empty until ``run()``
@@ -2329,11 +2153,13 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
         # Step 3: the per-pair ledger (winning attempt per chunk x strategy,
         # presence-based) plus the winner-layer curation.  Completeness is
         # attempt-aware: video-only winners are complete when the run's
-        # attempts are unmeasured.
-        rows: list[Artifact] = _pair_rows(
-            work_dir, chunks, strategies,
+        # attempts are unmeasured.  The classification is stashed for
+        # ``_execute`` — one scan per run, not one per hook.
+        self._pairs = _recover_pairs(
+            work_dir, [c.safe_name() for c in chunks], strategies,
             require_winner_sidecar = self._deps[ProbePhase].plan.measures_attempts,
         )
+        rows = _pair_rows_from(work_dir, self._pairs, chunks, strategies)
         rows += _curate_winner_layer(work_dir, strategies, chunks)
         return Recovery.from_artifacts(rows)
 
@@ -2446,24 +2272,14 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
         """
         work_dir = self._deps[JobPhase].work_dir
         probe_result = self._deps[ProbePhase]
-        crop         = probe_result.crop
 
-        # Resolve chunks and strategies from dependencies
+        # Resolve chunks and strategies from dependencies (non-empty —
+        # ``_recover`` already raised RecoveryError otherwise).
         chunking_result     = self._deps[ChunkingPhase]
         optimization_result = self._deps[OptimizationPhase]
 
         chunks: list[VideoStreamChunk] = [a.payload for a in chunking_result.chunks]
         strategies = optimization_result.selected_strategies
-
-        if not chunks:
-            err = "No chunks available from ChunkingPhase"
-            logger.critical(err)
-            return self._make_result(PhaseOutcome.FAILED, [], err)
-
-        if not strategies:
-            err = "No strategies available from OptimizationPhase"
-            logger.critical(err)
-            return self._make_result(PhaseOutcome.FAILED, [], err)
 
         # Cache quality labels for downstream phases (e.g. MergePhase quality plot)
         self.quality_labels = {s.display_name(): s.codec.quality_label for s in strategies}
@@ -2475,23 +2291,60 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
         # because there is no key to certify mid-run.
         encoding_yaml = work_dir / EncodingPhase.SIDECAR_NAME
 
-        # Run encoding via the existing encode_all_chunks function
-        enc_result = encode_all_chunks(
-            chunks           = chunks,
-            strategies       = strategies,
-            quality_targets  = presentation_targets,
-            work_dir         = work_dir,
-            collector        = self._collector,
-            concurrency      = self._config.encoding.concurrency,
-            force            = False,  # attempt reuse is never bypassed by --force (permission, not a command)
-            dry_run          = False,
-            crop_params      = crop,
-            encoding_yaml    = None,
-            cleanup_level    = self._deps[JobPhase].cleanup,
-            visual_hash      = self._config.encoding.visual_hash,
-            sampling = self._config.measurement.sampling,
-            measure_attempts = self._deps[ProbePhase].plan.measures_attempts,
+        # The classification stashed by ``_recover`` — the run scans
+        # ``encoded/`` once; nothing writes it between the two hooks.
+        assert self._pairs is not None, "recover() precedes execute() in the template"
+        pairs = self._pairs
+
+        encoder = ChunkEncoder(
+            quality_measurer = QualityMeasurer(work_dir),
+            work_dir          = work_dir,
+            collector         = self._collector,
+            crop_params       = probe_result.crop,
+            cleanup_level     = self._deps[JobPhase].cleanup,
+            visual_hash       = self._config.encoding.visual_hash,
+            sampling          = self._config.measurement.sampling,
+            metric_prefix     = MetricKey.ENCODING,
+            measure_attempts  = probe_result.plan.measures_attempts,
         )
+
+        pending_count  = len(pairs.pending)
+        complete_count = len(chunks) * len(strategies) - pending_count
+        logger.info(
+            "Starting encoding: %d pair(s) to encode, %d already complete",
+            pending_count, complete_count,
+        )
+        logger.debug("Starting bounded encoding with concurrency %d", self._config.encoding.concurrency)
+        # Duration-weighted bar (Σ chunk durations × strategies): the fraction
+        # and ETA track content duration; progress advances once per completed
+        # pair, by that pair's duration (count-based reporting, weighted basis).
+        chunks_by_id    = {c.safe_name(): c for c in chunks}
+        total_seconds   = sum(c.end_timestamp - c.start_timestamp for c in chunks) * len(strategies)
+        with ProgressBar(total_seconds, title="Encoding", total_count=len(chunks) * len(strategies)) as advance:
+            # Pre-advance the bar for already-complete pairs (their full duration)
+            for r in pairs.pairs.values():
+                if r.state == ArtifactState.COMPLETE:
+                    c = chunks_by_id[r.chunk_id]
+                    advance(c.end_timestamp - c.start_timestamp, AdvanceState.SKIPPED)
+
+            enc_result = asyncio.run(
+                _encode_pairs(
+                    encoder         = encoder,
+                    chunks          = chunks,
+                    strategies      = strategies,
+                    quality_targets = presentation_targets,
+                    concurrency     = self._config.encoding.concurrency,
+                    collector       = self._collector,
+                    phase_recovery  = pairs,
+                    advance         = advance,
+                )
+            )
+            advance(0, AdvanceState.COMPLETE)
+
+        if enc_result.failed_chunks:
+            # Chunk names at ERROR severity; the phase-level closer carries the
+            # outcome verdict with the counts folded into its message.
+            logger.error("Failed chunks: %s", ", ".join(enc_result.failed_chunks))
 
         # Winners come from the fresh encode result — every complete pair,
         # with freshly measured payloads (frame counts from the run itself).
