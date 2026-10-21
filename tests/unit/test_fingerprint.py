@@ -283,7 +283,7 @@ class TestStrategyFingerprint:
         )
         assert base.fingerprint == steered.fingerprint
 
-    def test_q_toggle_keeps_fingerprint_via_resolve_encoding(self) -> None:
+    def test_q_toggle_keeps_fingerprint_via_build_encoding_plan(self) -> None:
         """End-to-end over the real resolution path: resolving the same
         strategy with vs without the ``-q`` override yields the SAME
         fingerprint (the live e2e scenario, pinned at the source of the
@@ -291,8 +291,8 @@ class TestStrategyFingerprint:
         from pyqenc.app_config import load_app_config
 
         cfg = load_app_config(default_only=True)
-        search = cfg.resolve_encoding(optimize=True, measure=True, strategies=["h265+slow"], targets=["vmaf-min:93.0"])
-        fixed = cfg.resolve_encoding(optimize=True, measure=True,
+        search = cfg.build_encoding_plan(optimize=True, measure=True, strategies=["h265+slow"], targets=["vmaf-min:93.0"])
+        fixed = cfg.build_encoding_plan(optimize=True, measure=True,
             strategies=["h265+slow"], quality=(Decimal("18"), Decimal("18")),
         )
         assert search.strategies[0].fingerprint == fixed.strategies[0].fingerprint

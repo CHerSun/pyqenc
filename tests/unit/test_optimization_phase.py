@@ -59,7 +59,7 @@ _QUALITY_TARGETS = [QualityTarget(metric="vmaf", statistic="min", value=93.0)]
 _APP_CONFIG = load_app_config(default_only=True)
 
 # Resolve a few specific strategies for use in tests.
-_ALL_STRATEGIES = _APP_CONFIG.resolve_encoding(optimize=True, measure=True).strategies
+_ALL_STRATEGIES = _APP_CONFIG.build_encoding_plan(optimize=True, measure=True).strategies
 _STRATEGY_MAP = {s.display_name(): s for s in _ALL_STRATEGIES}
 
 # Pick 3 well-known strategies that exist in the default config.
@@ -83,7 +83,7 @@ def _make_job_phase(
 
     config = _APP_CONFIG.model_copy(deep=True)
     config.optimization.tolerance = tolerance
-    plan = config.resolve_encoding(optimize=optimize, measure=True,
+    plan = config.build_encoding_plan(optimize=optimize, measure=True,
         targets    = ["vmaf-min:93.0"],
         strategies = [f"{s.profile}+{s.preset}" for s in strategies],
     )
@@ -765,7 +765,7 @@ def _make_fixed_phase(
     """An OptimizationPhase harness whose run plan pins the knob via -q semantics.
 
     The override is applied exactly as ``_build_config`` applies it: passed to
-    ``resolve_encoding`` together with the strategy patterns —
+    ``build_encoding_plan`` together with the strategy patterns —
     ``plan.fixed_quality`` derives True for every matched strategy.
     """
     from pyqenc.phases.chunking import ChunkingPhase as _CP
@@ -777,7 +777,7 @@ def _make_fixed_phase(
 
 
     config = _APP_CONFIG.model_copy(deep=True)
-    plan = config.resolve_encoding(optimize=optimize, measure=measure,
+    plan = config.build_encoding_plan(optimize=optimize, measure=measure,
         strategies = strategy_names,
         quality    = (Decimal("18"), Decimal("18")),
     )
@@ -830,11 +830,11 @@ class TestRunBoundaryGuard:
     @staticmethod
     def _plan(fixed: bool) -> EncodingPlan:
         if fixed:
-            return _APP_CONFIG.resolve_encoding(optimize=True, measure=True,
+            return _APP_CONFIG.build_encoding_plan(optimize=True, measure=True,
                 strategies=["h265-aq+slow"],
                 quality=(Decimal(18), Decimal(18)),
             )
-        return _APP_CONFIG.resolve_encoding(optimize=True, measure=True,
+        return _APP_CONFIG.build_encoding_plan(optimize=True, measure=True,
             targets=["vmaf-min:93.0"], strategies=["h265-aq+slow", "h264+slow"],
         )
 
@@ -1024,7 +1024,7 @@ class TestFixedQualityBanner:
         config_dict["profiles"]["h264"]["quality_range"] = [20.0, 20.0]
         config_dict["encoding"]["strategies"] = ["h265-aq", "h264"]
         config = AppConfig.model_validate(config_dict)
-        plan = config.resolve_encoding(optimize=True, measure=True)
+        plan = config.build_encoding_plan(optimize=True, measure=True)
         assert plan.fixed_quality
 
         src = tmp_path / "source.mkv"

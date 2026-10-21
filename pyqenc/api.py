@@ -189,7 +189,7 @@ def run_pipeline(
     Args:
         config:      Fully assembled application configuration.
         plan:        The run's resolved encoding plan
-                     (:meth:`AppConfig.resolve_encoding` output).
+                     (:meth:`AppConfig.build_encoding_plan` output).
         source:      Resolved path to the source video file.
         work_dir:    Working directory for all pipeline artifacts.
         force: Permission for destructive invalidation effects this

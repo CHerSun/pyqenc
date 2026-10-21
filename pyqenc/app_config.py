@@ -4,7 +4,7 @@ Loaded once at startup by deep-merging up to three YAML files in priority
 order (bundled default < user home config < cwd config). Plain CLI overrides
 are applied as direct attribute assignments after loading; the
 resolution-coupled overrides (``--strategies`` / ``--targets`` / ``-q``) are
-arguments to :meth:`AppConfig.resolve_encoding`, whose
+arguments to :meth:`AppConfig.build_encoding_plan`, whose
 :class:`~pyqenc.models.EncodingPlan` result is a volatile per-run value
 passed to ``_build_registry`` — never stored here. The config is read-only
 for the rest of the run.
@@ -216,7 +216,7 @@ class EncodingConfig(BaseModel):
     The YAML parse form plus plain run flags — nothing else. ``targets`` and
     ``strategies`` stay raw strings: they are resolved to typed objects
     exactly once at the run boundary via
-    :meth:`AppConfig.resolve_encoding`, whose result threads through the
+    :meth:`AppConfig.build_encoding_plan`, whose result threads through the
     pipeline as the :class:`~pyqenc.models.EncodingPlan`. No resolved state
     lives here and no field is written after load.
 
@@ -450,7 +450,7 @@ class AppConfig(BaseModel):
     against its codec — config-file facts fail at load time. Resolution of
     the raw ``strategies`` / ``targets`` strings into typed objects is NOT
     part of loading: it happens once at the run boundary via
-    :meth:`resolve_encoding`, whose :class:`~pyqenc.models.EncodingPlan`
+    :meth:`build_encoding_plan`, whose :class:`~pyqenc.models.EncodingPlan`
     threads through the pipeline; the config itself is never written after
     load.
 
@@ -592,7 +592,7 @@ class AppConfig(BaseModel):
             )
         return self
 
-    def resolve_encoding(
+    def build_encoding_plan(
         self,
         *,
         optimize:   bool,
@@ -601,9 +601,9 @@ class AppConfig(BaseModel):
         targets:    Sequence[str] | None = None,
         quality:    tuple[Decimal, Decimal] | None = None,
     ) -> EncodingPlan:
-        """Resolve raw config (plus optional CLI overrides) into the run's plan.
+        """Build the run's encoding plan from the raw config plus optional CLI overrides.
 
-        The single resolution boundary: called exactly once per run by the
+        The single plan-building boundary: called exactly once per run by the
         CLI, falling back to the config's own values for any argument left
         as ``None``, and returning the :class:`~pyqenc.models.EncodingPlan`
         that threads through ``JobPhaseResult``. The config itself is never

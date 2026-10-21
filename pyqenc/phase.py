@@ -906,7 +906,7 @@ def _build_registry(
     Args:
         config:      Full validated application configuration.
         plan:        The run's resolved encoding plan
-                     (:meth:`AppConfig.resolve_encoding` output); may be
+                     (:meth:`AppConfig.build_encoding_plan` output); may be
                      ``None`` only when the closure contains no Probe.
         source:      Resolved path to the source video file.
         work_dir:    Working directory for all pipeline artifacts.

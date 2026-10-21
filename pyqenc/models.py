@@ -663,7 +663,7 @@ def targets_as_strings(targets: list[QualityTarget]) -> list[str]:
 class EncodingPlan(BaseModel):
     """The run's resolved encoding inputs — derived once, consumed everywhere.
 
-    Produced by :meth:`pyqenc.app_config.AppConfig.resolve_encoding` at the
+    Produced by :meth:`pyqenc.app_config.AppConfig.build_encoding_plan` at the
     run boundary (the CLI) from the raw config plus any CLI overrides, then
     threaded through ``JobPhaseResult`` like every other volatile per-run
     parameter. Phases consume this object; nobody re-resolves

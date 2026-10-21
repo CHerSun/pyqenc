@@ -898,7 +898,7 @@ class TestAppConfigRoundTrip:
         """quality_targets and strategies are stored and re-serialised as raw strings.
 
         The config carries only the raw parse form — resolved state lives on
-        the ``EncodingPlan`` produced by ``resolve_encoding``, never on the
+        the ``EncodingPlan`` produced by ``build_encoding_plan``, never on the
         model — so a round-trip must preserve the raw strings and stay
         resolvable.
 
@@ -925,7 +925,7 @@ class TestAppConfigRoundTrip:
         )
 
         # The round-tripped config must still resolve from its raw strings.
-        round_tripped.resolve_encoding(optimize=True, measure=True)
+        round_tripped.build_encoding_plan(optimize=True, measure=True)
 
     def test_default_config_round_trips_without_mutation(self) -> None:
         """load_app_config() round-trips cleanly with all defaults intact.
@@ -1136,7 +1136,7 @@ class TestConcurrencyValidation:
 # Property 7: Strategy resolution is deterministic
 #
 # For any AppConfig with a given encoding.strategies list and a given
-# codecs/profiles map, resolve_encoding() is a pure derivation: every call
+# codecs/profiles map, build_encoding_plan() is a pure derivation: every call
 # returns a plan with the same strategies (same count, same order, same
 # content). No resolved state lives on the config between calls.
 #
@@ -1163,7 +1163,7 @@ _strategy_subset = st.lists(
 
 
 class TestStrategyResolutionDeterministic:
-    """Property 7: resolve_encoding() is a deterministic pure derivation.
+    """Property 7: build_encoding_plan() is a deterministic pure derivation.
 
     For any AppConfig with a given encoding.strategies list, every call
     returns a plan carrying the same strategy list.
@@ -1173,7 +1173,7 @@ class TestStrategyResolutionDeterministic:
 
     @given(strategy_patterns=_strategy_subset)
     @settings(max_examples=100)
-    def test_resolve_encoding_called_twice_returns_equal_plans(
+    def test_build_encoding_plan_called_twice_returns_equal_plans(
         self,
         strategy_patterns: list[str],
     ) -> None:
@@ -1189,11 +1189,11 @@ class TestStrategyResolutionDeterministic:
         config = _BASE_CONFIG.model_copy(deep=True)
         config.encoding.strategies = strategy_patterns
 
-        first  = config.resolve_encoding(optimize=True, measure=True)
-        second = config.resolve_encoding(optimize=True, measure=True)
+        first  = config.build_encoding_plan(optimize=True, measure=True)
+        second = config.build_encoding_plan(optimize=True, measure=True)
 
         assert first == second, (
-            f"resolve_encoding() returned different plans on two calls.\n"
+            f"build_encoding_plan() returned different plans on two calls.\n"
             f"  first  : {[(s.preset, s.profile) for s in first.strategies]!r}\n"
             f"  second : {[(s.preset, s.profile) for s in second.strategies]!r}\n"
             f"  patterns: {strategy_patterns!r}"
@@ -1205,7 +1205,7 @@ class TestStrategyResolutionDeterministic:
         self,
         strategy_patterns: list[str],
     ) -> None:
-        """resolve_encoding() returns exactly the strategies matching the patterns.
+        """build_encoding_plan() returns exactly the strategies matching the patterns.
 
         Bug condition: resolution silently expands to too many or too few
         strategies for the given patterns.
@@ -1216,7 +1216,7 @@ class TestStrategyResolutionDeterministic:
         config = _BASE_CONFIG.model_copy(deep=True)
         config.encoding.strategies = strategy_patterns
 
-        resolved: list[Strategy] = config.resolve_encoding(optimize=True, measure=True).strategies
+        resolved: list[Strategy] = config.build_encoding_plan(optimize=True, measure=True).strategies
 
         # Every resolved strategy must carry one of the (preset, profile) pairs
         # that come from the given patterns.  Since the patterns are all explicit
@@ -1250,11 +1250,11 @@ class TestStrategyResolutionDeterministic:
         """
         config = _BASE_CONFIG
 
-        first_read:  list[Strategy] = config.resolve_encoding(optimize=True, measure=True).strategies
-        second_read: list[Strategy] = config.resolve_encoding(optimize=True, measure=True).strategies
+        first_read:  list[Strategy] = config.build_encoding_plan(optimize=True, measure=True).strategies
+        second_read: list[Strategy] = config.build_encoding_plan(optimize=True, measure=True).strategies
 
         assert first_read == second_read, (
-            "resolve_encoding() changed between calls on the loaded config.\n"
+            "build_encoding_plan() changed between calls on the loaded config.\n"
             f"  first  : {[(s.preset, s.profile) for s in first_read]!r}\n"
             f"  second : {[(s.preset, s.profile) for s in second_read]!r}"
         )
@@ -1313,7 +1313,7 @@ class TestStrategyDeduplicationByPresetProfile:
         config.encoding.strategies = patterns
 
         # Force fresh resolution with the (possibly duplicate) pattern list.
-        resolved: list[Strategy] = config.resolve_encoding(optimize=True, measure=True).strategies
+        resolved: list[Strategy] = config.build_encoding_plan(optimize=True, measure=True).strategies
         actual_pairs: list[tuple[str, str]] = [
             (s.preset, s.profile) for s in resolved
         ]
@@ -1359,7 +1359,7 @@ class TestStrategyDeduplicationByPresetProfile:
         config.encoding.strategies = patterns
 
         # Force fresh resolution.
-        resolved: list[Strategy] = config.resolve_encoding(optimize=True, measure=True).strategies
+        resolved: list[Strategy] = config.build_encoding_plan(optimize=True, measure=True).strategies
 
         # Build the expected first-occurrence order: iterate through the
         # expanded pairs in the same order resolution would produce them
@@ -1414,7 +1414,7 @@ class TestStrategyDeduplicationByPresetProfile:
         # ("slow", "h265"). Any profile matching both patterns is a duplicate.
         config.encoding.strategies = ["h265*+slow", "h265+slow", "h265-aq+slow"]
 
-        resolved: list[Strategy] = config.resolve_encoding(optimize=True, measure=True).strategies
+        resolved: list[Strategy] = config.build_encoding_plan(optimize=True, measure=True).strategies
         actual_pairs: list[tuple[str, str]] = [
             (s.preset, s.profile) for s in resolved
         ]
@@ -1484,7 +1484,7 @@ class TestValidationErrorOnInvalidStrings:
 
         import pytest
         with pytest.raises(ValueError) as exc_info:
-            config.resolve_encoding(optimize=True, measure=True)
+            config.build_encoding_plan(optimize=True, measure=True)
 
         # The error must mention the offending field or value
         error_str = str(exc_info.value)
@@ -1511,7 +1511,7 @@ class TestValidationErrorOnInvalidStrings:
 
         import pytest
         with pytest.raises(ValueError) as exc_info:
-            config.resolve_encoding(optimize=True, measure=True)
+            config.build_encoding_plan(optimize=True, measure=True)
 
         error_str = str(exc_info.value)
         assert "badstat" in error_str.lower() or "targets" in error_str.lower() or "encoding" in error_str.lower(), (
@@ -1538,7 +1538,7 @@ class TestValidationErrorOnInvalidStrings:
 
         import pytest
         with pytest.raises(ValueError) as exc_info:
-            config.resolve_encoding(optimize=True, measure=True)
+            config.build_encoding_plan(optimize=True, measure=True)
 
         error_str = str(exc_info.value)
         assert (
@@ -1570,7 +1570,7 @@ class TestValidationErrorOnInvalidStrings:
 
         import pytest
         with pytest.raises(ValueError) as exc_info:
-            config.resolve_encoding(optimize=True, measure=True)
+            config.build_encoding_plan(optimize=True, measure=True)
 
         error_str = str(exc_info.value)
         assert (
@@ -1639,7 +1639,7 @@ class TestLoadAppConfigWithBundledDefault:
         **Validates: Requirements 1.2, 1.3**
         """
         config = load_app_config(default_only=True)
-        targets = config.resolve_encoding(optimize=True, measure=True).targets
+        targets = config.build_encoding_plan(optimize=True, measure=True).targets
         assert len(targets) > 0, (
             "load_app_config() returned a config resolving to no quality targets. "
             "plan.targets is empty — the bundled default must define "
@@ -1658,7 +1658,7 @@ class TestLoadAppConfigWithBundledDefault:
         **Validates: Requirements 1.2, 1.3**
         """
         config = load_app_config(default_only=True)
-        strategies = config.resolve_encoding(optimize=True, measure=True).strategies
+        strategies = config.build_encoding_plan(optimize=True, measure=True).strategies
         assert len(strategies) > 0, (
             "load_app_config() returned a config resolving to no strategies. "
             "plan.strategies is empty — the bundled default must "

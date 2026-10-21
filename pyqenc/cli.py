@@ -98,7 +98,7 @@ def _parse_quality_override(quality_str: str | None) -> tuple[Decimal, Decimal] 
     or a pair separated by any of :data:`_QUALITY_PAIR_SEPARATORS`
     (``"18:24"``, ``"18-24"``, ``"18..24"``).  The pair is returned in input
     order — canonical ``(lower, upper)`` normalization is owned solely by
-    :meth:`AppConfig.resolve_encoding`, and the codec's direction
+    :meth:`AppConfig.build_encoding_plan`, and the codec's direction
     convention is applied during its strategy expansion.
 
     Args:
@@ -426,12 +426,12 @@ def _build_config(args: argparse.Namespace) -> AppConfig:
     return config
 
 
-def _resolve_plan(args: argparse.Namespace, config: AppConfig) -> EncodingPlan:
-    """Resolve the run's encoding plan from quality args + the config's raws.
+def _build_plan(args: argparse.Namespace, config: AppConfig) -> EncodingPlan:
+    """Build the run's encoding plan from quality args + the config's raws.
 
-    The resolution-coupled overrides — ``--strategies``, ``--targets``,
+    The plan-coupled overrides — ``--strategies``, ``--targets``,
     ``-q``, ``--no-optimize``, ``--no-measure`` — are arguments to the single
-    ``resolve_encoding`` call. Called by the video subcommands only; the
+    ``build_encoding_plan`` call. Called by the video subcommands only; the
     plan is video-work state.
 
     Raises:
@@ -440,7 +440,7 @@ def _resolve_plan(args: argparse.Namespace, config: AppConfig) -> EncodingPlan:
             mixed quality labels under ``-q``, a mixed fixed/searched strategy
             set, no strategies, or a searched run without targets).
     """
-    return config.resolve_encoding(
+    return config.build_encoding_plan(
         optimize   = args.optimize,
         measure    = args.measure,
         strategies = _parse_strategies(getattr(args, "strategies", None)),
@@ -578,7 +578,7 @@ def _cmd_pipeline(args: argparse.Namespace) -> int:
 
     try:
         config = _build_config(args)
-        plan   = _resolve_plan(args, config) if needs_plan else None
+        plan   = _build_plan(args, config) if needs_plan else None
     except ValueError as e:
         logger.critical(f"Invalid configuration: {e}")
         return 1

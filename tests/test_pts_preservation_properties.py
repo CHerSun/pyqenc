@@ -111,7 +111,7 @@ def _extended_stream(path: Path, frame_count: int):
 # ---------------------------------------------------------------------------
 
 _APP_CONFIG = load_app_config(default_only=True)
-_PLAN       = _APP_CONFIG.resolve_encoding(optimize=True, measure=True)
+_PLAN       = _APP_CONFIG.build_encoding_plan(optimize=True, measure=True)
 
 
 

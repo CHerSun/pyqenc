@@ -4,14 +4,14 @@ Covers the fixed-quality spec's config layer (Req 1–4):
 
 - ``-q`` parsing: single value, pair separators (``:``, ``-``, ``..``),
   unordered input, error forms.
-- Override application through ``AppConfig.resolve_encoding``: per-codec
+- Override application through ``AppConfig.build_encoding_plan``: per-codec
   direction (CRF and VBR), precedence over profile ranges,
   ``default_quality`` auto-adjust.
 - Validation at the shared range-validation site: subset-of-codec and endpoint
   granularity alignment for the CLI override, profile-declared ranges, and
   codec-declared ranges (multi-codec intersection included).
 - Derived run mode: ``EncodingPlan.fixed_quality`` derivation and the
-  mixed-mode / uniform-label loud exits in ``resolve_encoding``.
+  mixed-mode / uniform-label loud exits in ``build_encoding_plan``.
 - Searched configs (no override) resolve unchanged.
 """
 
@@ -37,7 +37,7 @@ def _config_with_strategies(*patterns: str) -> AppConfig:
 
     Strategies are injected into the dumped default config and re-validated,
     so the config is constructed through the supported ``model_validate``
-    path; resolution itself happens per-call via ``resolve_encoding``.
+    path; resolution itself happens per-call via ``build_encoding_plan``.
     """
     config_dict = _DEFAULT_CONFIG.model_dump()
     config_dict["encoding"]["strategies"] = list(patterns)
@@ -50,7 +50,7 @@ def _resolve_with_override(
 ) -> EncodingPlan:
     """Resolve the given patterns under a ``-q`` override; returns the plan."""
     config = _config_with_strategies(*patterns)
-    return config.resolve_encoding(optimize=True, measure=True, quality=override)
+    return config.build_encoding_plan(optimize=True, measure=True, quality=override)
 
 
 # ---------------------------------------------------------------------------
@@ -80,7 +80,7 @@ class TestParseQualityOverride:
 
     def test_pair_returned_in_input_order(self) -> None:
         """The parser does not canonicalize — order normalization is owned
-        solely by ``AppConfig.resolve_encoding`` (pinned there)."""
+        solely by ``AppConfig.build_encoding_plan`` (pinned there)."""
         assert _parse_quality_override("24:18") == (Decimal("24"), Decimal("18"))
 
     def test_whitespace_tolerated(self) -> None:
@@ -96,7 +96,7 @@ class TestParseQualityOverride:
 
 
 # ---------------------------------------------------------------------------
-# Override application through resolve_encoding()
+# Override application through build_encoding_plan()
 # ---------------------------------------------------------------------------
 
 class TestOverrideApplication:
@@ -128,7 +128,7 @@ class TestOverrideApplication:
         config_dict = _DEFAULT_CONFIG.model_dump()
         config_dict["profiles"]["h265-aq"]["quality_range"] = [12.0, 20.0]
         config = AppConfig.model_validate(config_dict)
-        plan = config.resolve_encoding(optimize=True, measure=True,
+        plan = config.build_encoding_plan(optimize=True, measure=True,
             strategies = ["h265-aq"],
             quality    = (Decimal("22"), Decimal("26")),
         )
@@ -173,7 +173,7 @@ class TestOverrideApplication:
         config_dict["profiles"]["h265-aq"]["quality_range"] = [20.0, 24.0]
         config = AppConfig.model_validate(config_dict)
         with caplog.at_level(logging.DEBUG, logger="pyqenc.app_config"):
-            plan = config.resolve_encoding(optimize=True, measure=True, strategies=["h265-aq"])
+            plan = config.build_encoding_plan(optimize=True, measure=True, strategies=["h265-aq"])
         (strategy,) = plan.strategies
         assert strategy.codec.default_quality == Decimal("20.0")
         assert "default_quality" in caplog.text
@@ -192,7 +192,7 @@ class TestSearchedRunsUnchanged:
 
     def test_no_override_resolves_default_ranges(self) -> None:
         plan = _resolve_with_override(["h265-aq", "h264"], None)
-        default_plan = _config_with_strategies("h265-aq", "h264").resolve_encoding(optimize=True, measure=True)
+        default_plan = _config_with_strategies("h265-aq", "h264").build_encoding_plan(optimize=True, measure=True)
         assert [
             (s.codec.quality_better, s.codec.quality_worse) for s in plan.strategies
         ] == [
@@ -205,11 +205,11 @@ class TestSearchedRunsUnchanged:
         config = _config_with_strategies("h265-aq")
         original = [
             (s.codec.quality_better, s.codec.quality_worse)
-            for s in config.resolve_encoding(optimize=True, measure=True).strategies
+            for s in config.build_encoding_plan(optimize=True, measure=True).strategies
         ]
-        plan = config.resolve_encoding(optimize=True, measure=True, quality=(Decimal("18"), Decimal("18")))
+        plan = config.build_encoding_plan(optimize=True, measure=True, quality=(Decimal("18"), Decimal("18")))
         assert plan.fixed_quality is True
-        restored = config.resolve_encoding(optimize=True, measure=True)
+        restored = config.build_encoding_plan(optimize=True, measure=True)
         assert [
             (s.codec.quality_better, s.codec.quality_worse)
             for s in restored.strategies
@@ -221,7 +221,7 @@ class TestMeasuresAttempts:
 
     def test_searched_always_measures(self) -> None:
         """The search steers by measurements — the flag never disables them."""
-        plan = _config_with_strategies("h265-aq").resolve_encoding(
+        plan = _config_with_strategies("h265-aq").build_encoding_plan(
             optimize=True, measure=False,
         )
         assert plan.fixed_quality is False
@@ -234,7 +234,7 @@ class TestMeasuresAttempts:
     def test_fixed_no_measure_with_optimize_multi_keeps_attempts(self) -> None:
         """Optimize on + multiple strategies: the comparison judges attempts —
         they stay measured; only merged outputs skip."""
-        plan = _config_with_strategies("h265-aq", "h264").resolve_encoding(
+        plan = _config_with_strategies("h265-aq", "h264").build_encoding_plan(
             optimize=True, measure=False, quality=(Decimal("18"), Decimal("18")),
         )
         assert plan.fixed_quality is True
@@ -245,13 +245,13 @@ class TestMeasuresAttempts:
         """No elimination applies (--no-optimize or a single strategy): the
         optimization phase is skipped, no anchor judges the attempts — they
         are not measured (approved-plan table row)."""
-        single = _config_with_strategies("h265-aq").resolve_encoding(
+        single = _config_with_strategies("h265-aq").build_encoding_plan(
             optimize=True, measure=False, quality=(Decimal("18"), Decimal("18")),
         )
         assert single.fixed_quality is True
         assert single.measures_attempts is False
 
-        no_optimize = _config_with_strategies("h265-aq", "h264").resolve_encoding(
+        no_optimize = _config_with_strategies("h265-aq", "h264").build_encoding_plan(
             optimize=False, measure=False, quality=(Decimal("18"), Decimal("18")),
         )
         assert no_optimize.fixed_quality is True
@@ -317,7 +317,7 @@ class TestProfileAndCodecAlignment:
         config_dict = _DEFAULT_CONFIG.model_dump()
         config_dict["profiles"]["av1"]["quality_range"] = [18.0, 24.0]
         config = AppConfig.model_validate(config_dict)
-        plan = config.resolve_encoding(optimize=True, measure=True, strategies=["av1"])
+        plan = config.build_encoding_plan(optimize=True, measure=True, strategies=["av1"])
         (strategy,) = plan.strategies
         assert strategy.codec.quality_better == Decimal("18.0")
 
@@ -329,7 +329,7 @@ class TestProfileAndCodecAlignment:
 
 
 # ---------------------------------------------------------------------------
-# resolve_encoding mode checks (exercised through _build_config)
+# build_encoding_plan mode checks (exercised through _build_config)
 # ---------------------------------------------------------------------------
 
 def _build_args(**overrides: object) -> argparse.Namespace:
@@ -351,7 +351,7 @@ def _build_config_isolated(
     *,
     base_config: AppConfig | None = None,
 ) -> EncodingPlan:
-    """``_build_config`` + ``_resolve_plan`` pinned to the bundled default.
+    """``_build_config`` + ``_build_plan`` pinned to the bundled default.
 
     Returns the resolved ``EncodingPlan`` (the mode-check surface); the
     module-level default is deep-copied so it stays pristine for other tests.
@@ -359,7 +359,7 @@ def _build_config_isolated(
     config = (base_config if base_config is not None else _DEFAULT_CONFIG).model_copy(deep=True)
     monkeypatch.setattr("pyqenc.cli.load_app_config", lambda: config)
     from pyqenc.cli import _build_config as build_config
-    from pyqenc.cli import _resolve_plan as resolve_plan
+    from pyqenc.cli import _build_plan as resolve_plan
     return resolve_plan(args, build_config(args))
 
 
@@ -375,7 +375,7 @@ def _build_config_only(
 
 
 class TestBuildConfigModeChecks:
-    """Post-resolve loud exits in ``resolve_encoding`` via ``_build_config`` (Req 3.2, Req 4)."""
+    """Post-resolve loud exits in ``build_encoding_plan`` via ``_build_config`` (Req 3.2, Req 4)."""
 
     def test_uniform_label_required_under_q(self, monkeypatch: pytest.MonkeyPatch) -> None:
         args = _build_args(strategies="h265-aq,vulkan-h265-10bit-qp", quality="18")
@@ -441,20 +441,20 @@ class TestPlanConstructionInvariants:
         config = _config_with_strategies()
         config.encoding.strategies = []
         with pytest.raises(ValueError, match="no strategies.*nothing to encode"):
-            config.resolve_encoding(optimize=True, measure=True)
+            config.build_encoding_plan(optimize=True, measure=True)
 
     def test_searched_run_without_targets_is_loud(self) -> None:
         """Without targets a searched run degenerates into a single
         default-quality encode — no bar means no search."""
         config = _config_with_strategies("h265-aq", "h264")
         with pytest.raises(ValueError, match="Searched run has no quality targets"):
-            config.resolve_encoding(optimize=True, measure=True, targets=[])
+            config.build_encoding_plan(optimize=True, measure=True, targets=[])
 
     def test_fixed_run_without_targets_allowed(self) -> None:
         """Fixed runs legitimately omit targets: the fixed knob is the reference
         and config targets drive nothing there."""
         config = _config_with_strategies("h265-aq")
-        plan = config.resolve_encoding(optimize=True, measure=True,
+        plan = config.build_encoding_plan(optimize=True, measure=True,
             strategies=["h265-aq"], targets=[], quality=(Decimal("18"), Decimal("18")),
         )
         assert plan.fixed_quality is True
@@ -472,7 +472,7 @@ class TestAudioPassNeverResolves:
         def _boom(self: AppConfig, **_kwargs: object) -> EncodingPlan:
             raise AssertionError("the audio pass must not resolve the plan")
 
-        monkeypatch.setattr(AppConfig, "resolve_encoding", _boom)
+        monkeypatch.setattr(AppConfig, "build_encoding_plan", _boom)
         # An audio-shaped namespace: no strategies/targets/quality attrs at all.
         audio_args = argparse.Namespace(include=None, exclude=None)
         config = _build_config_only(monkeypatch, audio_args)

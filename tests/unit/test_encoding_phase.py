@@ -22,7 +22,7 @@ from pyqenc.utils.yaml_utils import write_yaml_atomic
 # ---------------------------------------------------------------------------
 
 _STRATEGY_OBJ = next(
-    s for s in load_app_config(default_only=True).resolve_encoding(optimize=True, measure=True).strategies
+    s for s in load_app_config(default_only=True).build_encoding_plan(optimize=True, measure=True).strategies
     if s.preset == "slow" and s.profile == "h265-aq"
 )
 _CHUNK_ID   = "00꞉00꞉00․000-00꞉01꞉30․000"
@@ -627,7 +627,7 @@ class TestEncodingPresentationTargets:
         from pyqenc.app_config import load_app_config
 
         config = load_app_config(default_only=True).model_copy(deep=True)
-        plan = config.resolve_encoding(optimize=optimize, measure=measure,
+        plan = config.build_encoding_plan(optimize=optimize, measure=measure,
             strategies = ["h265-aq+slow"],
             targets    = ["vmaf-min:93.0"],
             quality    = quality_range_override,
@@ -899,7 +899,7 @@ class TestWinningLimiterBasisLine:
         from pyqenc.stream_model import VideoStream, VideoStreamChunk, VideoStreamInfo
 
         config = load_app_config(default_only=True).model_copy(deep=True)
-        plan = config.resolve_encoding(optimize=True, measure=True,
+        plan = config.build_encoding_plan(optimize=True, measure=True,
             strategies = ["h265-aq+slow"],
             targets    = plan_targets,
             quality    = (_D("18"), _D("18")) if fixed else None,
