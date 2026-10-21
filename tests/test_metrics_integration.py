@@ -1130,6 +1130,7 @@ class TestOptimizationPhaseTiming:
         # An empty work dir: the pair classifies ABSENT and runs.
         stub_recovery = _recover_pairs(
             tmp_path, [chunk.safe_name()], [strategy],
+            require_winner_sidecar=True,
         )
 
         def run(collector: MetricsCollector) -> None:
@@ -1383,8 +1384,10 @@ class TestEncodingPhaseTiming:
                         quality_targets  = [],
                         concurrency      = 1,
                         collector        = collector,
+                        metric_prefix   = MetricKey.ENCODING,
                         phase_recovery   = _recover_pairs(
                             tmp_path, [chunk.safe_name()], [_STRATEGY_SLOW_H265],
+                            require_winner_sidecar=True,
                         ),
                     )
                 )
@@ -1445,8 +1448,10 @@ class TestEncodingPhaseTiming:
                         quality_targets  = [],
                         concurrency      = 1,
                         collector        = collector,
+                        metric_prefix   = MetricKey.ENCODING,
                         phase_recovery   = _recover_pairs(
                             tmp_path, [chunk.safe_name()], [_STRATEGY_SLOW_H265],
+                            require_winner_sidecar=True,
                         ),
                     )
                 )

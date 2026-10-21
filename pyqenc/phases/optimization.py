@@ -59,6 +59,7 @@ from pyqenc.phases.job import JobPhase
 from pyqenc.phases.probe import ProbePhase
 from pyqenc.state import ArtifactState, ProbeFacet
 from pyqenc.stream_model import DecimalYaml, EncodedChunk, VideoStreamChunk
+from pyqenc.stream_model import File as StreamFile
 from pyqenc.summary_tables import (
     COMPARISON_STATS,
     ComparisonTable,
@@ -775,9 +776,14 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
 
     def _pair_ledger(self, work_dir: Path, strategies: list[Strategy]) -> list[Artifact]:
         """The per-pair ledger plus orphaned-strategy rows."""
-        from pyqenc.phases.encoding import _orphan_strategy_rows, _pair_rows
+        from pyqenc.phases.encoding import _pair_rows
 
-        rows: list[Artifact] = _pair_rows(work_dir, self._test_chunks, strategies)
+        rows: list[Artifact] = _pair_rows(
+            work_dir, self._test_chunks, strategies,
+            # Test encodes are always measured (fixed-quality spec Req 8.1)
+            # — their winners always carry result sidecars.
+            require_winner_sidecar = True,
+        )
         rows += _orphan_strategy_rows(work_dir, strategies)
         return rows
 
@@ -859,7 +865,10 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
             )
 
             test_chunk_ids = [c.safe_name() for c in test_chunks]
-            phase_recovery = _recover_pairs(work_dir, test_chunk_ids, strategies_to_test)
+            phase_recovery = _recover_pairs(
+                work_dir, test_chunk_ids, strategies_to_test,
+                require_winner_sidecar = True,
+            )
 
             pending_pairs   = sum(1 for r in phase_recovery.pairs.values() if r.state != ArtifactState.COMPLETE)
             complete_pairs  = len(test_chunks) * len(strategies_to_test) - pending_pairs
@@ -1536,14 +1545,38 @@ def _select_test_chunks(
     return selected
 
 
+def _orphan_strategy_rows(work_dir: Path, strategies: list[Strategy]) -> list[Artifact[StreamFile]]:
+    """Rows for orphaned ``encoded/<strategy>/`` directories (ledger-only).
+
+    A strategy directory absent from the current plan has no reconstructible
+    entity (its Strategy object is gone) — the on-disk product itself is the
+    only identity left. ``wanted=False`` rows for honest reporting in the
+    pair ledger; encoding's winner-layer curation deletes the directories
+    themselves on its recovery (Req 17).
+    """
+    from pyqenc.phases.encoding import _orphaned_strategy_dirs
+
+    rows: list[Artifact[StreamFile]] = []
+    for strategy_dir in _orphaned_strategy_dirs(work_dir, strategies):
+        rows.append(Artifact(
+            payload = StreamFile(path=strategy_dir),
+            state   = ArtifactState.COMPLETE,
+            wanted  = False,
+        ))
+        logger.debug(
+            "encoded/%s is orphaned (strategy no longer selected) — unwanted", strategy_dir.name,
+        )
+    return rows
+
+
 def _make_encoder(
     work_dir:         Path,
     collector:        MetricsCollector,
     crop_params:      CropParams | None,
-    visual_hash:      bool = True,
-    sampling:        int  = 3,
-    cleanup_level:    CleanupLevel = CleanupLevel.NONE,
-    metric_prefix:    MetricKey = MetricKey.OPTIMIZATION,
+    visual_hash:      bool,
+    sampling:        int,
+    cleanup_level:    CleanupLevel,
+    metric_prefix:    MetricKey,
 ) -> ChunkEncoder:
     """Construct a ``ChunkEncoder`` for test encodes.
 

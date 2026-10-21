@@ -5,8 +5,8 @@ from typing import cast
 
 import pytest
 
-from pyqenc.metrics import MetricsCollector
-from pyqenc.models import QualityTarget, Strategy
+from pyqenc.metrics import MetricKey, MetricsCollector
+from pyqenc.models import CleanupLevel, QualityTarget, Strategy
 from pyqenc.stream_model import VideoStreamChunk
 from pyqenc.utils.visualization import QualityMeasurer
 from tests.fixtures.metric_fixtures import (
@@ -219,7 +219,12 @@ class TestEncodeChunkQualitySearchV2Integration:
             quality_measurer  = evaluator,
             work_dir          = tmp_path,
             collector         = MagicMock(spec=MetricsCollector),
+            crop_params       = None,
+            cleanup_level     = CleanupLevel.NONE,
+            visual_hash       = True,
             sampling           = 10,
+            metric_prefix     = MetricKey.ENCODING,
+            measure_attempts  = True,
         )
 
         reference = MagicMock()
@@ -276,6 +281,12 @@ class TestEncodeChunkQualitySearchV2Integration:
             quality_measurer  = evaluator,
             work_dir          = tmp_path,
             collector         = MagicMock(spec=MetricsCollector),
+            crop_params       = None,
+            cleanup_level     = CleanupLevel.NONE,
+            visual_hash       = True,
+            sampling          = 10,
+            metric_prefix     = MetricKey.ENCODING,
+            measure_attempts  = True,
         )
 
         reference = MagicMock()

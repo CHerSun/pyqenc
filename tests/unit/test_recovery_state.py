@@ -66,12 +66,14 @@ class TestRecoverAttemptsAbsent:
     """ABSENT: no winner mkv+yaml in encoded/."""
 
     def test_absent_when_no_encoded_dir(self, tmp_path: Path) -> None:
-        result = recover_attempts(tmp_path, [_CHUNK_ID], [_STRATEGY_OBJ])
+        result = recover_attempts(tmp_path, [_CHUNK_ID], [_STRATEGY_OBJ],
+                           require_winner_sidecar=True)
         pair = result.pairs[(_CHUNK_ID, _STRATEGY)]
         assert pair.state == ArtifactState.ABSENT
 
     def test_absent_pair_is_in_pending(self, tmp_path: Path) -> None:
-        result = recover_attempts(tmp_path, [_CHUNK_ID], [_STRATEGY_OBJ])
+        result = recover_attempts(tmp_path, [_CHUNK_ID], [_STRATEGY_OBJ],
+                           require_winner_sidecar=True)
         assert (_CHUNK_ID, _STRATEGY) in result.pending
 
     def test_partial_when_mkv_present_but_no_sidecar(self, tmp_path: Path) -> None:
@@ -82,7 +84,8 @@ class TestRecoverAttemptsAbsent:
         out_dir.mkdir(parents=True, exist_ok=True)
         (out_dir / EncodedChunk.format_winner_file_name(_CHUNK_ID)).write_bytes(b"\x00" * 64)
 
-        result = recover_attempts(tmp_path, [_CHUNK_ID], [_STRATEGY_OBJ])
+        result = recover_attempts(tmp_path, [_CHUNK_ID], [_STRATEGY_OBJ],
+                           require_winner_sidecar=True)
         pair = result.pairs[(_CHUNK_ID, _STRATEGY)]
         assert pair.state == ArtifactState.PARTIAL
         assert (_CHUNK_ID, _STRATEGY) in result.pending
@@ -94,7 +97,8 @@ class TestRecoverAttemptsAbsent:
         enc_dir.mkdir(parents=True, exist_ok=True)
         (enc_dir / EncodedChunk.format_attempt_file_name(_CHUNK_ID, _QUALITY)).write_bytes(b"\x00" * 64)
 
-        result = recover_attempts(tmp_path, [_CHUNK_ID], [_STRATEGY_OBJ])
+        result = recover_attempts(tmp_path, [_CHUNK_ID], [_STRATEGY_OBJ],
+                           require_winner_sidecar=True)
         pair = result.pairs[(_CHUNK_ID, _STRATEGY)]
         assert pair.state == ArtifactState.ABSENT
 
@@ -126,7 +130,8 @@ class TestAttemptAwareCompleteness:
         place."""
         self._video_only_winner(tmp_path)
 
-        result = recover_attempts(tmp_path, [_CHUNK_ID], [_STRATEGY_OBJ])
+        result = recover_attempts(tmp_path, [_CHUNK_ID], [_STRATEGY_OBJ],
+                           require_winner_sidecar=True)
         pair = result.pairs[(_CHUNK_ID, _STRATEGY)]
         assert pair.state == ArtifactState.PARTIAL
         assert (_CHUNK_ID, _STRATEGY) in result.pending
@@ -139,7 +144,8 @@ class TestRecoverAttemptsComplete:
         out_dir = _encoded_dir(tmp_path)
         winning = _make_complete_pair(out_dir)
 
-        result = recover_attempts(tmp_path, [_CHUNK_ID], [_STRATEGY_OBJ])
+        result = recover_attempts(tmp_path, [_CHUNK_ID], [_STRATEGY_OBJ],
+                           require_winner_sidecar=True)
         pair = result.pairs[(_CHUNK_ID, _STRATEGY)]
         assert pair.state        == ArtifactState.COMPLETE
         assert pair.winning_file == winning
@@ -148,14 +154,16 @@ class TestRecoverAttemptsComplete:
         out_dir = _encoded_dir(tmp_path)
         _make_complete_pair(out_dir)
 
-        result = recover_attempts(tmp_path, [_CHUNK_ID], [_STRATEGY_OBJ])
+        result = recover_attempts(tmp_path, [_CHUNK_ID], [_STRATEGY_OBJ],
+                           require_winner_sidecar=True)
         assert (_CHUNK_ID, _STRATEGY) not in result.pending
 
     def test_winning_file_exists(self, tmp_path: Path) -> None:
         out_dir = _encoded_dir(tmp_path)
         _make_complete_pair(out_dir)
 
-        result = recover_attempts(tmp_path, [_CHUNK_ID], [_STRATEGY_OBJ])
+        result = recover_attempts(tmp_path, [_CHUNK_ID], [_STRATEGY_OBJ],
+                           require_winner_sidecar=True)
         pair = result.pairs[(_CHUNK_ID, _STRATEGY)]
         assert pair.winning_file is not None
         assert pair.winning_file.exists()
@@ -170,7 +178,8 @@ class TestRecoverAttemptsComplete:
             yaml.dump({"quality": str(_QUALITY)}), encoding="utf-8",
         )
 
-        result = recover_attempts(tmp_path, [_CHUNK_ID], [_STRATEGY_OBJ])
+        result = recover_attempts(tmp_path, [_CHUNK_ID], [_STRATEGY_OBJ],
+                           require_winner_sidecar=True)
         assert result.pairs[(_CHUNK_ID, _STRATEGY)].state == ArtifactState.ABSENT
 
 
@@ -185,7 +194,8 @@ class TestRecoverAttemptsMultiplePairs:
         # chunk_b: nothing written
 
         result = recover_attempts(
-            tmp_path, [chunk_a, chunk_b], [_STRATEGY_OBJ]
+            tmp_path, [chunk_a, chunk_b], [_STRATEGY_OBJ],
+                require_winner_sidecar=True,
         )
         assert result.pairs[(chunk_a, _STRATEGY)].state == ArtifactState.COMPLETE
         assert result.pairs[(chunk_b, _STRATEGY)].state == ArtifactState.ABSENT

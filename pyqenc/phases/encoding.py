@@ -382,7 +382,7 @@ def _write_winner_sidecar(
     quality:         Decimal,
     metrics:         dict[str, float],
     frame_count:     int,
-    targets_met:     bool = True,
+    targets_met:     bool,
 ) -> None:
     """Atomically write the winner result sidecar when the search converges.
 
@@ -443,7 +443,7 @@ def _recover_pairs(
     chunk_ids: list[str],
     strategies: list[Strategy],
     *,
-    require_winner_sidecar: bool = True,
+    require_winner_sidecar: bool,
 ) -> _PhaseRecovery:
     """Classify all ``(chunk_id, strategy)`` pairs by WINNER presence — a
     single directory scan per strategy.
@@ -554,7 +554,7 @@ def _pair_placeholder(work_dir: Path, chunk: VideoStreamChunk, strategy: Strateg
             stream      = VideoStream(
                 file = StreamFile(path=winner),
                 info = VideoStreamInfo(
-                    track_id     = 0,
+                    track_id     = source_info.track_id,
                     resolution   = source_info.resolution,
                     fps          = source_info.fps,
                     fps_fraction = source_info.fps_fraction,
@@ -573,7 +573,7 @@ def _pair_rows(
     chunks:     list[VideoStreamChunk],
     strategies: list[Strategy],
     *,
-    require_winner_sidecar: bool = True,
+    require_winner_sidecar: bool,
 ) -> list[Artifact[EncodedChunk]]:
     """Build the per-pair ledger: one row per (chunk, strategy) pair.
 
@@ -648,26 +648,6 @@ def _orphaned_strategy_dirs(work_dir: Path, strategies: list[Strategy]) -> list[
     return sorted(
         d for d in out_dir.iterdir() if d.is_dir() and d.name not in expected
     )
-
-
-def _orphan_strategy_rows(work_dir: Path, strategies: list[Strategy]) -> list[Artifact[StreamFile]]:
-    """Rows for orphaned ``encoded/<strategy>/`` directories (surfaced at optimization).
-
-    Ledger-only rows (``wanted=False``), surfaced by optimization's pair
-    ledger for honest reporting; encoding's winner-layer curation deletes
-    the directories themselves on its recovery (Req 17).
-    """
-    rows: list[Artifact[StreamFile]] = []
-    for strategy_dir in _orphaned_strategy_dirs(work_dir, strategies):
-        rows.append(Artifact(
-            payload = StreamFile(path=strategy_dir),
-            state   = ArtifactState.COMPLETE,
-            wanted  = False,
-        ))
-        logger.debug(
-            "encoded/%s is orphaned (strategy no longer selected) — unwanted", strategy_dir.name,
-        )
-    return rows
 
 
 def _curate_winner_layer(
@@ -815,7 +795,7 @@ def _build_encoded_chunk(
     """
     source_info = chunk.stream.stream.info
     attempt_info = VideoStreamInfo(
-        track_id     = 0,
+        track_id     = source_info.track_id,
         fps          = source_info.fps,
         fps_fraction = source_info.fps_fraction,
     )
@@ -845,20 +825,24 @@ class ChunkEncoder:
         quality_measurer: QualityMeasurer,
         work_dir:          Path,
         collector:         MetricsCollector,
-        crop_params:       CropParams | None = None,
-        cleanup_level:     CleanupLevel      = CleanupLevel.NONE,
-        visual_hash:       bool              = True,
-        sampling:  int               = 3,
-        metric_prefix:     MetricKey         = MetricKey.ENCODING,
-        measure_attempts:  bool              = True,
+        crop_params:       CropParams | None,
+        cleanup_level:     CleanupLevel,
+        visual_hash:       bool,
+        sampling:  int,
+        metric_prefix:     MetricKey,
+        measure_attempts:  bool,
     ):
         """Initialize chunk encoder.
+
+        Every parameter is required and passed explicitly — run truth comes
+        from the caller (config / plan / job), never from a default here.
 
         Args:
             quality_measurer: Quality measurer for metric calculation.
             work_dir:          Working directory for artifacts.
             collector:         Metrics collector for per-attempt timing.
-            crop_params:       Optional crop parameters to apply to every chunk attempt.
+            crop_params:       Crop parameters to apply to every chunk attempt
+                               (``None`` = no crop).
             cleanup_level:     Controls deletion of intermediate attempt files after
                                a pair converges.
             visual_hash:       When ``True``, prepend a deterministic emoji to every
@@ -866,17 +850,14 @@ class ChunkEncoder:
             sampling:  Frame subsampling factor for quality metric generation.
             metric_prefix:     Top-level key prefixing this encoder's dotted timing
                                keys — ``<prefix>.<strategy>`` per ffmpeg encode and
-                               ``<prefix>.measure`` per quality measurement.
-                               EncodingPhase uses the default (``encoding``);
-                               OptimizationPhase passes ``optimization`` so its test
-                               encodes are attributed to the owning phase.
-            measure_attempts:  When ``True`` (default) every encoded attempt gets a
-                               quality measurement. When ``False``, attempts are
-                               encoded and promoted without measurement — the seam
-                               exists for measurement cost control (TODO §83 owns
-                               default-flipping and the metrics-absence tolerance);
-                               callers exercising it must run a single-point quality
-                               domain where the search never consumes metrics.
+                               ``<prefix>.measure`` per quality measurement
+                               (``optimization`` prefixes its test encodes).
+            measure_attempts:  When ``True`` every encoded attempt gets a quality
+                               measurement. When ``False``, attempts are encoded
+                               and promoted without measurement (TODO §83 owns the
+                               metrics-absence tolerance); callers exercising it
+                               must run a single-point quality domain where the
+                               search never consumes metrics.
         """
         self.quality_measurer = quality_measurer
         self.work_dir          = work_dir
@@ -1246,8 +1227,6 @@ class ChunkEncoder:
             # compose, no scan — Req 9): accepted from its sidecar when the
             # sidecar is complete; a missing/incomplete/stale sidecar
             # re-measures below.
-            output_file: Path | None = None
-            attempt_frames = 0
             existing = self._check_existing_encoding(
                 chunk.safe_name(), strategy, current_q
             )
@@ -1353,8 +1332,6 @@ class ChunkEncoder:
                             chunk.safe_name(), attempt_frames, chunk.frame_count,
                             chunk.start_timestamp, chunk.end_timestamp,
                         )
-
-            assert output_file is not None
 
             # Measure quality — raw metric logs/stats go into a per-attempt subfolder;
             # the plot and YAML sidecar stay next to the .mkv. The measure_attempts
@@ -1537,8 +1514,8 @@ async def _encode_pairs(
     concurrency:      int,
     collector:        MetricsCollector,
     phase_recovery:   _PhaseRecovery,
+    metric_prefix:    MetricKey,
     advance:          Callable[[int | float, AdvanceState], None] | None = None,
-    metric_prefix:    MetricKey                                                  = MetricKey.ENCODING,
 ) -> _EncodingResult:
     """Encode the pending (chunk, strategy) pairs through the bounded runner.
 
@@ -2336,6 +2313,7 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
                     concurrency     = self._config.encoding.concurrency,
                     collector       = self._collector,
                     phase_recovery  = pairs,
+                    metric_prefix   = MetricKey.ENCODING,
                     advance         = advance,
                 )
             )

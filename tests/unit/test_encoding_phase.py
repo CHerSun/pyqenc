@@ -62,6 +62,7 @@ class TestRecoverEncodingAttempts:
             work_dir  = tmp_path,
             chunk_ids = [_CHUNK_ID],
             strategies = [_STRATEGY_OBJ],
+            require_winner_sidecar = True,
         )
 
         pair = recovery.pairs[(_CHUNK_ID, _STRATEGY)]
@@ -75,6 +76,7 @@ class TestRecoverEncodingAttempts:
             work_dir  = tmp_path,
             chunk_ids = [_CHUNK_ID],
             strategies = [_STRATEGY_OBJ],
+            require_winner_sidecar = True,
         )
 
         pair = recovery.pairs[(_CHUNK_ID, _STRATEGY)]
@@ -93,6 +95,7 @@ class TestRecoverEncodingAttempts:
             work_dir  = tmp_path,
             chunk_ids = [_CHUNK_ID],
             strategies = [_STRATEGY_OBJ],
+            require_winner_sidecar = True,
         )
 
         pair = recovery.pairs[(_CHUNK_ID, _STRATEGY)]
@@ -110,6 +113,7 @@ class TestRecoverEncodingAttempts:
             work_dir  = tmp_path,
             chunk_ids = [chunk_a, chunk_b],
             strategies = [_STRATEGY_OBJ],
+            require_winner_sidecar = True,
         )
 
         assert recovery.pairs[(chunk_a, _STRATEGY)].state == ArtifactState.COMPLETE
@@ -126,6 +130,7 @@ class TestRecoverEncodingAttempts:
             work_dir  = tmp_path,
             chunk_ids = [_CHUNK_ID],
             strategies = [_STRATEGY_OBJ],
+            require_winner_sidecar = True,
         )
 
         pair = recovery.pairs[(_CHUNK_ID, _STRATEGY)]
@@ -220,14 +225,23 @@ def _run_encode(
             quality_measurer  = evaluator,
             work_dir          = tmp_path,
             collector         = _MM(spec=_MetricsCollector),
+            crop_params       = None,
+            cleanup_level     = CleanupLevel.NONE,
+            visual_hash       = True,
             sampling           = 10,
+            metric_prefix     = MetricKey.ENCODING,
+            measure_attempts  = True,
         )
     else:
         encoder = _ChunkEncoder(
             quality_measurer  = evaluator,
             work_dir          = tmp_path,
             collector         = _MM(spec=_MetricsCollector),
+            crop_params       = None,
+            cleanup_level     = CleanupLevel.NONE,
+            visual_hash       = True,
             sampling           = 10,
+            metric_prefix     = MetricKey.ENCODING,
             measure_attempts  = measure_attempts,
         )
 
@@ -318,7 +332,11 @@ class TestMeasureAttemptsSeam:
             quality_measurer = evaluator,
             work_dir         = tmp_path,
             collector        = _MM(spec=_MetricsCollector),
+            crop_params       = None,
+            cleanup_level     = CleanupLevel.NONE,
+            visual_hash       = True,
             sampling          = 10,
+            metric_prefix     = MetricKey.ENCODING,
             measure_attempts = True,
         )
 
@@ -362,7 +380,7 @@ class TestMeasureAttemptsSeam:
 # (fixed-quality spec Req 9.1, 9.4, 9.5, 9.7)
 # ---------------------------------------------------------------------------
 
-from pyqenc.metrics import NoOpMetricsCollector
+from pyqenc.metrics import MetricKey, NoOpMetricsCollector
 from pyqenc.models import CleanupLevel, CropParams, PhaseOutcome, QualityTarget
 from pyqenc.phase import Artifact as _PAArtifact
 from pyqenc.phase import PhaseRegistry
@@ -486,7 +504,11 @@ def _run_encode_with_targets(
         quality_measurer  = evaluator,
         work_dir          = tmp_path,
         collector         = _MM(spec=_MetricsCollector),
+        crop_params       = None,
+        cleanup_level     = CleanupLevel.NONE,
+        visual_hash       = True,
         sampling           = 10,
+        metric_prefix     = MetricKey.ENCODING,
         measure_attempts  = measure_attempts,
     )
 
@@ -536,7 +558,12 @@ class TestAttemptFrameCountSourcing:
             quality_measurer  = evaluator,
             work_dir          = tmp_path,
             collector         = _MM(spec=_MetricsCollector),
+            crop_params       = None,
+            cleanup_level     = CleanupLevel.NONE,
+            visual_hash       = True,
             sampling           = 10,
+            metric_prefix     = MetricKey.ENCODING,
+            measure_attempts  = True,
         )
 
     def _target(self):

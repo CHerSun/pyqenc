@@ -169,6 +169,7 @@ class TestWinnerTargetedSubset:
         _write_winner_sidecar(
             tmp_path, "chunk",
             Decimal("18.0"), {"vmaf_min": 94.5}, 2400,
+            targets_met=True,
         )
         data = yaml.safe_load(
             (tmp_path / EncodedChunk.format_winner_sidecar_name("chunk")).read_text(encoding="utf-8"),
