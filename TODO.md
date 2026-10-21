@@ -186,6 +186,17 @@ I belive a value of ~3.5 is possible for convergence. This directly affects spee
 h264 uses a single instance of codec private data. If it differs between chunks' winning attempts - h264 video cannot be merged and played later, unlike h265 or av1, which have local copies in blocks.
 Need to investigate why this is happening and if we can fix this without ruining processing for other codecs.
 
+2026-10-21 CONFIRMED LIVE (§83 e2e matrix, search + `--no-optimize`): search-mode h264 winners
+at differing CRFs → mkvmerge emits "No append mapping … default mapping" warnings for EVERY
+appended chunk (107×) → exit 1 → pyqenc treats any nonzero exit as fatal → merge FAILS for
+the strategy ("Failed strategies: h264", phase ERROR). Fixed runs never hit it (one CRF →
+identical SPS); h265 never (in-block parameter sets); searched+optimize runs normally never
+reach an h264 merge (tolerance eliminates it — only `--no-optimize` exposes all strategies).
+Evidence preserved: `D:\_encoding\tmp\nomeasure-e2e\section52-evidence\` (winners at CRF
+24/30/18 + the concat options JSON) and the reproduction transcript. Related bycatch: the
+"mkvmerge failed (exit N)" ERROR line drops mkvmerge's stdout warnings — the actual cause
+never surfaces in the log.
+
 ---
 
 ## 53. (fast) Ensure mkvextract with fallback
