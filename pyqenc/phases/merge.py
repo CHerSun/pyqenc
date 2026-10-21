@@ -871,11 +871,17 @@ class MergePhase(Phase[MergePhaseResult]):
                             "run 'pyqenc measure <output>' for quality metrics"
                         )
 
-                    # Quality distribution plot — reads the typed winners field
-                    quality_data = MergePhase._collect_quality_data(
-                        self._deps[JobPhase].work_dir,
-                        self._deps[EncodingPhase].winners,
-                        strategy_name,
+                    # Quality-knob distribution plot — searched runs only: a
+                    # fixed run's knob is constant, so the per-chunk plot
+                    # carries zero information.
+                    quality_data = (
+                        MergePhase._collect_quality_data(
+                            self._deps[JobPhase].work_dir,
+                            self._deps[EncodingPhase].winners,
+                            strategy_name,
+                        )
+                        if not plan.fixed_quality
+                        else []
                     )
                     if quality_data:
                         quality_plot_path = merged_dir / f"{output_file.stem}.quality.png"

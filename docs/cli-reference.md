@@ -85,6 +85,13 @@ or reporting. `--no-measure` opts out of the reporting half.
   election, judged attempts, winner-limiter table) and only the merged-output
   measurement is skipped.
 
+Runs with unmeasured attempts write no attempt or winner sidecars — winners
+are video-only, and same-flag reruns resume from them directly. A later run
+with measured attempts sees those winners as pending and re-measures the
+existing videos in place (never re-encodes). Fixed runs of any kind also skip
+the per-chunk quality-knob plot at merge (the knob is constant, the plot
+would be a flat line).
+
 When measurements are skipped the log says so and points at the escape hatch:
 run `pyqenc measure <output>` afterwards for quality metrics on exactly the
 outputs you care about.

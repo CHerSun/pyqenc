@@ -260,13 +260,12 @@ class TestMeasureAttemptsSeam:
         evaluator.measure_chunk.assert_called_once()
 
     def test_off_path_skips_evaluation_and_accepts_single_point(self, tmp_path: Path) -> None:
-        """measure_attempts=False: no measurement, empty sidecar metrics, one
+        """measure_attempts=False: no measurement, no sidecars anywhere, one
         accepted attempt at the fixed value.
 
-        Documents the seam (TODO §83 owns default-flipping and the
-        metrics-absence tolerance): the attempt sidecar metric-keys
-        requirement is lifted — the sidecar records the attempt with empty
-        metrics, and the winner is promoted unconditionally.
+        No measurement facts, no sidecars (§83): the attempt and the winner
+        are video-only — a later attempt-measuring run sees the pair pending
+        and re-measures the existing videos in place.
         """
         result, evaluator = _run_encode(tmp_path, measure_attempts=False)
         evaluator.measure_chunk.assert_not_called()
@@ -275,17 +274,17 @@ class TestMeasureAttemptsSeam:
         assert result.final_quality == _D("18.0")
         assert result.attempts == 1
 
-        sidecar_path = (
+        attempt_sidecar = (
             tmp_path / "encoding" / "test_strategy" / "chunk_001.q18.0.yaml"
         )
-        sidecar = _yaml.safe_load(sidecar_path.read_text(encoding="utf-8"))
-        assert sidecar["metrics"] == {}
-        assert sidecar["frame_count"] == 120
+        assert not attempt_sidecar.exists()
 
+        winner_video = tmp_path / "encoded" / "test_strategy" / "chunk_001.mkv"
         winner_sidecar = (
             tmp_path / "encoded" / "test_strategy" / "chunk_001.yaml"
         )
-        assert winner_sidecar.exists()
+        assert winner_video.exists()
+        assert not winner_sidecar.exists()
 
     def test_on_path_measures_and_persists_all_metrics(self, tmp_path: Path) -> None:
         """measure_attempts=True: measurement runs and all metrics persist."""
@@ -297,6 +296,57 @@ class TestMeasureAttemptsSeam:
         )
         sidecar = _yaml.safe_load(sidecar_path.read_text(encoding="utf-8"))
         assert sidecar["metrics"]["vmaf_min"] == 95.0
+
+    def test_sidecarless_attempt_video_heals_by_remeasure(self, tmp_path: Path) -> None:
+        """The upgrade path: an attempt video left by an unmeasured run (no
+        attempt sidecar) is picked up by its exact name and re-measured in
+        place — the encoder never runs, the sidecars materialize with real
+        metrics."""
+        strategy = _fixed_strategy()
+        chunk    = _chunk_mock(tmp_path)
+
+        fake_eval = _MM(spec=_QE)
+        fake_eval.targets_met  = True
+        fake_eval.logs         = _QL()
+        fake_eval.metrics      = {_MetricType.VMAF: {"min": 95.0, "median": 96.5}}
+        fake_eval.frame_count  = 120
+
+        evaluator = _MM(spec=_QMeasurer)
+        evaluator.work_dir = tmp_path
+        evaluator.measure_chunk.return_value = fake_eval
+
+        encoder = _ChunkEncoder(
+            quality_measurer = evaluator,
+            work_dir         = tmp_path,
+            collector        = _MM(spec=_MetricsCollector),
+            sampling          = 10,
+            measure_attempts = True,
+        )
+
+        # The unmeasured run's residue: the attempt video, nothing else.
+        attempt = tmp_path / "encoding" / "test_strategy" / "chunk_001.q18.0.mkv"
+        attempt.parent.mkdir(parents=True, exist_ok=True)
+        attempt.write_bytes(b"fake mkv")
+
+        encode_mock = _MM(return_value=_FFR(returncode=0, success=True, stderr_lines=[], frame_count=120))
+        with _patch.object(encoder, "_encode_with_ffmpeg", encode_mock):
+            result = encoder.encode_chunk(
+                chunk       = chunk,
+                strategy     = strategy,
+                quality_targets = [],
+                initial_quality = _D("18.0"),
+                force       = False,
+            )
+
+        encode_mock.assert_not_called()
+        evaluator.measure_chunk.assert_called_once()
+        assert result.success is True
+
+        sidecar = _yaml.safe_load(attempt.with_suffix(".yaml").read_text(encoding="utf-8"))
+        assert sidecar["metrics"]["vmaf_min"] == 95.0
+        assert (
+            tmp_path / "encoded" / "test_strategy" / "chunk_001.yaml"
+        ).exists()
 
     def test_seam_threaded_explicitly_at_both_call_sites(self) -> None:
         """Optimization always measures; the encoding phase reads the plan."""
@@ -646,11 +696,15 @@ class TestEncodingPresentationTargets:
         }
         phase = EncodingPhase(config, registry, collector=NoOpMetricsCollector())
 
-        # The encoded winner the stubbed pool reports back.
+        # The encoded winner the stubbed pool reports back. Pre-seeded only
+        # when attempts are measured — a video-only winner is COMPLETE under
+        # attempt-aware recovery, which would fast-exit the phase before the
+        # pool ever runs.
         winner_dir = work_dir / "encoded" / strategy.safe_name()
         winner_dir.mkdir(parents=True, exist_ok=True)
         winner_path = winner_dir / _EC.format_winner_file_name(chunk.safe_name())
-        winner_path.write_bytes(b"x" * 32)
+        if plan.measures_attempts:
+            winner_path.write_bytes(b"x" * 32)
         winner = build_encoded_chunk(
             chunk=chunk, strategy=strategy,
             path=winner_path, frame_count=240,
@@ -721,6 +775,9 @@ class TestEncodingPresentationTargets:
         assert result.is_complete
         assert captured["quality_targets"] == []
         assert captured["measure_attempts"] is False
+        # Consequences of the sidecar-free fast path: no encoding.yaml (the
+        # replay aggregate holds only measurement-derived data).
+        assert not (tmp_path / "work" / "encoding.yaml").exists()
 
     def test_searched_uses_config_targets_unchanged(self, tmp_path: Path, monkeypatch) -> None:
         result, captured = self._run_phase(

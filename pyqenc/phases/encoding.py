@@ -457,18 +457,25 @@ def _pair_rows(
     work_dir:   Path,
     chunks:     list[VideoStreamChunk],
     strategies: list[Strategy],
+    *,
+    require_winner_sidecar: bool = True,
 ) -> list[Artifact[EncodedChunk]]:
     """Build the per-pair ledger: one row per (chunk, strategy) pair.
 
     States come from the shared attempt-recovery machinery — a row is
-    ``COMPLETE`` only when that pair's winner actually exists on disk (result
-    sidecar + winning file); such rows carry the composed winner payload.
-    Rows without a winner carry the placeholder pair payload. Shared by
-    OptimizationPhase (test pairs) and EncodingPhase (full set).
+    ``COMPLETE`` only when that pair's winner actually exists on disk
+    (per the attempt-aware rule: the winning file, plus the result
+    sidecar when attempts are measured); such rows carry the composed
+    winner payload.  Rows without a winner carry the placeholder pair
+    payload. Shared by OptimizationPhase (test pairs) and EncodingPhase
+    (full set).
     """
     chunk_ids      = [c.safe_name() for c in chunks]
     strategy_names = [s.display_name() for s in strategies]
-    pair_recovery  = _recover_encoding_attempts(work_dir, chunk_ids, strategies)
+    pair_recovery  = _recover_encoding_attempts(
+        work_dir, chunk_ids, strategies,
+        require_winner_sidecar = require_winner_sidecar,
+    )
     chunk_by_id    = {c.safe_name(): c for c in chunks}
     strategy_by_name = {s.display_name(): s for s in strategies}
 
@@ -548,14 +555,18 @@ def _recover_encoding_attempts(
     work_dir:  Path,
     chunk_ids: list[str],
     strategies: list[Strategy],
+    *,
+    require_winner_sidecar: bool = True,
 ) -> _PhaseRecovery:
     """Classify all ``(chunk_id, strategy)`` pairs from a single directory scan per strategy.
 
     For each strategy, lists ``encoded/<strategy>/`` once and consumes the
-    STATIC expected names: a pair is ``COMPLETE`` iff both
-    ``<chunk_id>.mkv`` and ``<chunk_id>.yaml`` (the winner file and its
-    result sidecar, composed by :class:`EncodedChunk`) are present in the
-    listing. No name parsing, no per-pair globs, no file reads.
+    STATIC expected names: a pair is ``COMPLETE`` iff ``<chunk_id>.mkv`` (the
+    winner file, composed by :class:`EncodedChunk`) is present, plus
+    ``<chunk_id>.yaml`` (the winner result sidecar) when attempts are
+    measured — a run with unmeasured attempts writes no winner sidecars, so
+    its video-only winners are complete as they are. No name parsing, no
+    per-pair globs, no file reads.
 
     quality history for pending pairs is not pre-loaded: when the encoding worker
     actually picks a pair up, each attempt the search proposes is checked
@@ -567,6 +578,10 @@ def _recover_encoding_attempts(
         work_dir:   Pipeline working directory.
         chunk_ids:  Chunk identifiers to recover.
         strategies: Strategies to recover (pairs keyed by display name).
+        require_winner_sidecar: Whether completeness requires the winner
+            result sidecar — ``True`` when attempts are measured (the
+            sidecar carries the judging facts), ``False`` for runs with
+            unmeasured attempts (video-only winners).
 
     Returns:
         ``_PhaseRecovery`` with per-pair recovery state and pending list.
@@ -598,7 +613,10 @@ def _recover_encoding_attempts(
             )
             complete = (
                 EncodedChunk.format_winner_file_name(chunk_id) in present_names
-                and EncodedChunk.format_winner_sidecar_name(chunk_id) in present_names
+                and (
+                    not require_winner_sidecar
+                    or EncodedChunk.format_winner_sidecar_name(chunk_id) in present_names
+                )
             )
             if complete:
                 pairs[(chunk_id, name)] = _EncodingRecovery(
@@ -844,6 +862,8 @@ class ChunkEncoder:
            ``encoded/<strategy>/`` — its presence marks the pair as
            ``COMPLETE``.  Its metrics are the TARGETED subset (filtered here
            against the judging targets; full sets stay on attempt sidecars).
+           Attempts without measurement skip this and step 2 — their winners
+           are video-only (completeness is attempt-aware on recovery).
 
         Args:
             strategy:        Encoding strategy.
@@ -865,20 +885,24 @@ class ChunkEncoder:
         if not dst_mkv.exists():
             _hardlink_or_copy(winning_attempt, dst_mkv)
 
-        src_graph = winning_attempt.with_suffix(".png")
-        if src_graph.exists():
-            dst_graph = encoded_dir / f"{chunk_id}.png"
-            if not dst_graph.exists():
-                _hardlink_or_copy(src_graph, dst_graph)
+        # No measurement facts, no sidecar: attempts without measurement
+        # produce video-only winners — the result sidecar exists iff attempts
+        # are measured (completeness is attempt-aware on recovery).
+        if self._measure_attempts:
+            src_graph = winning_attempt.with_suffix(".png")
+            if src_graph.exists():
+                dst_graph = encoded_dir / f"{chunk_id}.png"
+                if not dst_graph.exists():
+                    _hardlink_or_copy(src_graph, dst_graph)
 
-        _write_winner_sidecar(
-            output_dir  = encoded_dir,
-            chunk_id    = chunk_id,
-            quality     = quality,
-            metrics     = _winner_targeted_metrics(metrics, quality_targets),
-            frame_count = frame_count,
-            targets_met = targets_met,
-        )
+            _write_winner_sidecar(
+                output_dir  = encoded_dir,
+                chunk_id    = chunk_id,
+                quality     = quality,
+                metrics     = _winner_targeted_metrics(metrics, quality_targets),
+                frame_count = frame_count,
+                targets_met = targets_met,
+            )
 
         # Intermediate cleanup: delete all attempt files for this pair from
         # encoding/ — only after the promotion and sidecar are safely written.
@@ -1239,14 +1263,16 @@ class ChunkEncoder:
             targets_set  = {f"{t.metric}_{t.statistic}" for t in quality_targets}
             metrics_dict = {k: v for k, v in all_metrics.items() if k in targets_set}
 
-            # Record the attempt's facts and write the per-attempt sidecar
-            # atomically.
+            # Record the attempt's in-memory facts; the per-attempt sidecar
+            # persists them atomically — attempts without measurement have
+            # no facts to record (TODO §83: no measurement facts, no sidecars).
             frame_counts[output_file] = attempt_frames
             all_metrics_by_path[output_file] = all_metrics
-            _write_attempt_sidecar(
-                output_file, all_metrics,
-                self._sampling, attempt_frames,
-            )
+            if self._measure_attempts:
+                _write_attempt_sidecar(
+                    output_file, all_metrics,
+                    self._sampling, attempt_frames,
+                )
 
             # Build AttemptMetadata for this attempt.
             attempt_meta = AttemptMetadata(
@@ -1868,7 +1894,10 @@ def encode_all_chunks(
     # Artifact recovery: classify every (chunk, strategy) pair.
     chunk_ids      = [c.safe_name() for c in chunks]
     strategy_names = [s.display_name() for s in strategies]
-    phase_recovery = _recover_encoding_attempts(work_dir, chunk_ids, strategies)
+    phase_recovery = _recover_encoding_attempts(
+        work_dir, chunk_ids, strategies,
+        require_winner_sidecar = measure_attempts,
+    )
 
     if dry_run:
         pending_count  = len(phase_recovery.pending)
@@ -2223,8 +2252,13 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
             raise RecoveryError("No strategies available from OptimizationPhase")
 
         # Step 3: the per-pair ledger (winning attempt per chunk x strategy,
-        # presence-based) plus the winner-layer curation.
-        rows: list[Artifact] = _pair_rows(work_dir, chunks, strategies)
+        # presence-based) plus the winner-layer curation.  Completeness is
+        # attempt-aware: video-only winners are complete when the run's
+        # attempts are unmeasured.
+        rows: list[Artifact] = _pair_rows(
+            work_dir, chunks, strategies,
+            require_winner_sidecar = self._deps[ProbePhase].plan.measures_attempts,
+        )
         rows += self._curate_winner_layer(work_dir, strategies, chunks)
         return Recovery.from_artifacts(rows)
 
@@ -2475,7 +2509,10 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
         complete_count = len(winners)
 
         if failed_pairs:
-            final_rows = _pair_rows(work_dir, chunks, strategies)
+            final_rows = _pair_rows(
+                work_dir, chunks, strategies,
+                require_winner_sidecar = self._deps[ProbePhase].plan.measures_attempts,
+            )
             return self._make_result(
                 PhaseOutcome.FAILED,
                 [r for r in final_rows if r.wanted],
@@ -2493,11 +2530,19 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
         # The dependency walk guarantees a completed probe with a resolved stream.
         assert probe_result.stream is not None, "probe guaranteed complete by the dependency walk"
         source_total = probe_result.stream.payload.frame_count
-        scan         = _scan_winner_sidecars(
-            work_dir,
-            enc_result.encoded_chunks,
-            [s.display_name() for s in strategies],
-            presentation_targets,
+        # No measurement facts, no sidecars — runs with unmeasured attempts
+        # have no winner sidecars to scan: the limiter table, the frame-totals
+        # check, and encoding.yaml all derive from the scan and stay absent;
+        # merge's source-vs-merged frame verification remains the backstop.
+        scan = (
+            _scan_winner_sidecars(
+                work_dir,
+                enc_result.encoded_chunks,
+                [s.display_name() for s in strategies],
+                presentation_targets,
+            )
+            if self._deps[ProbePhase].plan.measures_attempts
+            else None
         )
         if source_total > 0 and scan is not None:
             if not scan.frames_known:
@@ -2536,16 +2581,21 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
         # persisted as a key, never a selection input, never merge's anchor
         # basis. When an anchor WAS due but no strategy carried
         # measurements, the optimization error surfaces loudly instead of a
-        # silent election.
-        presentation_anchor = self._resolve_presentation_anchor(
-            optimization_result, scan, self._deps[ProbePhase].plan,
-            winner_sizes={
-                name: sum(
-                    safe_stat_size(p.stream.stream.file.path) or 0
-                    for p in payloads
-                )
-                for name, payloads in enc_result.encoded_chunks.items()
-            },
+        # silent election. Without a scan (unmeasured attempts) there is no
+        # election at all — and no winner-sizes stat sweep either.
+        presentation_anchor = (
+            self._resolve_presentation_anchor(
+                optimization_result, scan, self._deps[ProbePhase].plan,
+                winner_sizes={
+                    name: sum(
+                        safe_stat_size(p.stream.stream.file.path) or 0
+                        for p in payloads
+                    )
+                    for name, payloads in enc_result.encoded_chunks.items()
+                },
+            )
+            if scan is not None
+            else None
         )
 
         # The single post-success write: the winning-limiter table and the

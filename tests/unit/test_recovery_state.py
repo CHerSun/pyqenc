@@ -99,6 +99,39 @@ class TestRecoverAttemptsAbsent:
         assert pair.state == ArtifactState.ABSENT
 
 
+class TestAttemptAwareCompleteness:
+    """Video-only winners are COMPLETE exactly when attempts are unmeasured."""
+
+    def _video_only_winner(self, tmp_path: Path) -> None:
+        out_dir = _encoded_dir(tmp_path)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / EncodedChunk.format_winner_file_name(_CHUNK_ID)).write_bytes(b"\x00" * 64)
+
+    def test_video_only_complete_when_attempts_unmeasured(self, tmp_path: Path) -> None:
+        """An unmeasured run writes no winner sidecars — its video-only
+        winners are complete as they are (same-flags rerun resumes)."""
+        self._video_only_winner(tmp_path)
+
+        result = recover_attempts(
+            tmp_path, [_CHUNK_ID], [_STRATEGY_OBJ],
+            require_winner_sidecar=False,
+        )
+        pair = result.pairs[(_CHUNK_ID, _STRATEGY)]
+        assert pair.state == ArtifactState.COMPLETE
+        assert (_CHUNK_ID, _STRATEGY) not in result.pending
+
+    def test_video_only_partial_when_attempts_measured(self, tmp_path: Path) -> None:
+        """The upgrade path: an attempt-measuring rerun sees the sidecar-less
+        winner as pending — the replay re-measures the existing video in
+        place."""
+        self._video_only_winner(tmp_path)
+
+        result = recover_attempts(tmp_path, [_CHUNK_ID], [_STRATEGY_OBJ])
+        pair = result.pairs[(_CHUNK_ID, _STRATEGY)]
+        assert pair.state == ArtifactState.PARTIAL
+        assert (_CHUNK_ID, _STRATEGY) in result.pending
+
+
 class TestRecoverAttemptsComplete:
     """COMPLETE: winner .mkv + .yaml sidecar present in encoded/."""
 
