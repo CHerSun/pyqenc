@@ -337,10 +337,10 @@ def _add_quality_arguments(parser: argparse.ArgumentParser) -> None:
         default=True,
         help=(
             "Skip quality measurements nothing consumes: merged-output "
-            "measurement always; attempt measurement when the fixed run also "
-            "passed --no-optimize; the optimization phase when no elimination "
-            "applies (--no-optimize or a single strategy). Run 'pyqenc "
-            "measure <output>' afterwards for quality metrics."
+            "measurement always; attempt measurement and the optimization "
+            "phase when no elimination applies on a fixed run (--no-optimize "
+            "or a single strategy). Run 'pyqenc measure <output>' afterwards "
+            "for quality metrics."
         ),
     )
     parser.add_argument(

@@ -231,20 +231,31 @@ class TestMeasuresAttempts:
         plan = _resolve_with_override(["h265-aq"], (Decimal("18"), Decimal("18")))
         assert plan.measures_attempts is True
 
-    def test_fixed_no_measure_with_optimize_keeps_attempts(self) -> None:
-        """Optimize on: attempts stay measured; only merged outputs skip."""
-        plan = _config_with_strategies("h265-aq").resolve_encoding(
+    def test_fixed_no_measure_with_optimize_multi_keeps_attempts(self) -> None:
+        """Optimize on + multiple strategies: the comparison judges attempts —
+        they stay measured; only merged outputs skip."""
+        plan = _config_with_strategies("h265-aq", "h264").resolve_encoding(
             optimize=True, measure=False, quality=(Decimal("18"), Decimal("18")),
         )
         assert plan.fixed_quality is True
+        assert len(plan.strategies) == 2
         assert plan.measures_attempts is True
 
-    def test_fixed_no_measure_no_optimize_skips_attempts(self) -> None:
-        plan = _config_with_strategies("h265-aq").resolve_encoding(
+    def test_fixed_no_measure_no_elimination_skips_attempts(self) -> None:
+        """No elimination applies (--no-optimize or a single strategy): the
+        optimization phase is skipped, no anchor judges the attempts — they
+        are not measured (approved-plan table row)."""
+        single = _config_with_strategies("h265-aq").resolve_encoding(
+            optimize=True, measure=False, quality=(Decimal("18"), Decimal("18")),
+        )
+        assert single.fixed_quality is True
+        assert single.measures_attempts is False
+
+        no_optimize = _config_with_strategies("h265-aq", "h264").resolve_encoding(
             optimize=False, measure=False, quality=(Decimal("18"), Decimal("18")),
         )
-        assert plan.fixed_quality is True
-        assert plan.measures_attempts is False
+        assert no_optimize.fixed_quality is True
+        assert no_optimize.measures_attempts is False
 
 
 # ---------------------------------------------------------------------------

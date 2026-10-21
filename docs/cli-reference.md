@@ -78,11 +78,12 @@ or reporting. `--no-measure` opts out of the reporting half.
 - **Searched runs:** merged-output measurement is skipped; everything else is
   unchanged — the search itself still measures (it steers by the results).
 - **Fixed runs:** merged-output measurement is always skipped. Attempt
-  measurement is skipped iff `--no-optimize` was also passed. The
-  optimization phase is skipped when no decision is needed there —
-  `--no-optimize` or a single strategy; with optimize on and multiple
-  strategies it runs normally (dominance pruning, anchor election, judged
-  attempts, winner-limiter table).
+  measurement and the optimization phase are both skipped when no elimination
+  applies — `--no-optimize` or a single strategy (nothing judges the
+  attempts: no optimization phase, no anchor). With optimize on and multiple
+  strategies the comparison runs normally (dominance pruning, anchor
+  election, judged attempts, winner-limiter table) and only the merged-output
+  measurement is skipped.
 
 When measurements are skipped the log says so and points at the escape hatch:
 run `pyqenc measure <output>` afterwards for quality metrics on exactly the

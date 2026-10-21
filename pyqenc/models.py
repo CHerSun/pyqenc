@@ -746,12 +746,17 @@ class EncodingPlan(BaseModel):
     def measures_attempts(self) -> bool:
         """Whether encoding attempts get quality measurements.
 
-        The search always steers by measurements; a fixed run measures
-        its attempts unless the user opted out of both measurement and
-        optimization (``--no-measure --no-optimize``) — without the
-        optimization phase there is no anchor to judge against.
+        The search always steers by measurements; a fixed run measures its
+        attempts only when an elimination-driven comparison judges them
+        (optimize on, multiple strategies) — without the optimization phase
+        there is no anchor to judge against, so a measurement-opted-out run
+        with nothing to eliminate measures nothing.
         """
-        return (not self._fixed_quality) or self.measure or self.optimize
+        return (
+            (not self._fixed_quality)
+            or self.measure
+            or (self.optimize and len(self.strategies) > 1)
+        )
 
 
 def _coerce_decimal_pair(v: tuple | list) -> tuple[Decimal, Decimal]:
