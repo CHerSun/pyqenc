@@ -192,10 +192,10 @@ appended chunk (107×) → exit 1 → pyqenc treats any nonzero exit as fatal �
 the strategy ("Failed strategies: h264", phase ERROR). Fixed runs never hit it (one CRF →
 identical SPS); h265 never (in-block parameter sets); searched+optimize runs normally never
 reach an h264 merge (tolerance eliminates it — only `--no-optimize` exposes all strategies).
-Evidence preserved: `D:\_encoding\tmp\nomeasure-e2e\section52-evidence\` (winners at CRF
-24/30/18 + the concat options JSON) and the reproduction transcript. Related bycatch: the
-"mkvmerge failed (exit N)" ERROR line drops mkvmerge's stdout warnings — the actual cause
-never surfaces in the log.
+Reproduce: `D:\_encoding\tmp\nomeasure-e2e\section52-evidence\REPRODUCE.md` — the exact
+pipeline command plus a self-contained 3-winner minimal repro (exit 1 + append-mapping
+warnings). Related bycatch: the "mkvmerge failed (exit N)" ERROR line drops mkvmerge's
+stdout warnings — the actual cause never surfaces in the log.
 
 ---
 
