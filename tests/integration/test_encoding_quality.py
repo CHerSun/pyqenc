@@ -185,7 +185,7 @@ class TestEncodeChunkQualitySearchV2Integration:
         from unittest.mock import MagicMock, patch
 
         from pyqenc.models import AttemptMetadata, QualityTarget
-        from pyqenc.phases.encoding import ChunkEncoder, ChunkEncodingResult
+        from pyqenc.phases.encoding import ChunkEncoder, _ChunkEncodingResult
         from pyqenc.utils.visualization import QualityMeasurer
 
         strategy = self._make_strategy()
@@ -237,7 +237,7 @@ class TestEncodeChunkQualitySearchV2Integration:
                 force           = False,
             )
 
-        assert isinstance(result, ChunkEncodingResult)
+        assert isinstance(result, _ChunkEncodingResult)
         assert result.reused is True, f"Expected reused=True, got: {result}"
         assert result.success is True
         # Quality evaluator must NOT have been called (pure cache hit).

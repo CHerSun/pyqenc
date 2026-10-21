@@ -486,7 +486,7 @@ def _pair_rows(
             pair = pair_recovery.pairs[(chunk_id, name)]
             if pair.state == ArtifactState.COMPLETE and pair.winning_file is not None:
                 rows.append(Artifact(
-                    payload = build_encoded_chunk(
+                    payload = _build_encoded_chunk(
                         chunk      = chunk_by_id[chunk_id],
                         strategy   = strategy_by_name[name],
                         path       = pair.winning_file,
@@ -645,7 +645,7 @@ def _recover_encoding_attempts(
 
 
 @dataclass
-class ChunkEncodingResult:
+class _ChunkEncodingResult:
     """Result of encoding a single chunk.
 
     Attributes:
@@ -705,7 +705,7 @@ class _WinnerScan:
 
 
 @dataclass
-class EncodingResult:
+class _EncodingResult:
     """Result of encoding all chunks.
 
     Attributes:
@@ -1008,7 +1008,7 @@ class ChunkEncoder:
         quality_targets:  list[QualityTarget],
         initial_quality:      Decimal,
         force:            bool  = False,
-    ) -> ChunkEncodingResult:
+    ) -> _ChunkEncodingResult:
         """Encode the chunk window, adjusting quality until targets are met.
 
         The window reads the source directly (``chunk.as_input()``); quality
@@ -1180,7 +1180,7 @@ class ChunkEncoder:
                 if run_result is None:
                     error_msg = f"Encoding failed for chunk {chunk.safe_name()}"
                     logger.error(error_msg)
-                    return ChunkEncodingResult(
+                    return _ChunkEncodingResult(
                         chunk_id    = chunk.safe_name(),
                         strategy    = strategy.display_name(),
                         success     = False,
@@ -1199,7 +1199,7 @@ class ChunkEncoder:
                             "%d vs %d — the same window must encode the same frames",
                             chunk.safe_name(), last_frame_count, attempt_frames,
                         )
-                        return ChunkEncodingResult(
+                        return _ChunkEncodingResult(
                             chunk_id    = chunk.safe_name(),
                             strategy    = strategy.display_name(),
                             success     = False,
@@ -1395,7 +1395,7 @@ class ChunkEncoder:
             # Same winner rule as the fresh path: a passing attempt when one exists,
             # otherwise the best failing attempt (still the best recovered state).
             winner = final_attempt if final_attempt is not None else best_fail_attempt
-            return ChunkEncodingResult(
+            return _ChunkEncodingResult(
                 chunk_id      = chunk.safe_name(),
                 strategy      = strategy.display_name(),
                 success       = True,
@@ -1410,7 +1410,7 @@ class ChunkEncoder:
         if final_attempt is not None or best_fail_attempt is not None:
             winning = final_attempt if final_attempt is not None else best_fail_attempt
             assert winning is not None, "the branch condition guarantees a winner"
-            return ChunkEncodingResult(
+            return _ChunkEncodingResult(
                 chunk_id      = chunk.safe_name(),
                 strategy      = strategy.display_name(),
                 success       = True,
@@ -1424,7 +1424,7 @@ class ChunkEncoder:
         else:
             error_msg = f"Failed to meet quality targets after {attempt_number} attempts"
             logger.error("Chunk %s: %s", chunk.safe_name(), error_msg)
-            return ChunkEncodingResult(
+            return _ChunkEncodingResult(
                 chunk_id    = chunk.safe_name(),
                 strategy    = strategy.display_name(),
                 success     = False,
@@ -1435,7 +1435,7 @@ class ChunkEncoder:
 
 
 
-def build_encoded_chunk(
+def _build_encoded_chunk(
     chunk:        VideoStreamChunk,
     strategy:     Strategy,
     path:         Path,
@@ -1487,7 +1487,7 @@ async def _encode_chunk_async(
     quality_targets: list[QualityTarget],
     initial_quality:     Decimal,
     force:           bool,
-) -> ChunkEncodingResult:
+) -> _ChunkEncodingResult:
     """Async wrapper for chunk encoding.
 
     Args:
@@ -1524,7 +1524,7 @@ async def _encode_pairs(
     phase_recovery:   _PhaseRecovery | None                                  = None,
     advance:          Callable[[int | float, AdvanceState], None] | None = None,
     metric_prefix:    MetricKey                                                  = MetricKey.ENCODING,
-) -> EncodingResult:
+) -> _EncodingResult:
     """Encode the pending (chunk, strategy) pairs through the bounded runner.
 
     ``COMPLETE`` pairs from *phase_recovery* seed the result and are
@@ -1561,7 +1561,7 @@ async def _encode_pairs(
     Returns:
         EncodingResult with all encoding outcomes.
     """
-    result = EncodingResult()
+    result = _EncodingResult()
 
     # Seed the result with COMPLETE pairs from recovery (skip them in the job list)
     complete_pairs: set[tuple[str, str]] = set()
@@ -1581,7 +1581,7 @@ async def _encode_pairs(
                     )
                     result.encoded_chunks.setdefault(
                         strategy.display_name(), [],
-                    ).append(build_encoded_chunk(
+                    ).append(_build_encoded_chunk(
                         chunk        = chunk,
                         strategy     = strategy,
                         path         = pair_recovery.winning_file,
@@ -1620,7 +1620,7 @@ async def _encode_pairs(
             assert chunk_result.encoded_file is not None and chunk_result.final_quality is not None
             result.encoded_chunks.setdefault(
                 strategy.display_name(), [],
-            ).append(build_encoded_chunk(
+            ).append(_build_encoded_chunk(
                 chunk        = chunk,
                 strategy     = strategy,
                 path         = chunk_result.encoded_file.path,
@@ -1657,7 +1657,7 @@ async def _encode_pairs(
 
 
 def _assert_one_winner_per_chunk(
-    result:     EncodingResult,
+    result:     _EncodingResult,
     chunks:     list[VideoStreamChunk],
     strategies: list[Strategy],
 ) -> None:
@@ -1844,7 +1844,7 @@ def encode_all_chunks(
     sampling: int              = 10,
     metric_prefix:   MetricKey         = MetricKey.ENCODING,
     measure_attempts: bool             = True,
-) -> EncodingResult:
+) -> _EncodingResult:
     """Encode all chunks with the quality-targeted search.
 
     This is the main entry point for the encoding phase. It handles:
@@ -1907,7 +1907,7 @@ def encode_all_chunks(
             logger.info("[DRY-RUN] Status: Complete (all chunks already encoded)")
         else:
             logger.info("[DRY-RUN] Status: Needs work (%d pair(s) pending)", pending_count)
-        result = EncodingResult()
+        result = _EncodingResult()
         result.reused_count = complete_count
         return result
 

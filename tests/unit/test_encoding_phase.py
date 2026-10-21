@@ -149,7 +149,7 @@ import yaml as _yaml
 from pyqenc.metrics import MetricsCollector as _MetricsCollector
 from pyqenc.models import Strategy as _Strategy
 from pyqenc.phases.encoding import ChunkEncoder as _ChunkEncoder
-from pyqenc.phases.encoding import ChunkEncodingResult
+from pyqenc.phases.encoding import _ChunkEncodingResult
 from pyqenc.quality import MetricType as _MetricType
 from pyqenc.quality import QualityLogs as _QL
 from pyqenc.quality import QualityMeasurement as _QE
@@ -195,7 +195,7 @@ def _run_encode(
     tmp_path: Path,
     *,
     measure_attempts: bool | None,
-) -> tuple[ChunkEncodingResult, _MM]:
+) -> tuple[_ChunkEncodingResult, _MM]:
     """encode_chunk over a fixed single-point domain with a fake encoder.
 
     ffmpeg encode and the existing-encoding check are patched; the
@@ -373,8 +373,8 @@ from pyqenc.phases.chunking import ChunkingPhaseResult
 from pyqenc.phases.encoding import (
     EncodingPhase,
     EncodingPhaseResult,
-    EncodingResult,
-    build_encoded_chunk,
+    _build_encoded_chunk,
+    _EncodingResult,
 )
 from pyqenc.phases.job import JobPhase
 from pyqenc.phases.optimization import OptimizationPhase, OptimizationPhaseResult
@@ -705,14 +705,14 @@ class TestEncodingPresentationTargets:
         winner_path = winner_dir / _EC.format_winner_file_name(chunk.safe_name())
         if plan.measures_attempts:
             winner_path.write_bytes(b"x" * 32)
-        winner = build_encoded_chunk(
+        winner = _build_encoded_chunk(
             chunk=chunk, strategy=strategy,
             path=winner_path, frame_count=240,
         )
 
         captured: dict[str, object] = {}
 
-        def _fake_encode_all(**kwargs: object) -> EncodingResult:
+        def _fake_encode_all(**kwargs: object) -> _EncodingResult:
             captured.update(kwargs)
             # The winner sidecar materializes DURING the run (a pre-written
             # one would make recovery classify the pair complete and skip
@@ -725,7 +725,7 @@ class TestEncodingPresentationTargets:
                         "frame_count": 240, "metrics": winner_metrics,
                     },
                 )
-            result = EncodingResult()
+            result = _EncodingResult()
             result.encoded_chunks = {strategy.display_name(): [winner]}
             result.encoded_count = 1
             return result
@@ -1053,9 +1053,6 @@ class TestWinningLimiterBasisLine:
 import pytest
 
 from pyqenc.phases.encoding import (
-    EncodingResult as _EncodingResult,
-)
-from pyqenc.phases.encoding import (
     _assert_one_winner_per_chunk,
 )
 from pyqenc.stream_model import EncodedChunk as _EncodedChunk
@@ -1098,11 +1095,11 @@ class TestOneWinnerPerChunkGuard:
         )
 
     def _winner(self, chunk: _VSC, tmp_path: Path) -> _EncodedChunk:
-        from pyqenc.phases.encoding import build_encoded_chunk
+        from pyqenc.phases.encoding import _build_encoded_chunk
 
         mkv = tmp_path / _EC.format_winner_file_name(chunk.safe_name())
         mkv.write_bytes(b"x" * 64)
-        return build_encoded_chunk(
+        return _build_encoded_chunk(
             chunk=chunk, strategy=_STRATEGY_OBJ,
             path=mkv, frame_count=24,
         )

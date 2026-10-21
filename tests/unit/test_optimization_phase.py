@@ -407,7 +407,7 @@ class TestSelectionFromLiveState:
         The final table now derives from the live ledger, plan-scoped."""
         from unittest.mock import MagicMock as _MM
 
-        from pyqenc.phases.encoding import EncodingResult
+        from pyqenc.phases.encoding import _EncodingResult
 
         strategies = [_S1, _S2, _S3]
         phase, work_dir = _make_phase(tmp_path, strategies, tolerance=5.0)
@@ -427,10 +427,10 @@ class TestSelectionFromLiveState:
             test_chunks=[c.safe_name() for c in chunks],
         )
 
-        async def _fake_parallel(**_kwargs: object) -> EncodingResult:
+        async def _fake_parallel(**_kwargs: object) -> _EncodingResult:
             for chunk in chunks:
                 _seed_winner(work_dir, _S3, chunk, size_bytes=150)
-            return EncodingResult()
+            return _EncodingResult()
 
         monkeypatch.setattr(
             "pyqenc.phases.optimization._make_encoder", lambda **_kw: _MM(),
@@ -1275,7 +1275,7 @@ class TestAggregateStrategyMetrics:
     """Min-across-test-chunks aggregation from winner result sidecars."""
 
     def test_min_across_chunks(self, tmp_path: Path) -> None:
-        from pyqenc.phases.encoding import build_encoded_chunk
+        from pyqenc.phases.encoding import _build_encoded_chunk
         from pyqenc.stream_model import EncodedChunk
 
         chunks = [_make_chunk(0.0, 10.0, tmp_path), _make_chunk(10.0, 20.0, tmp_path)]
@@ -1297,7 +1297,7 @@ class TestAggregateStrategyMetrics:
                 ),
             )
             encoded_chunks.setdefault(strategy.display_name(), []).append(
-                build_encoded_chunk(
+                _build_encoded_chunk(
                     chunk=chunk, strategy=strategy,
                     path=strategy_dir / name,
                     frame_count=24,
@@ -1314,7 +1314,7 @@ class TestAggregateStrategyMetrics:
         }
 
     def test_missing_sidecar_chunk_contributes_nothing(self, tmp_path: Path) -> None:
-        from pyqenc.phases.encoding import build_encoded_chunk
+        from pyqenc.phases.encoding import _build_encoded_chunk
         from pyqenc.stream_model import EncodedChunk as _EC
 
         chunk = _make_chunk(0.0, 10.0, tmp_path)
@@ -1326,7 +1326,7 @@ class TestAggregateStrategyMetrics:
         # No sidecar next to the winner.
         encoded_chunks = {
             strategy.display_name(): [
-                build_encoded_chunk(
+                _build_encoded_chunk(
                     chunk=chunk, strategy=strategy,
                     path=mkv, frame_count=24,
                 ),
@@ -1363,8 +1363,8 @@ class TestFixedComparedExecute:
         from the sidecars.
         """
         from pyqenc.phases.encoding import (
-            EncodingResult,
-            build_encoded_chunk,
+            _build_encoded_chunk,
+            _EncodingResult,
         )
         from pyqenc.stream_model import EncodedChunk as _EC
 
@@ -1392,8 +1392,8 @@ class TestFixedComparedExecute:
 
         strategies = plan.strategies
 
-        def _seed_and_compose() -> EncodingResult:
-            result = EncodingResult()
+        def _seed_and_compose() -> _EncodingResult:
+            result = _EncodingResult()
             for chunk_idx, chunk in enumerate(chunks):
                 for strategy in strategies:
                     display = strategy.display_name()
@@ -1407,14 +1407,14 @@ class TestFixedComparedExecute:
                         {"quality": "18.0", "targets_met": True, "frame_count": 24, "metrics": metrics[display]},
                     )
                     result.encoded_chunks.setdefault(display, []).append(
-                        build_encoded_chunk(
+                        _build_encoded_chunk(
                             chunk=chunk, strategy=strategy,
                             path=mkv, frame_count=24,
                         )
                     )
             return result
 
-        async def _fake_parallel(**_kwargs: object) -> EncodingResult:
+        async def _fake_parallel(**_kwargs: object) -> _EncodingResult:
             return _seed_and_compose()
 
         monkeypatch.setattr(
@@ -1620,7 +1620,7 @@ class TestFixedAlwaysRuns:
     ) -> None:
         """A single-strategy fixed run tests, elects its only strategy as
         anchor, and derives the anchor targets from its test metrics."""
-        from pyqenc.phases.encoding import EncodingResult, build_encoded_chunk
+        from pyqenc.phases.encoding import _build_encoded_chunk, _EncodingResult
         from pyqenc.stream_model import EncodedChunk as _EC
 
         phase, work_dir, plan = _make_fixed_phase(
@@ -1647,10 +1647,10 @@ class TestFixedAlwaysRuns:
              "metrics": {"vmaf_p10": 87.0, "vmaf_median": 91.0}},
         )
 
-        async def _fake_parallel(**_kwargs: object) -> EncodingResult:
-            result = EncodingResult()
+        async def _fake_parallel(**_kwargs: object) -> _EncodingResult:
+            result = _EncodingResult()
             result.encoded_chunks[strategy.display_name()] = [
-                build_encoded_chunk(chunk=chunks[0], strategy=strategy, path=mkv, frame_count=24)
+                _build_encoded_chunk(chunk=chunks[0], strategy=strategy, path=mkv, frame_count=24)
             ]
             return result
 
@@ -1678,7 +1678,7 @@ class TestFixedAlwaysRuns:
         the pool map alone came back empty for the untested strategies and
         selection collapsed onto the re-tested one (found live 2026-10-12:
         a rerun after pruning re-selected only the pruned strategy)."""
-        from pyqenc.phases.encoding import EncodingResult, build_encoded_chunk
+        from pyqenc.phases.encoding import _build_encoded_chunk, _EncodingResult
         from pyqenc.stream_model import EncodedChunk as _EC
 
         phase, work_dir, plan = _make_fixed_phase(
@@ -1715,8 +1715,8 @@ class TestFixedAlwaysRuns:
         pending_dir = work_dir / "encoded" / pending.safe_name()
         pending_dir.mkdir(parents=True, exist_ok=True)
 
-        async def _fake_parallel(**_kwargs: object) -> EncodingResult:
-            result = EncodingResult()
+        async def _fake_parallel(**_kwargs: object) -> _EncodingResult:
+            result = _EncodingResult()
             # A is NOT re-tested; only B lands in the pool's return (the bug
             # condition: A's winners exist solely on disk).
             mkv_b = pending_dir / _EC.format_winner_file_name(chunks[0].safe_name())
@@ -1727,7 +1727,7 @@ class TestFixedAlwaysRuns:
                  "metrics": {"vmaf_median": 93.0}},
             )
             result.encoded_chunks[pending.display_name()] = [
-                build_encoded_chunk(chunk=chunks[0], strategy=pending, path=mkv_b, frame_count=24)
+                _build_encoded_chunk(chunk=chunks[0], strategy=pending, path=mkv_b, frame_count=24)
             ]
             return result
 

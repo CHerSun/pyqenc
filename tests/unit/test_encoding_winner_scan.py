@@ -20,10 +20,10 @@ from pyqenc.phase import Artifact, ArtifactState, PhaseRegistry
 from pyqenc.phases.encoding import (
     EncodingPhase,
     EncodingSidecar,
+    _build_encoded_chunk,
     _scan_winner_sidecars,
     _write_attempt_sidecar,
     _write_winner_sidecar,
-    build_encoded_chunk,
 )
 from pyqenc.phases.probe import ProbePhase, ProbePhaseResult
 from pyqenc.stream_model import (
@@ -102,7 +102,7 @@ def _make_winner(
     (strategy_dir / EncodedChunk.format_winner_sidecar_name(chunk.safe_name())).write_text(
         yaml.safe_dump(sidecar), encoding="utf-8",
     )
-    return build_encoded_chunk(
+    return _build_encoded_chunk(
         chunk=chunk, strategy=strategy,
         path=winner, frame_count=0,
     )
