@@ -1295,6 +1295,8 @@ class TestMeasureOptOut:
         assert result.outcome == PhaseOutcome.COMPLETED, result.message
         measurer.assert_not_called()
         assert "pyqenc measure" in caplog.text
+        # No measurement lead-in line either — nothing measurement-shaped runs.
+        assert "starting quality measurement" not in caplog.text
 
         from pyqenc.phases.merge import FixedMergedOutputSidecar, load_merged_output_sidecar
 

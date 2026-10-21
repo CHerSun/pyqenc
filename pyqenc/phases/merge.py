@@ -822,11 +822,12 @@ class MergePhase(Phase[MergePhaseResult]):
                             advance(0, AdvanceState.FAILED)
                             failed_strategies.append(strategy_name)
                             continue
-                        logger.info(
-                            "%s%s%s (%d of %d): starting quality measurement",
-                            BRACKET_LEFT, strategy_name, BRACKET_RIGHT,
-                            pending_idx, pending_count,
-                        )
+                        if plan.measure:
+                            logger.info(
+                                "%s%s%s (%d of %d): starting quality measurement",
+                                BRACKET_LEFT, strategy_name, BRACKET_RIGHT,
+                                pending_idx, pending_count,
+                            )
 
                     # Verify frame count
                     frame_count:       int | None       = None
