@@ -884,7 +884,32 @@ The user must name strategies as `profile[+preset]` patterns (`--strategies`, `c
 
 ---
 
-## Last known = 141
+## 142. Flag-transition adaptation semantics per phase — winner-wipe on unmeasured→measured fixed rerun, and a change-adaptation matrix doc
+
+Observed live 2026-10-21 (§83 rework e2e, `D:\_encoding\tmp\nomeasure-e2e\fixed-both-heal.log`):
+rerunning an UNMEASURED fixed work dir with measurement on triggers the optimization
+phase's winner-wipe — sidecar-less winners are unverifiable, so they are deleted and
+rebuilt from the attempt substrate (attempt pick-up re-measures in place, never
+re-encodes — 108/108 healed, zero encodes). For search runs that wipe is clearly right
+(no info to validate; reproducing from attempts is cheap). For the fixed
+unmeasured→measured transition (same everything else) it is plausibly fine as a
+safe-guard — we have no winner-remeasure, only attempt-remeasure — but it deserves a
+conscious ruling. The reverse transition (measured→unmeasured) deletes NOTHING:
+attempt-aware completeness accepts the sidecar superset, all phases reused (verified
+live, `fixed-both-downgrade.log`).
+
+**Questions to think about:** is the wipe the right call for the fixed transition, or
+should sidecar-less winners survive until the encoding replay replaces them pair-by-pair?
+Broader: we lack a written map of how each phase adapts to every input CHANGE (plan
+flag flips — measure/optimize/fixed-vs-search/quality, sampling, targets, crop,
+re-chunk) — which artifacts get invalidated, wiped, or reused per phase. That matrix
+should be a doc (a "phase change-adaptation matrix" — per phase × per change: reuse /
+re-measure / re-encode / wipe), authored from the invalidation ladders + verified
+transitions like the four in the §83 rework e2e.
+
+---
+
+## Last known = 142
 
 Keep this updated, so we can keep continuous numbering even on last todo item deletion.
 Keep this the last entry for easy human updates.
