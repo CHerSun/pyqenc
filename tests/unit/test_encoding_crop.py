@@ -4,7 +4,8 @@ from decimal import Decimal
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from pyqenc.models import CodecConfig, CropParams, Strategy
+from pyqenc.metrics import MetricKey
+from pyqenc.models import CleanupLevel, CodecConfig, CropParams, Strategy
 from pyqenc.phases.encoding import ChunkEncoder
 from pyqenc.stream_model import (
     CropParams as _CP,
@@ -35,6 +36,11 @@ def _make_encoder(crop_params: CropParams | None = None) -> ChunkEncoder:
         work_dir=Path("/tmp/work"),
         collector=NoOpMetricsCollector(),
         crop_params=crop_params,
+        cleanup_level=CleanupLevel.NONE,
+        visual_hash=False,
+        sampling=1,
+        metric_prefix=MetricKey.ENCODING,
+        measure_attempts=True,
     )
 
 

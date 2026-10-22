@@ -5,8 +5,8 @@ from typing import cast
 
 import pytest
 
-from pyqenc.metrics import MetricsCollector
-from pyqenc.models import QualityTarget, Strategy
+from pyqenc.metrics import MetricKey, MetricsCollector
+from pyqenc.models import CleanupLevel, QualityTarget, Strategy
 from pyqenc.stream_model import VideoStreamChunk
 from pyqenc.utils.visualization import QualityMeasurer
 from tests.fixtures.metric_fixtures import (
@@ -185,7 +185,7 @@ class TestEncodeChunkQualitySearchV2Integration:
         from unittest.mock import MagicMock, patch
 
         from pyqenc.models import AttemptMetadata, QualityTarget
-        from pyqenc.phases.encoding import ChunkEncoder, ChunkEncodingResult
+        from pyqenc.phases.encoding import ChunkEncoder, _ChunkEncodingResult
         from pyqenc.utils.visualization import QualityMeasurer
 
         strategy = self._make_strategy()
@@ -219,7 +219,12 @@ class TestEncodeChunkQualitySearchV2Integration:
             quality_measurer  = evaluator,
             work_dir          = tmp_path,
             collector         = MagicMock(spec=MetricsCollector),
+            crop_params       = None,
+            cleanup_level     = CleanupLevel.NONE,
+            visual_hash       = True,
             sampling           = 10,
+            metric_prefix     = MetricKey.ENCODING,
+            measure_attempts  = True,
         )
 
         reference = MagicMock()
@@ -233,11 +238,9 @@ class TestEncodeChunkQualitySearchV2Integration:
                 chunk           = chunk,
                 strategy        = strategy,
                 quality_targets = [target],
-                initial_quality     = Decimal("18.0"),
-                force           = False,
             )
 
-        assert isinstance(result, ChunkEncodingResult)
+        assert isinstance(result, _ChunkEncodingResult)
         assert result.reused is True, f"Expected reused=True, got: {result}"
         assert result.success is True
         # Quality evaluator must NOT have been called (pure cache hit).
@@ -246,7 +249,6 @@ class TestEncodeChunkQualitySearchV2Integration:
     @pytest.mark.skip(reason="ChunkEncoder constructor signature changed (collector arg added); needs update")
     def test_encode_chunk_calls_finalize_on_convergence(self, tmp_path: Path) -> None:
         """encode_chunk calls _finalize_winning_attempt when search converges with a pass."""
-        from decimal import Decimal
         from unittest.mock import MagicMock, patch
 
         from pyqenc.models import QualityTarget
@@ -277,6 +279,12 @@ class TestEncodeChunkQualitySearchV2Integration:
             quality_measurer  = evaluator,
             work_dir          = tmp_path,
             collector         = MagicMock(spec=MetricsCollector),
+            crop_params       = None,
+            cleanup_level     = CleanupLevel.NONE,
+            visual_hash       = True,
+            sampling          = 10,
+            metric_prefix     = MetricKey.ENCODING,
+            measure_attempts  = True,
         )
 
         reference = MagicMock()
@@ -297,8 +305,6 @@ class TestEncodeChunkQualitySearchV2Integration:
                 chunk           = chunk,
                 strategy        = strategy,
                 quality_targets = [target],
-                initial_quality     = Decimal("18.0"),
-                force           = False,
             )
 
         assert result.success is True
