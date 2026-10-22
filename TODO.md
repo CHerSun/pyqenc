@@ -924,7 +924,14 @@ From the §83 e2e matrices (2026-10-20/21, `D:\_encoding\tmp\nomeasure-e2e\RESUL
 
 ---
 
-## Last known = 143
+## 144. Crop params
+
+Need to check effect of empty crop params (0,0,0,0) on measure / encoding.
+If we should omit them both in the class' method and in outside consumers.
+
+---
+
+## Last known = 144
 
 Keep this updated, so we can keep continuous numbering even on last todo item deletion.
 Keep this the last entry for easy human updates.
