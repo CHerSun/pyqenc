@@ -452,6 +452,10 @@ Bad examples:
 - fps, fps_fraction - looks like candidates for single class with 2 representations
 - resolution - actually a width and height and a name (display_name / safe_name?). Probably also with support for Crop operations or resizes.
 
+Bad examples (added 2026-10-26):
+
+- `Strategy.profile` (`pyqenc/models.py:400`) — the profile is held by NAME; end-consumers re-resolve the name against config profiles at every use. Can the field link the proper profile class instead? Design caution: the plan/strategy is persisted, so an embedded object needs the tolerant-load treatment (class in memory, canonical name on disk), and the config-object lifecycle vs. plan construction needs an ownership answer.
+
 Good examples:
 
 - include/exclude patterns - regex is text. Could probably also switch to compiled regex to make it obvious, but in general this is okeish.
@@ -552,6 +556,8 @@ Extra from human:
 - Ideally the last place where we see plain values - are the measurements logs or user inputs (both are inputs). Since then full path should be class-based.
 - Single instanciation where possible (i.e. user input targets are instanciated once and passed as that object ever since).
 
+Bycatch (2026-10-26): the display half already exists and is bypassed — `QualityTarget.__str__` (`models.py:643`) owns `vmaf-min≥95` and `parse` is already a classmethod (`models.py:581`), yet the three phase `Targets:` kv lines hand-roll `f"{t.metric}-{t.statistic}≥{t.value}"` (encoding.py:1942, optimization.py:432, merge.py:410). Pointing those at the class is immediately doable; the full class-ownership fold is this item's body.
+
 ---
 
 ## 117. Observability research — traces/metrics for a CLI-first tool; replace the app-metrics stub
@@ -574,7 +580,7 @@ Task: research best industry practices for standalone CLI tooling — hierarchic
 
 ## 119. Table formatting is hand-aligned everywhere — unify the mechanism (mini-research)
 
-**Status update 2026-10-12 (decision recorded):** one INTERNAL formatter (`format_table`, `pyqenc/utils/tables.py`) won the research — rich/tabulate/wcwidth rejected (the aesthetic is ours; compound cells are pre-formatted strings regardless). The comparison tables render through it. The remainder below (re-homing the winning-limiter, measure, and key-value tables) is still open — that is §119's leftover scope.
+**Status update 2026-10-12 (decision recorded):** one INTERNAL formatter (`format_table`, `pyqenc/utils/tables.py`) won the research — rich/tabulate/wcwidth rejected (the aesthetic is ours; compound cells are pre-formatted strings regardless). The comparison tables render through it. The remainder below (re-homing the winning-limiter, measure, and key-value tables) is still open — that is §119's leftover scope. Added 2026-10-26 to the same remainder: the two hand-aligned Want/Present inventory tables — extraction's `_log_stream_table` (`phases/extraction.py:1271`) and audio's `_log_track_table` (`phases/audio.py:576`) — near-identical 3-column shapes that should share one formatter.
 
 **Status:** needs thinking (user direction 2026-10-10)
 
@@ -850,6 +856,8 @@ To put it simply - encoding.py needs a full review for simplification.
 
 Strategy display name, being logged in brackets - should be owned somewhere uniformely for all similar logging (probably already have a func in logging).
 
+Requirements added 2026-10-26 (user): ONE function, accepting the STRATEGY ITSELF (not a bare name string — the object, so the display form is derived in one place), always formatting with the proper brackets; ALL logging facilities must use it for the strategy display name. Current state: the `fmt_chunk*` family (`utils/log_format.py:200-213`) owns the bracketed prefix for chunk lines (visual-hash emoji included), but other sites hand-roll `{BRACKET_LEFT}{name}{BRACKET_RIGHT}` directly — `merge.py:798/805/828`, `encoding.py:2011` — and plain-name log lines (e.g. optimization's `pruned: X — dominated by Y`, `optimization.py:1432`) format ad hoc. Sweep target: every strategy-mentioning log line goes through the single formatter. Open: per-site choice on the visual-hash emoji (chunk lines yes, merge/summary lines probably no) — the formatter should own the bracket form either way.
+
 ## 139. Round-trip property trips filter_too_much on low-CPU machines
 
 2026-10-19, surfaced while gating the §79 refactor (unrelated to it — reproduced
@@ -923,7 +931,57 @@ https://www.structlog.org/en/stable/
 
 ---
 
-## Last known = 145
+## 146. (fast) Recovery-line class flag — silence it for JobPhase
+
+- `Phase.run` emits the recovery line unconditionally (`phase.py:546` → `log_recovery_line`, `utils/log_format.py:160`), and the same string is the single source of truth for `PhaseResult.message` (docstring contract: callers assign it directly).
+- For JobPhase the line is pure noise — nothing meaningful to recover:
+  `Recovery: 1 total, 1 wanted (0 complete, 0 partial, 1 absent) — nothing to reuse`
+- Proposal (user, 2026-10-26): a class flag on `Phase` disabling recovery logging, `False` for JobPhase. Design bit: does the flag gate only the LOG call (message assignment stays — recovery summaries may feed other surfaces) or the whole summary? Other trivial/banner-less phases may want the same treatment — census before settling the default.
+
+---
+
+## 147. Long-job visibility — start lines + count-based progress bars for silent phases
+
+Evidence (user, full-movie auto run, 2026-10-10):
+
+```
+17:57 [INFO] Recovery: 13 total, 13 wanted (7 complete, 0 partial, 6 absent) — resuming
+18:02 [INFO] ✔ Extraction complete: 13 artifact(s) extracted
+```
+
+- 5 minutes of extraction work with zero intermediate output: no per-artifact starting lines, no count-based progress bar — the user is kept blind during long jobs.
+- The count-based bar doctrine already exists (ONE advance per item finalization, weighted by the item's duration; duration-based is for fine-grained jobs like merge/measure) — extraction's artifact materialization fits the count-based shape exactly.
+- Layering with §60: §60 asks for DEBUG start/finish lines on every long job and external call (developer visibility); THIS item is the user-facing layer — INFO start lines for long jobs and progress bars over itemized work. Open design question: the mechanism home (phase hook vs. runner facility), not per-site ad-hoc logging.
+- Audit needed: which phases have no user-facing progress at all today (extraction confirmed; sweep the rest).
+
+---
+
+## 148. Extraction stream table — lighter glyph for virtual (non-materialized) streams
+
+- `_log_stream_table` (`phases/extraction.py:1271`) marks Present with `SUCCESS_SYMBOL_MINOR` (`✔`) for every COMPLETE row, but its own docstring states the asymmetry: the video row's Present means "index extracted" (real work), audio rows are "pure virtual" — nothing materialized.
+- Proposal (user, 2026-10-26): a different, lighter sign for non-materialized streams — e.g. `✓` vs `✔` — to show those are still wanted, but lightweight (virtual pass-through).
+- Considerations: a new glyph enters the user-curated glyph vocabulary (see the ◆/◎ doctrine in the unified summaries); `constants.py` is the glyph home. Audio's track table (`_log_track_table`, `phases/audio.py:576`) has the same ✔-for-everything shape — if virtual gets a glyph, both tables should agree (DRY ride-along: §119 remainder).
+
+---
+
+## 149. Progress-bar finalizer line — status summary after finish
+
+- During a run the action bar carries rich details:
+  `Merging |███...███| ▄▂▂ 60% in 4:33 (~2:50, 0.0%/s) 240.1 out of 397.3 (✔ 0  ⏭ 1  out of 1)`
+  On finish the line collapses: `Encoding |███...███| 100% in 3.3s (0.30%/s)` — the status counts vanish exactly when they matter most.
+- Proposal (user, 2026-10-26): an extra finalizer line on completion with the same details — how much was completed, how many of each status; "basically the same text, just a finalizer line, like `Completed: {final_status}`".
+- Mechanics live in `pyqenc/utils/alive.py` (BarAdvance owns the `(✔ …  ⏭ …  ✘ …)` text); whether alive_progress's exit/finalize surface can host the extra line vs. logging it ourselves right after the bar closes is the design bit.
+
+---
+
+## 150. Optimization phase — print the test-chunk list?
+
+- The phase test-encodes a derived subset of chunks (the concept is named in-code: `test_chunks`, `phases/optimization.py:110/295`), but the chosen chunks are never SHOWN — the user cannot tell which chunks the per-strategy verdicts are based on.
+- Question (user, 2026-10-26): should the phase print the test-chunk list? Not key params — the list is derived, not an input. Candidate placements: when starting processing (its own line/block after the banner) and on fast-exit (where test encodes are skipped entirely). Which of the two, or both, is the open part.
+
+---
+
+## Last known = 150
 
 Keep this updated, so we can keep continuous numbering even on last todo item deletion.
 Keep this the last entry for easy human updates.
