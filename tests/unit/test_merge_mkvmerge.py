@@ -1160,12 +1160,15 @@ def _run_full_merge(
     *,
     fixed: bool,
     anchor: str | None = None,
+    measure: bool = True,
 ):
     """Drive MergePhase through run() with external shells mocked.
 
     Returns ``(merge_phase, merged_dir)``. One strategy's output is produced
     with measurement mocked to a full metric dict, so both sidecars land
-    on disk.
+    on disk. ``measure=False`` wires the opt-out plan (fixed delegates to
+    :func:`_wire_fixed_merge`; search re-wires the probe plan, whose default
+    make carries ``measure=True``).
     """
     work_dir = tmp_path / "work"
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -1181,7 +1184,11 @@ def _run_full_merge(
 
     merge = _make_merge_phase(work_dir, source, chunk, timestamps_path=ts_file)
     if fixed:
-        _wire_fixed_merge(merge, chunk, anchor)
+        _wire_fixed_merge(merge, chunk, anchor, measure=measure)
+    elif not measure:
+        probe_result = merge._phases[ProbePhase].result
+        assert probe_result is not None
+        probe_result.plan = merge._config.build_encoding_plan(optimize=True, measure=False)
 
     merged_dir = work_dir / MERGED_OUTPUT_DIR
 
@@ -1305,6 +1312,24 @@ class TestMeasureOptOut:
         )
         assert isinstance(record, FixedMergedOutputSidecar)
         assert record.metrics == {}
+
+    def test_search_opt_out_renders_no_verdict(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Search + ``--no-measure``: unmeasured strategy rows carry NO
+        verdict mark — not a miss (nothing was measured to miss)."""
+        import logging
+
+        with caplog.at_level(logging.INFO, logger="pyqenc.phases.merge"):
+            _merge, _merged_dir = _run_full_merge(tmp_path, fixed=False, measure=False)
+
+        block = _summary_block(caplog.text)
+        strategy_rows = [
+            ln for ln in block.splitlines()
+            if ln.startswith("INFO") and "h265" in ln and "test" not in ln
+        ]
+        assert strategy_rows, "the search table renders strategy rows"
+        assert all("✘" not in ln and "✔" not in ln for ln in strategy_rows)
 
 
 class TestMergeYamlReplayAggregate:

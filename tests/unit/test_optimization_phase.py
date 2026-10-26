@@ -547,6 +547,18 @@ class TestAllStrategiesMode:
 
         assert result.winners == []
 
+    def test_no_optimize_logs_teaching_line(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Search + --no-optimize: the all-strategies path states its effect —
+        every strategy fully encodes and is kept (fixed mode logs its own
+        skip line; a single strategy needs no line — its count speaks)."""
+        with caplog.at_level(logging.INFO, logger="pyqenc.phases.optimization"):
+            phase, _ = _make_phase(tmp_path, [_S1, _S2], optimize=False)
+            phase.run(dry_run=True)
+        assert "no elimination" in caplog.text
+        assert "encodes the full video" in caplog.text
+
 
 class TestMeasureOptOut:
     """The ``--no-measure`` opt-out on the optimization phase's skip decision.
@@ -1001,6 +1013,29 @@ class TestFixedQualityBanner:
         phase.run(dry_run=False)
         banner_records = [r for r in caplog.records if "FIXED QUALITY MODE" in r.getMessage()]
         assert banner_records and all(r.levelno == logging.WARNING for r in banner_records)
+
+    def test_banner_promises_final_check_only_when_measuring(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """The merged-output measurement line is a promise the run must keep —
+        present when the run measures, dropped on the opt-out (merge
+        measurement is skipped entirely, so no final check is promised)."""
+        with caplog.at_level(logging.WARNING, logger="pyqenc.phases.optimization"):
+            phase, _, _ = _make_fixed_phase(tmp_path, strategy_names=["h265-aq+slow"])
+            phase.run(dry_run=False)
+        assert self._banner_count(caplog) == 1
+        assert "final quality check" in caplog.text
+
+    def test_banner_drops_final_check_line_when_opted_out(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        with caplog.at_level(logging.WARNING, logger="pyqenc.phases.optimization"):
+            phase, _, _ = _make_fixed_phase(
+                tmp_path, strategy_names=["h265-aq+slow"], measure=False,
+            )
+            phase.run(dry_run=False)
+        assert self._banner_count(caplog) == 1
+        assert "final quality check" not in caplog.text
 
     def test_no_banner_on_searched_runs(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture,

@@ -329,7 +329,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         strategies = plan.strategies
 
         if plan.fixed_quality:
-            self._log_fixed_quality_banner(strategies)
+            self._log_fixed_quality_banner(strategies, measure=plan.measure)
             # §123: fixed runs keep the test population — single-strategy
             # and `--no-optimize` included (the latter with dominance
             # pruning disabled at selection); the anchor mechanics and its
@@ -353,15 +353,23 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         if plan.optimize and len(strategies) > 1:
             return None
 
+        if not plan.optimize:
+            logger.info(
+                "optimization disabled — no elimination: every selected "
+                "strategy encodes the full video and produces its output"
+            )
+
         return self._all_strategies(dry_run)
 
-    def _log_fixed_quality_banner(self, strategies: list[Strategy]) -> None:
+    def _log_fixed_quality_banner(self, strategies: list[Strategy], *, measure: bool) -> None:
         """The fixed-mode WARNING banner (Req 5).
 
         One prominent block per fixed run on both optimization paths,
         stating the guarantees: search disabled, sizes compared at
         *nominally* equal knob (scales not comparable across encoder
-        families), merged-output measurement as the final check.
+        families), merged-output measurement as the final check — that
+        line only when the run keeps measurements (an opted-out run
+        skips merge measurement, so no final check is promised).
         """
         logger.warning("")
         logger.warning(
@@ -379,9 +387,10 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
             logger.warning(
                 "  - every surviving strategy will fully encode the video"
             )
-        logger.warning(
-            "  - merged-output measurement remains the final quality check"
-        )
+        if measure:
+            logger.warning(
+                "  - merged-output measurement remains the final quality check"
+            )
         logger.warning("")
 
     @staticmethod

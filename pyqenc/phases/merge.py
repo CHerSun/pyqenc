@@ -1299,7 +1299,8 @@ class MergePhase(Phase[MergePhaseResult]):
         the MERGE anchor over the full-movie rows (the test anchor's values
         participate nowhere, Req 3.2) and the below-table anchor-audit line
         compares the two elections; search mode rules by the configured
-        targets with live all-targets-pass verdicts. Below the table: the
+        targets with live all-targets-pass verdicts (no verdict when the
+        run opted out of measurement). Below the table: the
         ``Files named``/``Location`` lines and the subsampling footnote.
 
         Args:
@@ -1328,10 +1329,15 @@ class MergePhase(Phase[MergePhaseResult]):
             anchor       = merge_anchor
         else:
             for row in summaries:
-                verdict = all(
-                    (value := row.metrics.get(target.key())) is not None and value >= target.value
-                    for target in plan.targets
-                ) if row.metrics else False
+                # The measurement opt-out renders no verdict (nothing was
+                # measured); empty metrics under measurement ON stay a miss —
+                # the swallowed-measurement row (§132).
+                verdict: bool | None = None
+                if plan.measure:
+                    verdict = all(
+                        (value := row.metrics.get(target.key())) is not None and value >= target.value
+                        for target in plan.targets
+                    ) if row.metrics else False
                 marks[row.strategy] = Mark(verdict=verdict)
 
         smallest = min(summaries, key=lambda r: (r.size_bytes, r.strategy)).strategy
