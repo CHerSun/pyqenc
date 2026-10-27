@@ -522,62 +522,9 @@ running at all until the ffmpeg version question is settled.
 
 ---
 
-## 116. Metric+stat value class — retarget every stringly `"{metric}_{stat}"` / `"{metric}-{stat}"` site
-
-**Status update 2026-10-12:** the minimal identity type landed with the unified-quality-summaries spec (`MetricStatKey` in `pyqenc/quality.py`: closed sets, canonical `vmaf_median` sidecar form, `%`-form display, tolerant parse, pydantic dict-key alias; `QualityTarget.key()`). The remainder below is the full migration this item still owns.
-
-**Status update 2026-10-27:** spec drafted —
-`.kiro/specs/2026-10-27 metric-stat-identity/` (requirements + design;
-tasks after approval). Rulings recorded there: `App` prefix for app-metrics +
-module rename `app_metrics.py`; new leaf module `quality_metrics.py`; the
-narrower is a typed pair set (`FIXED_COMPARISON_PAIRS`, both old constants
-die); `MeasuredMetrics`/`TargetedMetrics` as frozen `Mapping` role classes
-with owned ops (`narrowed_to`/`covers`/`worst_of`; operators rejected); carry
-for the per-metric classes; V4 sentinel split stays out.
-
-**Status update 2026-10-27 (implementation):** spec APPROVED and under
-implementation on branch `metric-stat-identity` — Phase A (the fold: leaf
-module, target fold, narrowing, sidecar roles, consumer retarget,
-app-metrics rename) landed; Phase B (per-metric parsers) follows on the same
-branch/PR. Remove this entry when the PR merges.
-
-**Status:** in implementation on `metric-stat-identity` (user direction 2026-10-10; explicit-typing rule)
-
-Measured metrics flow through the system as `dict[str, float]` keyed by convention strings, flattened/selected/compared at every layer — and every site re-derives the key by hand: `f"{t.metric}_{t.statistic}"` in the attempt pick-up, the targeted-subset filter, `_score_attempt`, `failed_targets`, the winner-limiter tallies, optimization's synthetic ruler, merge's rendered-keys/presentation bar. Two vocabularies exist for the same identity: underscore (`vmaf_min` — sidecar keys, metric dicts) and dash (`vmaf-min` — CLI/config/`QualityTarget.parse` targets). Nothing type-checks that a key is well-formed; nothing owns the pair.
-
-Related uniformity gap (user, 2026-10-10): **the full measured set vs the targeted subset** — deriving one from the other is hand-rolled at several sites (`_winner_targeted_metrics`' mode-aware subset for winner sidecars, the pick-up's `targets_set_reused` filter, merge's `_summary_rendered_keys`, the search's target-key projection). ONE uniform method should own full→targeted (mode-aware: search = the targets' keys; fixed = the comparison stat set), expressed over the key class — every consumer asks it, nobody re-implements the filter.
-
-Direction: a value class for the metric+stat identity —
-
-- frozen, **hashable + comparable** → usable directly as the dict key of measured-metrics maps (replacing `dict[str, float]` with `dict[MetricStat, float]` or an annotated alias at the boundary);
-- **strict canonical serialization** (its yaml/storage form) and **tolerant parsing** (both vocabularies + display), the `CropYaml` pattern applied to a key type — pydantic dict keys need the annotated boundary (canonical string on disk, class in memory);
-- `QualityTarget` re-targeted onto it (fields `metric: str` + `statistic: str` fold into the class) and gains its own strict serialization / tolerant parse (`"vmaf-min:95"` config vocabulary included);
-- **parsing included** (user, 2026-10-10): each metric becomes its own class (PSNR / SSIM / VIF / VMAF — MetricInfo-shaped) that KNOWS how to parse its own logs (`.log` stats files, VMAF JSON), emitting explicitly typed results — replacing the generic file-type-keyed parser in the visualization/metrics plumbing. The metric identity itself is an enum-like STATIC thing (one instance, never re-instantiated per parsed line — today `MetricType(...).info` constructs on access), and the static identity is what the new metric-stat keying, the old `MetricInfo` and `QualityTarget` all attach to via explicit typing;
-- retarget sites: quality.py (`MetricType`/`flatten_metric_stats`/ search steering), encoding pick-up + winner targeting, optimization (synthetic targets, summaries), merge (rendered keys, replay bar), measure/visualization stats plumbing.
-
-Open design questions: naming (`MetricKey` is TAKEN — the perf-metrics timing enum in `pyqenc/metrics.py`); whether the stat half becomes its own typed set (today a free-form string — `min`/`p10`/`median`…); whether per-metric classes carry the MetricInfo descriptor data (normalize/deficit/comparison_range/acceptance_delta) or compose with it; interplay with §111's summary-table rendering (the dash vocabulary is its display form); sequencing vs the QualitySearch V4 spec (§78 rides that same refactor wave — do the record type and the key type together?).
-
-`FIXED_COMPARISON_STATS` should also become explicit targets?
-
-and need a distinction between full metrics set and targeted metrics set at typing level, so that we don't have to guess.
-
-
-Extra from human:
-
-- Metric vs Stat vs Metric-Stat pair vs Target (metric-stat-value) vs Targets (a set of Target)
-- Each owns its own mechanics, explicitly, (disowned functions are strongly discouraged). Naming. Targeted-set selection from full measured metrics, etc.
-- Anchor targets also belong here (targets)
-- Deltas / basic Scoring should be also based on those classes.
-- Ideally the last place where we see plain values - are the measurements logs or user inputs (both are inputs). Since then full path should be class-based.
-- Single instanciation where possible (i.e. user input targets are instanciated once and passed as that object ever since).
-
-Bycatch (2026-10-26): the display half already exists and is bypassed — `QualityTarget.__str__` (`models.py:643`) owns `vmaf-min≥95` and `parse` is already a classmethod (`models.py:581`), yet the three phase `Targets:` kv lines hand-roll `f"{t.metric}-{t.statistic}≥{t.value}"` (encoding.py:1942, optimization.py:432, merge.py:410). Pointing those at the class is immediately doable; the full class-ownership fold is this item's body.
-
----
-
 ## 117. Observability research — traces/metrics for a CLI-first tool; replace the app-metrics stub
 
-The current app-metrics (`metrics.yaml`, `MetricsCollector`) is a temporary stub, and it shows. Industry standard observability has three pillars — **traces, metrics, logs**. We have logs. Our metrics suck. We have no traces. And nothing is collectible externally (no Prometheus/OpenTelemetry export).
+The current app-metrics (`metrics.yaml`, `AppMetricsCollector`) is a temporary stub, and it shows. Industry standard observability has three pillars — **traces, metrics, logs**. We have logs. Our metrics suck. We have no traces. And nothing is collectible externally (no Prometheus/OpenTelemetry export).
 
 Constraint: pyqenc stays **CLI-first** (potential web UI later). Full OTel/Prometheus adoption is justified only if it ever becomes a service; while CLI, it must still be observable — with a local dump like today's `metrics.yaml`.
 

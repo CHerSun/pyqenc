@@ -4,7 +4,7 @@
 
 - Spec: Metric-Stat Identity — typed measured/targeted sets, the quality-target fold, per-metric parsers
 - Created: 2026-10-27
-- Completed:
+- Completed: 2026-10-27
 
 ## Decisions (user rulings, 2026-10-27)
 

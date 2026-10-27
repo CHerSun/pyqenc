@@ -3,7 +3,7 @@
 <!-- markdownlint-disable MD024 -->
 
 - Created: 2026-10-27 (requirements + design approved same day)
-- Completed:
+- Completed: 2026-10-27
 
 Branch: `metric-stat-identity` — one PR, two commit waves (Phase A, Phase B),
 the three gates green between waves. Version bumps ride each wave (MINOR).
@@ -136,5 +136,5 @@ the three gates green between waves. Version bumps ride each wave (MINOR).
 
 ## 10. Close-out
 
-- [ ] 10.1 Cross-spec summaries finalized (task 0.1) and spec `Completed:`
+- [x] 10.1 Cross-spec summaries finalized (task 0.1) and spec `Completed:`
   dated; TODO §116 removed outright.
