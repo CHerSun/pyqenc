@@ -526,7 +526,22 @@ running at all until the ffmpeg version question is settled.
 
 **Status update 2026-10-12:** the minimal identity type landed with the unified-quality-summaries spec (`MetricStatKey` in `pyqenc/quality.py`: closed sets, canonical `vmaf_median` sidecar form, `%`-form display, tolerant parse, pydantic dict-key alias; `QualityTarget.key()`). The remainder below is the full migration this item still owns.
 
-**Status:** needs thinking (user direction 2026-10-10; explicit-typing rule)
+**Status update 2026-10-27:** spec drafted —
+`.kiro/specs/2026-10-27 metric-stat-identity/` (requirements + design;
+tasks after approval). Rulings recorded there: `App` prefix for app-metrics +
+module rename `app_metrics.py`; new leaf module `quality_metrics.py`; the
+narrower is a typed pair set (`FIXED_COMPARISON_PAIRS`, both old constants
+die); `MeasuredMetrics`/`TargetedMetrics` as frozen `Mapping` role classes
+with owned ops (`narrowed_to`/`covers`/`worst_of`; operators rejected); carry
+for the per-metric classes; V4 sentinel split stays out.
+
+**Status update 2026-10-27 (implementation):** spec APPROVED and under
+implementation on branch `metric-stat-identity` — Phase A (the fold: leaf
+module, target fold, narrowing, sidecar roles, consumer retarget,
+app-metrics rename) landed; Phase B (per-metric parsers) follows on the same
+branch/PR. Remove this entry when the PR merges.
+
+**Status:** in implementation on `metric-stat-identity` (user direction 2026-10-10; explicit-typing rule)
 
 Measured metrics flow through the system as `dict[str, float]` keyed by convention strings, flattened/selected/compared at every layer — and every site re-derives the key by hand: `f"{t.metric}_{t.statistic}"` in the attempt pick-up, the targeted-subset filter, `_score_attempt`, `failed_targets`, the winner-limiter tallies, optimization's synthetic ruler, merge's rendered-keys/presentation bar. Two vocabularies exist for the same identity: underscore (`vmaf_min` — sidecar keys, metric dicts) and dash (`vmaf-min` — CLI/config/`QualityTarget.parse` targets). Nothing type-checks that a key is well-formed; nothing owns the pair.
 
@@ -672,6 +687,11 @@ There are quite heavy dependencies, a total of almost 250 MB! Need a review, if 
    11.3 MiB ▍         ▏/fontTools
 
 See also: python 3.15, major dependencies bump.
+
+Extra thoughts:
+- plotly/matplotlib probably could work without pandas and numpy (just off python native data types)?
+- cv2 needs numpy I think, but do we really really need cv2? Maybe ffmpeg native scene detector? it looks like scenedetect-headless is superior to ffmpeg, so might be not an option. (ffmpeg is reported for frame-drift on timestamps, many false positives on splits, problems on rolling camera splits, etc). But if we keep it - we need to be explicit on this (architecture doc?) and probably mention it as a large dependency on user-facing readme (with a short reason).
+- if we keep numpy - should we use it for logs parsing / transfers / stats calculations (I mean if we could remove at least pandas maybe, by substituting it with numpy - without pain).
 
 ---
 
@@ -981,7 +1001,15 @@ Evidence (user, full-movie auto run, 2026-10-10):
 
 ---
 
-## Last known = 150
+## 151. Specs rearrangement
+
+- Move specs from `.kiro` into just a specs folder.
+- There are also some `plans` from zcode works, which didn't become full specs. They should probably also be moved into specs folder into properly named subfolders.
+- Reasses if some of specs should be archived already.
+
+---
+
+## Last known = 151
 
 Keep this updated, so we can keep continuous numbering even on last todo item deletion.
 Keep this the last entry for easy human updates.

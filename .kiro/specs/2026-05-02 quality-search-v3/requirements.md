@@ -7,6 +7,14 @@
 
 ---
 
+## Cross-Spec Notes
+
+`2026-10-27 metric-stat-identity` types the search's parameters: `record()`/
+`best_metrics`/`QualityPoint.metrics` carry `TargetedMetrics` (the narrowed
+set role) and every key reconstruction `f"{t.metric}_{t.statistic}"` becomes
+`target.identity`. Search mechanics — the extrapolation state machine,
+scoring semantics, exhaustion rules — are untouched.
+
 ## Introduction
 
 `QualitySearchV2` (introduced in the `crf-search-refactor` spec) uses binary half-steps toward the codec boundary when both known points are on the same side of the target (all-failing or all-passing). This is safe but slow on monotonic curves — it takes O(log N) steps just to find the first crossing point before the 3-point sweet-spot phase can begin.
