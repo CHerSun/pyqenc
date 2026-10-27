@@ -61,6 +61,13 @@ But we can use built-in profile quality range limiting for running fixed-CRF enc
 
 Another question is I want targets to favor retaining natural film grain, not favoring blurred results. h.265-anime is particularly tuned for this, so probably we should run 2 encodes at fixed CRFs - with plain h.265 and with h.265-anime variant at the same CRF values. And compare measured metrics to better understand the difference - where we could give more slack, where we should make things tighter (in favor of retention of original looks, but at sane quality levels).
 
+Another thought:
+
+- we have currently a separate `--targets` and a separate `--quality` (`-q`). And probably checks to avoid user giving both (probably not).
+- `-q` takes precedence, even if both are given.
+- what if we collapse targets and quality into a single key? Key accepting: fixed quality, target profile or targets (some order, but their format is different)
+  i.e. if user told `-q 18` - he wants fixed quality. if he gave `-q high` - he wants high targets preset (translates into explicit targets). if he gave `vmaf-med:97` - he wants explicit targets. This way we can't be contradictory.
+
 ---
 
 ## 22. (low) End-user output-name template system ({fps}, {title}, …)
@@ -618,27 +625,6 @@ Blast radius (verified):
 - Downstream looks mostly untouched: per-strategy effective ranges already exist (`_effective_codec`), `EncodingPlan.fixed_quality` stays a plan-wide "all collapsed" bool (`models.py:685-729`), and merge's fixed provenance quality is already per-output from each strategy's codec (`merge.py:135-144, 264-273, 302-306`). Verify the optimization sidecar/replay re-derivation paths read per-strategy quality, not the CLI value.
 
 **Questions to think about:** is the need real enough to justify the CLI surface (alternate: per-profile fixed quality in config — the profile layer already owns ranges)? Error messages must teach the pairing rule (quality binds to the preceding selector).
-
----
-
-## 130. Review dependencies
-
-There are quite heavy dependencies, a total of almost 250 MB! Need a review, if we really need them or if they can be replaced by a more lightweight alternatives:
-
-  112.0 MiB ████      ▏/cv2
-   41.0 MiB █▌        ▏/pandas
-   26.4 MiB ▉         ▏/matplotlib
-   22.0 MiB ▊         ▏/numpy
-   20.2 MiB ▋         ▏/numpy.libs
-   14.6 MiB ▌         ▏/PIL
-   11.3 MiB ▍         ▏/fontTools
-
-See also: python 3.15, major dependencies bump.
-
-Extra thoughts:
-- plotly/matplotlib probably could work without pandas and numpy (just off python native data types)?
-- cv2 needs numpy I think, but do we really really need cv2? Maybe ffmpeg native scene detector? it looks like scenedetect-headless is superior to ffmpeg, so might be not an option. (ffmpeg is reported for frame-drift on timestamps, many false positives on splits, problems on rolling camera splits, etc). But if we keep it - we need to be explicit on this (architecture doc?) and probably mention it as a large dependency on user-facing readme (with a short reason).
-- if we keep numpy - should we use it for logs parsing / transfers / stats calculations (I mean if we could remove at least pandas maybe, by substituting it with numpy - without pain).
 
 ---
 
