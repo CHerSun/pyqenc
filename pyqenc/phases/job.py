@@ -25,8 +25,8 @@ from typing import TYPE_CHECKING, ClassVar
 
 from pydantic import BaseModel, ConfigDict
 
+from pyqenc.app_metrics import AppMetricKey, AppMetricsCollector
 from pyqenc.constants import TEMP_SUFFIX
-from pyqenc.metrics import MetricKey, MetricsCollector
 from pyqenc.models import (
     CleanupLevel,
     PhaseOutcome,
@@ -144,7 +144,7 @@ class JobPhase(Phase[JobPhaseResult]):
     SIDECAR_NAME = "job.yaml"
     DEPENDS_ON:        ClassVar[tuple[type[Phase], ...]] = ()
     BANNER:            bool      = False
-    _METRIC_KEY:       MetricKey = MetricKey.JOB
+    _METRIC_KEY:       AppMetricKey = AppMetricKey.JOB
     _DRY_RUN_READONLY: bool      = True
 
     def __init__(
@@ -157,7 +157,7 @@ class JobPhase(Phase[JobPhaseResult]):
         force:       bool,
         cleanup:     CleanupLevel,
         no_metrics:  bool,
-        collector:   MetricsCollector,
+        collector:   AppMetricsCollector,
     ) -> None:
         super().__init__(config, phases, collector=collector)
 

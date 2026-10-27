@@ -12,18 +12,6 @@ TEMP_SUFFIX = ".tmp"
 FINGERPRINT_DIGEST_SIZE_BYTES = 16
 """blake2b digest size (bytes) for every fingerprint token — 128-bit opaque identity."""
 
-FIXED_COMPARISON_STATS: tuple[str, ...] = ("p10", "median")
-"""The fixed-mode comparison statistic set per metric.
-
-The single definition of what fixed-mode comparison consumes — the anchor's
-anchor target set, the dominance pruning input, the
-comparison-table columns, and the winner sidecars' targeted subset: ``p10``
-guards the worst decile, ``median`` the central tendency; the remaining
-stats are stability/shape indicators (``std``, ``min``, ``max``, other
-percentiles), not quality targets — comparing or ruling on them silently
-skews selection. The full measured set stays on attempt/merged sidecars
-(data retention), so re-selecting the comparison set never re-measures."""
-
 CROP_SOURCE_MANUAL = "manual"
 """``probe.yaml`` crop provenance: the value came from a ``--crop`` override."""
 
@@ -83,14 +71,14 @@ TIME_SEPARATOR_SAFE = "꞉"
 TIME_SEPARATOR_MS = "․"
 """Separator for milliseconds in time representations, visually similar to the standard dot (.), but different symbol to avoid parsing collisions."""
 DOTTED_KEY_SEPARATOR: str = "."
-"""Separator used to join ``MetricKey`` prefix and suffix parts into a dotted metric key
+"""Separator used to join ``AppMetricKey`` prefix and suffix parts into a dotted metric key
 (e.g. ``"encoding.h265"``).  This is the standard ASCII dot (U+002E) used exclusively
 for metric key structure — distinct from file extension dots, ``TIME_SEPARATOR_MS``
 (U+2024, used in filenames), and other uses of ``"."`` in the codebase."""
 
-METRIC_KEY_MEASURE: str = "measure"
+APP_METRIC_KEY_MEASURE: str = "measure"
 """Dotted-key suffix used to time quality metric measurement (VMAF/PSNR measurement)
-within a phase.  Combined with a ``MetricKey`` prefix it forms keys such as
+within a phase.  Combined with a ``AppMetricKey`` prefix it forms keys such as
 ``"encoding.measure"`` and ``"merge.measure"``.  Using a shared
 constant ensures the suffix is identical across all phases that measure quality."""
 BRACKET_LEFT = "｟"

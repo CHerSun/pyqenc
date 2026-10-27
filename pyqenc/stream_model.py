@@ -47,6 +47,7 @@ from pydantic import (
     BaseModel,
     BeforeValidator,
     ConfigDict,
+    Field,
     PlainSerializer,
 )
 
@@ -64,6 +65,7 @@ from pyqenc.constants import (
     TIME_SEPARATOR_SAFE,
 )
 from pyqenc.models import CropParams, SizedFingerprint, Strategy
+from pyqenc.quality_metrics import MeasuredMetrics, MeasuredMetricsYaml
 from pyqenc.utils.ffmpeg_runner import FFmpegInput
 from pyqenc.utils.long_path import coerce_long_path
 from pyqenc.utils.naming import sanitize_filesystem_text
@@ -880,18 +882,18 @@ class MergedVideo(BaseModel):
         strategy:     The strategy the output was merged from.
         output_path:  The output's materialized location.
         frame_count:  Measured frame count; ``None`` until measured.
-        metrics:      Measured quality metrics keyed by ``"{metric}_{stat}"``.
+        metrics:      The full measured set of the output.
         targets_met:  Whether quality targets were met.
         plot_path:    The quality plot PNG, when produced.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
 
     source_stem:  str
     strategy:     Strategy
     output_path:  LongPathYaml
     frame_count:  int | None = None
-    metrics:      dict[str, float] = {}
+    metrics:      MeasuredMetricsYaml = Field(default_factory=MeasuredMetrics)
     targets_met:  bool             = False
     plot_path:    LongPathYaml | None = None
 

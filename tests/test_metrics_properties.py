@@ -15,22 +15,22 @@ import yaml
 from hypothesis import HealthCheck, assume, given, settings
 from hypothesis import strategies as st
 
-from pyqenc.constants import DOTTED_KEY_SEPARATOR
-from pyqenc.metrics import (
+from pyqenc.app_metrics import (
+    AppMetricKey,
     AppMetrics,
     AttemptStats,
     ConvergenceStats,
     DottedEntry,
     DottedGroup,
-    MetricKey,
     TimeDistribution,
     TopLevelEntry,
-    YamlMetricsCollector,
+    YamlAppMetricsCollector,
     _compute_convergence,
     _ConvergenceAccumulator,
     _last_dot_prefix,
     _update_accumulator,
 )
+from pyqenc.constants import DOTTED_KEY_SEPARATOR
 from pyqenc.models import CodecConfig, Strategy
 
 # ---------------------------------------------------------------------------
@@ -157,8 +157,8 @@ def _st_pipeline_metrics(draw: st.DrawFn) -> AppMetrics:
     )
 
 
-def _make_yaml_collector(tmp_path: Path) -> YamlMetricsCollector:
-    return YamlMetricsCollector(work_dir=tmp_path)
+def _make_yaml_collector(tmp_path: Path) -> YamlAppMetricsCollector:
+    return YamlAppMetricsCollector(work_dir=tmp_path)
 
 
 # ---------------------------------------------------------------------------
@@ -713,9 +713,9 @@ def test_strategy_dot_sanitization_produces_valid_metric_keys(
         f"(preset={preset!r}, profile={profile!r})"
     )
 
-    # Using strategy.display_name() as a suffix must produce a key that groups under MetricKey.ENCODING
-    dotted = DOTTED_KEY_SEPARATOR.join((MetricKey.ENCODING, strategy.display_name()))
+    # Using strategy.display_name() as a suffix must produce a key that groups under AppMetricKey.ENCODING
+    dotted = DOTTED_KEY_SEPARATOR.join((AppMetricKey.ENCODING, strategy.display_name()))
     prefix = _last_dot_prefix(dotted)
-    assert prefix == MetricKey.ENCODING, (
-        f"prefix={prefix!r} != {MetricKey.ENCODING!r} for dotted key {dotted!r}"
+    assert prefix == AppMetricKey.ENCODING, (
+        f"prefix={prefix!r} != {AppMetricKey.ENCODING!r} for dotted key {dotted!r}"
     )

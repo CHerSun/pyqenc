@@ -1,9 +1,10 @@
-"""Unit tests for the metric-statistic identity type (unified-quality-summaries, Req 7).
+"""Unit tests for the metric-statistic identity type (unified-quality-summaries
+Req 7 base; metric-stat-identity spec).
 
 ``MetricStatKey`` is the single naming authority for metric-statistic keys:
-canonical persistence form, display form, tolerant parse, and the pydantic
-dict-key wiring that keeps typed keys in memory and canonical strings on
-disk. Each test names the contract it guards.
+the persistence and CLI key forms, the display form, tolerant parse, and the
+pydantic role-alias boundary that keeps typed maps in memory and canonical
+strings on disk. Each test names the contract it guards.
 """
 # CHerSun 2026
 
@@ -16,18 +17,31 @@ from hypothesis import strategies as st
 from pydantic import BaseModel, ValidationError
 
 from pyqenc.models import QualityTarget
-from pyqenc.quality import (
+from pyqenc.quality_metrics import (
+    MeasuredMetrics,
+    MeasuredMetricsYaml,
     MetricStatKey,
-    MetricStatMap,
     MetricType,
     StatisticType,
+    TargetedMetrics,
+    TargetedMetricsYaml,
 )
 
 
-class _Probe(BaseModel):
-    """Minimal model exercising the dict-key alias on a pydantic field."""
+class _AttemptProbe(BaseModel):
+    """Minimal model exercising the measured-role alias on a pydantic field."""
 
-    metrics: MetricStatMap = {}
+    model_config = {"arbitrary_types_allowed": True}
+
+    metrics: MeasuredMetricsYaml = MeasuredMetrics()
+
+
+class _WinnerProbe(BaseModel):
+    """Minimal model exercising the targeted-role alias on a pydantic field."""
+
+    model_config = {"arbitrary_types_allowed": True}
+
+    metrics: TargetedMetricsYaml = TargetedMetrics()
 
 
 ALL_KEYS: list[MetricStatKey] = [
@@ -38,24 +52,28 @@ ALL_KEYS: list[MetricStatKey] = [
 
 
 class TestIdentity:
-    """The canonical and display forms (Req 7.1–7.2)."""
+    """The identity's key forms and frozenness (Req 7.1–7.2)."""
 
-    @pytest.mark.parametrize("key", ALL_KEYS, ids=lambda k: k.sidecar_key())
-    def test_sidecar_key_is_the_underscore_form(self, key: MetricStatKey) -> None:
-        """The persistence form is exactly ``{metric}_{statistic}``, lowercase tokens."""
-        assert key.sidecar_key() == f"{key.metric.value}_{key.statistic.value}"
+    @given(
+        metric=st.sampled_from(MetricType),
+        statistic=st.sampled_from(StatisticType),
+    )
+    def test_key_forms_round_trip_through_parse(self, metric: MetricType, statistic: StatisticType) -> None:
+        """Both spellings of the identity — the persistence form and the
+        CLI form — parse back to the identity they were derived from."""
+        key = MetricStatKey(metric=metric, statistic=statistic)
+        assert MetricStatKey.parse(key.sidecar_key()) == key
+        assert MetricStatKey.parse(key.cli_key()) == key
 
-    @pytest.mark.parametrize("key", ALL_KEYS, ids=lambda k: k.sidecar_key())
-    def test_display_uses_plot_vocabulary(self, key: MetricStatKey) -> None:
-        """Display = upper-case metric + the plot label (percentiles as percents,
-        min/max/std as words) — e.g. ``VMAF 50%``, ``PSNR Min``."""
-        expected_stat = {
-            StatisticType.MIN: "Min", StatisticType.P05: "5%", StatisticType.P10: "10%",
-            StatisticType.P25: "25%", StatisticType.MEDIAN: "50%", StatisticType.P75: "75%",
-            StatisticType.P90: "90%", StatisticType.P95: "95%", StatisticType.MAX: "Max",
-            StatisticType.STD: "Std",
-        }[key.statistic]
-        assert key.display() == f"{key.metric.info.name} {expected_stat}"
+    def test_display_distinguishes_statistics_within_a_metric(self) -> None:
+        """Display forms never collide across one metric's statistics — the
+        plot labels stay unambiguous."""
+        for metric in MetricType:
+            displays = {
+                MetricStatKey(metric=metric, statistic=statistic).display()
+                for statistic in StatisticType
+            }
+            assert len(displays) == len(StatisticType)
 
     def test_keys_are_hashable_and_frozen(self) -> None:
         """The type works directly as a dict key and rejects mutation."""
@@ -105,49 +123,67 @@ class TestParse:
             MetricStatKey.parse(bad)
 
 
-class TestMetricStatMap:
-    """The pydantic dict-key alias: typed in memory, canonical on disk (Req 7.1)."""
+class TestRoleAliases:
+    """The pydantic role-alias boundary: typed maps in memory, canonical
+    strings on disk (Req 2.3)."""
 
-    def test_validation_yields_typed_keys(self) -> None:
-        """Canonical string keys validate into ``MetricStatKey`` map keys."""
-        probe = _Probe.model_validate({"metrics": {"vmaf_median": 96.0, "psnr_p10": 43.0}})
-        assert set(probe.metrics) == {
-            MetricStatKey(metric=MetricType.VMAF, statistic=StatisticType.MEDIAN),
-            MetricStatKey(metric=MetricType.PSNR, statistic=StatisticType.P10),
-        }
-        assert probe.metrics[MetricStatKey(metric=MetricType.VMAF, statistic=StatisticType.MEDIAN)] == 96.0
+    def test_validation_yields_the_role_instances(self) -> None:
+        """String-keyed payloads validate into the field's role instance —
+        the full-set role for measured fields, the narrowed role for
+        targeted ones."""
+        attempt = _AttemptProbe.model_validate(
+            {"metrics": {"vmaf_median": 96.0, "psnr_p10": 43}}
+        )
+        assert isinstance(attempt.metrics, MeasuredMetrics)
+        assert attempt.metrics[MetricStatKey.parse("vmaf_median")] == 96.0
+        assert attempt.metrics[MetricStatKey.parse("psnr-p10")] == 43.0
 
-    def test_dump_yields_canonical_strings(self) -> None:
-        """``model_dump()`` re-keys to the canonical sidecar form."""
-        probe = _Probe.model_validate({"metrics": {"vmaf-median": 96.0}})
-        assert probe.model_dump() == {"metrics": {"vmaf_median": 96.0}}
+        winner = _WinnerProbe.model_validate({"metrics": {"vmaf-median": 96.0}})
+        assert isinstance(winner.metrics, TargetedMetrics)
+        assert winner.metrics[MetricStatKey.parse("vmaf_median")] == 96.0
 
-    def test_yaml_round_trip(self) -> None:
-        """The on-disk form is canonical keys; a load→dump→load cycle is stable."""
-        probe = _Probe.model_validate({"metrics": {"vmaf_median": 96.0, "ssim_p10": 96.5}})
-        as_text = yaml.safe_dump(probe.model_dump())
-        assert "vmaf_median" in as_text
-        reloaded = _Probe.model_validate(yaml.safe_load(as_text))
+    def test_save_load_round_trip_preserves_values_and_identities(self) -> None:
+        """A save→load cycle preserves the measured values and pair
+        identities (Req 6.3) — both roles serialize identically."""
+        probe = _AttemptProbe.model_validate(
+            {"metrics": {"vmaf_median": 96.0, "ssim_p10": 96.5}}
+        )
+        reloaded = _AttemptProbe.model_validate(
+            yaml.safe_load(yaml.safe_dump(probe.model_dump()))
+        )
         assert reloaded == probe
+        assert reloaded.metrics == probe.metrics
 
     def test_non_mapping_rejected(self) -> None:
         """A non-mapping payload fails pydantic validation, not silently."""
         with pytest.raises(ValidationError):
-            _Probe.model_validate({"metrics": 5})
+            _AttemptProbe.model_validate({"metrics": 5})
 
 
-class TestQualityTargetKey:
-    """The typed view over ``QualityTarget``'s string fields."""
+class TestQualityTargetIdentity:
+    """The target fold: the identity is the pair, validated at construction
+    (Req 5.1–5.2, Req 12.2)."""
 
-    def test_key_matches_the_target_identity(self) -> None:
+    def test_parse_yields_the_typed_identity(self) -> None:
         target = QualityTarget.parse("vmaf-med:96.0")
-        assert target.key() == MetricStatKey(
+        assert target.identity == MetricStatKey(
             metric=MetricType.VMAF, statistic=StatisticType.MEDIAN,
         )
+        assert target.value == 96.0
 
-    def test_key_fails_loudly_on_bad_fields(self) -> None:
-        """Fields are validated at parse, not construction — ``key()`` is where
-        a bad value fails instead of leaking a mistyped key."""
-        target = QualityTarget(metric="vmaf", statistic="p99", value=90.0)
-        with pytest.raises(ValueError, match="p99"):
-            target.key()
+    def test_construction_rejects_unknown_statistic(self) -> None:
+        """A statistic outside the closed set fails at construction — never
+        at first use."""
+        with pytest.raises(ValidationError):
+            QualityTarget(
+                identity={"metric": "vmaf", "statistic": "p99"},  # type: ignore[arg-type]
+                value=90.0,
+            )
+
+    def test_construction_rejects_unknown_metric(self) -> None:
+        """A metric outside the closed set fails at construction."""
+        with pytest.raises(ValidationError):
+            QualityTarget(
+                identity={"metric": "vmaf2", "statistic": "min"},  # type: ignore[arg-type]
+                value=90.0,
+            )

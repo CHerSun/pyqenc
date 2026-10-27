@@ -1,7 +1,7 @@
-"""Phase integration tests for MetricsCollector timing instrumentation.
+"""Phase integration tests for AppMetricsCollector timing instrumentation.
 
 Verifies the OBSERVABLE metrics contract of each phase: after a phase runs
-against a real ``YamlMetricsCollector``, the flushed ``metrics.yaml`` records
+against a real ``YamlAppMetricsCollector``, the flushed ``metrics.yaml`` records
 the expected timing rows (top-level phase keys, dotted sub-action keys) and
 convergence statistics — and records nothing for work that did not happen
 (reused paths, reused pairs).  The collector runs under a deterministic
@@ -23,11 +23,11 @@ from unittest.mock import MagicMock, patch
 import yaml
 
 from pyqenc.app_config import AppConfig, load_app_config
-from pyqenc.metrics import (
-    MetricKey,
-    MetricsCollector,
-    NoOpMetricsCollector,
-    YamlMetricsCollector,
+from pyqenc.app_metrics import (
+    AppMetricKey,
+    AppMetricsCollector,
+    NoOpAppMetricsCollector,
+    YamlAppMetricsCollector,
 )
 from pyqenc.models import (
     CleanupLevel,
@@ -202,13 +202,13 @@ def _make_extended_stream(path: Path, frame_count: int, duration: float) -> Exte
 
 
 def _spy_collector() -> MagicMock:
-    """Return a ``MagicMock`` that satisfies the ``MetricsCollector`` Protocol.
+    """Return a ``MagicMock`` that satisfies the ``AppMetricsCollector`` Protocol.
 
     Used only where a test needs SOME collector to satisfy a constructor and
     never asserts on it — never to inspect ``time()``/``step()`` call args
     (that pins internal instrumentation, not behavior).
     """
-    collector = MagicMock(spec=MetricsCollector)
+    collector = MagicMock(spec=AppMetricsCollector)
     collector.time.return_value = contextlib.nullcontext()
     return collector
 
@@ -233,11 +233,11 @@ class _SteppingClock:
 
 def _recorded_metrics(
     tmp_path: Path,
-    run: Callable[[MetricsCollector], None],
+    run: Callable[[AppMetricsCollector], None],
 ) -> dict:
     """Run *run* against a real collector and return the parsed metrics.yaml.
 
-    Creates a ``YamlMetricsCollector`` writing ``metrics.yaml`` below
+    Creates a ``YamlAppMetricsCollector`` writing ``metrics.yaml`` below
     ``tmp_path/work``, patches ``time.monotonic`` to a stepping clock for the
     duration of *run*, flushes, closes, and returns ``yaml.safe_load`` of the
     written report.  Asserting on this dict is asserting on the run's
@@ -245,7 +245,7 @@ def _recorded_metrics(
     """
     work_dir = tmp_path / "work"
     work_dir.mkdir(parents=True, exist_ok=True)
-    collector = YamlMetricsCollector(work_dir=work_dir, force_wipe=True)
+    collector = YamlAppMetricsCollector(work_dir=work_dir, force_wipe=True)
     try:
         with patch("time.monotonic", _SteppingClock()):
             run(collector)
@@ -300,7 +300,7 @@ class TestJobPhaseTiming:
         config   = _make_config(tmp_path)
         volatile = _make_volatile(tmp_path)
 
-        def run(collector: MetricsCollector) -> None:
+        def run(collector: AppMetricsCollector) -> None:
             JobPhase(
                 config, {}, collector=collector, **volatile,
             ).run()
@@ -348,7 +348,7 @@ class TestJobPhaseTiming:
         assert job_yaml.read_bytes() == before, "reuse must not rewrite job.yaml"
 
     def test_noop_collector_works_as_drop_in(self, tmp_path: Path) -> None:
-        """``JobPhase`` must run without error when given a ``NoOpMetricsCollector``.
+        """``JobPhase`` must run without error when given a ``NoOpAppMetricsCollector``.
 
         Validates: Requirements 6.4, 6.5
         """
@@ -356,7 +356,7 @@ class TestJobPhaseTiming:
 
         config   = _make_config(tmp_path)
         volatile = _make_volatile(tmp_path)
-        collector = NoOpMetricsCollector()
+        collector = NoOpAppMetricsCollector()
         phase    = JobPhase(
             config, {}, collector=collector, **volatile,
         )
@@ -411,7 +411,7 @@ class TestExtractionPhaseTiming:
     def _make_phase(
         self,
         tmp_path: Path,
-        collector: MetricsCollector,
+        collector: AppMetricsCollector,
     ) -> ExtractionPhase:
         """Return an ``ExtractionPhase`` with a pre-wired job dependency."""
         from pyqenc.phases.extraction import ExtractionPhase
@@ -456,7 +456,7 @@ class TestExtractionPhaseTiming:
             wanted  = True,
         )
 
-        def run(collector: MetricsCollector) -> None:
+        def run(collector: AppMetricsCollector) -> None:
             phase = self._make_phase(tmp_path, collector)
             with patch.object(
                 ExtractionPhase, "_recover",
@@ -507,7 +507,7 @@ class TestExtractionPhaseTiming:
             wanted  = True,
         )
 
-        def run(collector: MetricsCollector) -> None:
+        def run(collector: AppMetricsCollector) -> None:
             phase = self._make_phase(tmp_path, collector)
             with (
                 patch.object(
@@ -532,7 +532,7 @@ class TestExtractionPhaseTiming:
         )
 
     def test_noop_collector_works_as_drop_in(self, tmp_path: Path) -> None:
-        """``ExtractionPhase`` must run without error when given a ``NoOpMetricsCollector``.
+        """``ExtractionPhase`` must run without error when given a ``NoOpAppMetricsCollector``.
 
         Validates: Requirements 6.4, 6.5
         """
@@ -544,7 +544,7 @@ class TestExtractionPhaseTiming:
             SubtitleStreamInfo,
         )
 
-        collector = NoOpMetricsCollector()
+        collector = NoOpAppMetricsCollector()
         phase     = self._make_phase(tmp_path, collector)
 
         stub_artifact = Artifact(
@@ -599,7 +599,7 @@ class TestChunkingPhaseTiming:
     def _make_phase(
         self,
         tmp_path:  Path,
-        collector: MetricsCollector,
+        collector: AppMetricsCollector,
     ) -> ChunkingPhase:
         """Return a ``ChunkingPhase`` with pre-wired job/extraction/probe deps."""
         from pyqenc.models import PhaseOutcome
@@ -661,7 +661,7 @@ class TestChunkingPhaseTiming:
             ).model_dump(),
         )
 
-        def run(collector: MetricsCollector) -> None:
+        def run(collector: AppMetricsCollector) -> None:
             phase = self._make_phase(tmp_path, collector)
             outcome["value"] = phase.run().outcome.value
 
@@ -690,7 +690,7 @@ class TestChunkingPhaseTiming:
 
         outcome: dict[str, str] = {}
 
-        def run(collector: MetricsCollector) -> None:
+        def run(collector: AppMetricsCollector) -> None:
             phase = self._make_phase(tmp_path, collector)
             with patch("pyqenc.phases.chunking.detect_scenes",
                        return_value=[SceneBoundary(frame=0, timestamp_seconds=0.0)]):
@@ -731,7 +731,7 @@ class TestChunkingPhaseTiming:
             ).model_dump(),
         )
 
-        def run(collector: MetricsCollector) -> None:
+        def run(collector: AppMetricsCollector) -> None:
             phase = self._make_phase(tmp_path, collector)
             with patch("pyqenc.phases.chunking.detect_scenes") as detect_mock:
                 phase.run()
@@ -745,13 +745,13 @@ class TestChunkingPhaseTiming:
         )
 
     def test_noop_collector_works_as_drop_in(self, tmp_path: Path) -> None:
-        """``ChunkingPhase`` must run without error when given a ``NoOpMetricsCollector``.
+        """``ChunkingPhase`` must run without error when given a ``NoOpAppMetricsCollector``.
 
         Validates: Requirements 6.4, 6.5
         """
         from pyqenc.models import SceneBoundary
 
-        collector = NoOpMetricsCollector()
+        collector = NoOpAppMetricsCollector()
         phase     = self._make_phase(tmp_path, collector)
 
         with patch("pyqenc.phases.chunking.detect_scenes",
@@ -771,7 +771,7 @@ class TestAudioPhaseTiming:
     def _make_phase(
         self,
         tmp_path: Path,
-        collector: MetricsCollector,
+        collector: AppMetricsCollector,
     ) -> AudioPhase:
         """Return an ``AudioPhase`` with pre-wired job and extraction dependencies."""
         from pyqenc.models import PhaseOutcome
@@ -832,7 +832,7 @@ class TestAudioPhaseTiming:
             state=ArtifactState.COMPLETE,
         )
 
-        def run(collector: MetricsCollector) -> None:
+        def run(collector: AppMetricsCollector) -> None:
             phase = self._make_phase(tmp_path, collector)
             with patch.object(AudioPhase, "_recover", return_value=Recovery.from_artifacts([stub_row])):
                 phase.run()
@@ -868,7 +868,7 @@ class TestAudioPhaseTiming:
             message   = "ok",
         )
 
-        def run(collector: MetricsCollector) -> None:
+        def run(collector: AppMetricsCollector) -> None:
             phase = self._make_phase(tmp_path, collector)
             with (
                 patch.object(AudioPhase, "_recover", return_value=Recovery.from_artifacts([stub_artifact])),
@@ -883,13 +883,13 @@ class TestAudioPhaseTiming:
         )
 
     def test_noop_collector_works_as_drop_in(self, tmp_path: Path) -> None:
-        """``AudioPhase`` must run without error when given a ``NoOpMetricsCollector``.
+        """``AudioPhase`` must run without error when given a ``NoOpAppMetricsCollector``.
 
         Validates: Requirements 6.4, 6.5
         """
         from pyqenc.phases.audio import AudioPhase
 
-        collector = NoOpMetricsCollector()
+        collector = NoOpAppMetricsCollector()
         phase     = self._make_phase(tmp_path, collector)
 
         stub_row = Artifact(
@@ -950,7 +950,7 @@ class TestOptimizationPhaseTiming:
     def _make_phase(
         self,
         tmp_path:  Path,
-        collector: MetricsCollector,
+        collector: AppMetricsCollector,
         *,
         optimize:  bool = True,
     ) -> OptimizationPhase:
@@ -1072,7 +1072,7 @@ class TestOptimizationPhaseTiming:
 
         Validates: Requirements 6.5, 2.7
         """
-        def run(collector: MetricsCollector) -> None:
+        def run(collector: AppMetricsCollector) -> None:
             phase = self._make_phase(tmp_path, collector, optimize=True)
             self._seed_winner_pairs(tmp_path)
             self._persist_current_sidecar(phase, tmp_path)
@@ -1133,7 +1133,7 @@ class TestOptimizationPhaseTiming:
             require_winner_sidecar=True,
         )
 
-        def run(collector: MetricsCollector) -> None:
+        def run(collector: AppMetricsCollector) -> None:
             with (
                 patch("pyqenc.phases.encoding._encode_chunk_async", return_value=successful_result),
             ):
@@ -1146,7 +1146,7 @@ class TestOptimizationPhaseTiming:
                         concurrency      = 1,
                         collector        = collector,
                         phase_recovery   = stub_recovery,
-                        metric_prefix    = MetricKey.OPTIMIZATION,
+                        metric_prefix    = AppMetricKey.OPTIMIZATION,
                     )
                 )
 
@@ -1160,11 +1160,11 @@ class TestOptimizationPhaseTiming:
         )
 
     def test_noop_collector_works_as_drop_in(self, tmp_path: Path) -> None:
-        """``OptimizationPhase`` must run without error when given a ``NoOpMetricsCollector``.
+        """``OptimizationPhase`` must run without error when given a ``NoOpAppMetricsCollector``.
 
         Validates: Requirements 6.4, 6.5
         """
-        collector = NoOpMetricsCollector()
+        collector = NoOpAppMetricsCollector()
         phase     = self._make_phase(tmp_path, collector, optimize=True)
         self._seed_winner_pairs(tmp_path)
         self._persist_current_sidecar(phase, tmp_path)
@@ -1229,7 +1229,7 @@ class TestEncodingPhaseTiming:
     def _make_phase(
         self,
         tmp_path:  Path,
-        collector: MetricsCollector,
+        collector: AppMetricsCollector,
     ) -> EncodingPhase:
         """Return an ``EncodingPhase`` with pre-wired job, probe, chunking, and optimization deps."""
         from pyqenc.models import PhaseOutcome
@@ -1284,7 +1284,7 @@ class TestEncodingPhaseTiming:
             state=ArtifactState.COMPLETE,
         )
 
-        def run(collector: MetricsCollector) -> None:
+        def run(collector: AppMetricsCollector) -> None:
             phase = self._make_phase(tmp_path, collector)
             with patch.object(EncodingPhase, "_recover", return_value=Recovery.from_artifacts([stub_row])):
                 phase.run()
@@ -1324,7 +1324,7 @@ class TestEncodingPhaseTiming:
             message   = "ok",
         )
 
-        def run(collector: MetricsCollector) -> None:
+        def run(collector: AppMetricsCollector) -> None:
             phase = self._make_phase(tmp_path, collector)
             with (
                 patch.object(EncodingPhase, "_recover", return_value=Recovery.from_artifacts([stub_artifact])),
@@ -1374,7 +1374,7 @@ class TestEncodingPhaseTiming:
             reused       = False,
         )
 
-        def run(collector: MetricsCollector) -> None:
+        def run(collector: AppMetricsCollector) -> None:
             with patch("pyqenc.phases.encoding._encode_chunk_async", return_value=successful_result):
                 asyncio.run(
                     _encode_pairs(
@@ -1384,7 +1384,7 @@ class TestEncodingPhaseTiming:
                         quality_targets  = [],
                         concurrency      = 1,
                         collector        = collector,
-                        metric_prefix   = MetricKey.ENCODING,
+                        metric_prefix   = AppMetricKey.ENCODING,
                         phase_recovery   = _recover_pairs(
                             tmp_path, [chunk.safe_name()], [_STRATEGY_SLOW_H265],
                             require_winner_sidecar=True,
@@ -1438,7 +1438,7 @@ class TestEncodingPhaseTiming:
             reused       = True,
         )
 
-        def run(collector: MetricsCollector) -> None:
+        def run(collector: AppMetricsCollector) -> None:
             with patch("pyqenc.phases.encoding._encode_chunk_async", return_value=reused_result):
                 asyncio.run(
                     _encode_pairs(
@@ -1448,7 +1448,7 @@ class TestEncodingPhaseTiming:
                         quality_targets  = [],
                         concurrency      = 1,
                         collector        = collector,
-                        metric_prefix   = MetricKey.ENCODING,
+                        metric_prefix   = AppMetricKey.ENCODING,
                         phase_recovery   = _recover_pairs(
                             tmp_path, [chunk.safe_name()], [_STRATEGY_SLOW_H265],
                             require_winner_sidecar=True,
@@ -1463,13 +1463,13 @@ class TestEncodingPhaseTiming:
         )
 
     def test_noop_collector_works_as_drop_in(self, tmp_path: Path) -> None:
-        """``EncodingPhase`` must run without error when given a ``NoOpMetricsCollector``.
+        """``EncodingPhase`` must run without error when given a ``NoOpAppMetricsCollector``.
 
         Validates: Requirements 6.4, 6.5
         """
         from pyqenc.phases.encoding import EncodingPhase
 
-        collector = NoOpMetricsCollector()
+        collector = NoOpAppMetricsCollector()
         phase     = self._make_phase(tmp_path, collector)
 
         stub_row = Artifact(
@@ -1544,7 +1544,7 @@ class TestMergePhaseTiming:
     def _make_phase(
         self,
         tmp_path:  Path,
-        collector: MetricsCollector,
+        collector: AppMetricsCollector,
         *,
         probe_stream: ExtendedVideoStream | None = None,
     ) -> MergePhase:
@@ -1655,7 +1655,7 @@ class TestMergePhaseTiming:
 
         stub_artifact = _merged_row(output_file, ArtifactState.COMPLETE)
 
-        def run(collector: MetricsCollector) -> None:
+        def run(collector: AppMetricsCollector) -> None:
             phase = self._make_phase(tmp_path, collector)
             with patch.object(MergePhase, "_recover", return_value=Recovery.from_artifacts([stub_artifact])):
                 phase.run()
@@ -1692,7 +1692,7 @@ class TestMergePhaseTiming:
         encoded_path.parent.mkdir(parents=True, exist_ok=True)
         encoded_path.write_bytes(b"\x00" * 128)
 
-        def run(collector: MetricsCollector) -> None:
+        def run(collector: AppMetricsCollector) -> None:
             phase = self._make_phase(tmp_path, collector)
             with (
                 patch.object(MergePhase, "_recover", return_value=Recovery.from_artifacts([stub_artifact])),
@@ -1740,7 +1740,7 @@ class TestMergePhaseTiming:
         encoded_path.parent.mkdir(parents=True, exist_ok=True)
         encoded_path.write_bytes(b"\x00" * 128)
 
-        def run(collector: MetricsCollector) -> None:
+        def run(collector: AppMetricsCollector) -> None:
             phase = self._make_phase(
                 tmp_path, collector,
                 # Quality measurement needs a real source stream on the probe
@@ -1772,14 +1772,14 @@ class TestMergePhaseTiming:
         assert "merge" in _top_level_keys(metrics)
 
     def test_noop_collector_works_as_drop_in(self, tmp_path: Path) -> None:
-        """``MergePhase`` must run without error when given a ``NoOpMetricsCollector``.
+        """``MergePhase`` must run without error when given a ``NoOpAppMetricsCollector``.
 
         Validates: Requirements 6.4, 6.5
         """
         from pyqenc.phases.merge import MergePhase
         from pyqenc.state import ArtifactState
 
-        collector = NoOpMetricsCollector()
+        collector = NoOpAppMetricsCollector()
         phase     = self._make_phase(tmp_path, collector)
 
         output_file = tmp_path / "work" / "merged" / "source h265+slow.mkv"
@@ -1795,23 +1795,23 @@ class TestMergePhaseTiming:
 
 
 # ---------------------------------------------------------------------------
-# Smoke tests — MetricKey, time(), step(), NoOp, Strategy dots, YAML tiers
+# Smoke tests — AppMetricKey, time(), step(), NoOp, Strategy dots, YAML tiers
 # ---------------------------------------------------------------------------
 
 
-class TestMetricKeySmoke:
-    """Smoke tests for MetricKey enum, collector API, strategy dot sanitization,
+class TestAppMetricKeySmoke:
+    """Smoke tests for AppMetricKey enum, collector API, strategy dot sanitization,
     and two-tier YAML structure.
 
     Validates: Requirements 6.1, 6.2, 6.4, 6.5, 6.6
     """
 
     # ------------------------------------------------------------------
-    # 1. MetricKey has exactly 9 members with correct string values
+    # 1. AppMetricKey has exactly 9 members with correct string values
     # ------------------------------------------------------------------
 
     def test_metric_key_has_nine_members(self) -> None:
-        """MetricKey must have exactly 9 members with the correct string values.
+        """AppMetricKey must have exactly 9 members with the correct string values.
 
         Validates: Requirements 6.1, 6.2 (PROBE added by phase-run-template)
         """
@@ -1826,75 +1826,75 @@ class TestMetricKeySmoke:
             "MERGE":        "merge",
             "RECOVERY":     "recovery",
         }
-        assert len(MetricKey) == 9, (
-            f"Expected 9 MetricKey members, got {len(MetricKey)}: {list(MetricKey)}"
+        assert len(AppMetricKey) == 9, (
+            f"Expected 9 AppMetricKey members, got {len(AppMetricKey)}: {list(AppMetricKey)}"
         )
         for name, value in expected.items():
-            member = MetricKey[name]
+            member = AppMetricKey[name]
             assert member.value == value, (
-                f"MetricKey.{name} expected value {value!r}, got {member.value!r}"
+                f"AppMetricKey.{name} expected value {value!r}, got {member.value!r}"
             )
 
     # ------------------------------------------------------------------
-    # 2. time() accepts MetricKey with zero or more suffix parts
+    # 2. time() accepts AppMetricKey with zero or more suffix parts
     # ------------------------------------------------------------------
 
     def test_time_accepts_metric_key_no_suffix(self) -> None:
-        """collector.time(MetricKey.ENCODING) must work without error.
+        """collector.time(AppMetricKey.ENCODING) must work without error.
 
         Validates: Requirements 6.4, 6.5
         """
-        collector = NoOpMetricsCollector()
-        with collector.time(MetricKey.ENCODING):
+        collector = NoOpAppMetricsCollector()
+        with collector.time(AppMetricKey.ENCODING):
             pass  # no error expected
 
     def test_time_accepts_metric_key_with_suffix(self) -> None:
-        """collector.time(MetricKey.JOB, "probe") must work without error.
+        """collector.time(AppMetricKey.JOB, "probe") must work without error.
 
         Validates: Requirements 6.4, 6.5
         """
-        collector = NoOpMetricsCollector()
-        with collector.time(MetricKey.JOB, "probe"):
+        collector = NoOpAppMetricsCollector()
+        with collector.time(AppMetricKey.JOB, "probe"):
             pass  # no error expected
 
     # ------------------------------------------------------------------
-    # 3. step() accepts MetricKey with zero or more suffix parts
+    # 3. step() accepts AppMetricKey with zero or more suffix parts
     # ------------------------------------------------------------------
 
     def test_step_accepts_metric_key_no_suffix(self) -> None:
-        """collector.step(MetricKey.ENCODING) must work without error.
+        """collector.step(AppMetricKey.ENCODING) must work without error.
 
         Validates: Requirements 6.4, 6.6
         """
-        collector = NoOpMetricsCollector()
-        collector.step(MetricKey.ENCODING)  # no error expected
+        collector = NoOpAppMetricsCollector()
+        collector.step(AppMetricKey.ENCODING)  # no error expected
 
     def test_step_accepts_metric_key_with_suffix(self) -> None:
-        """collector.step(MetricKey.CHUNKING, "split") must work without error.
+        """collector.step(AppMetricKey.CHUNKING, "split") must work without error.
 
         Validates: Requirements 6.4, 6.6
         """
-        collector = NoOpMetricsCollector()
-        collector.step(MetricKey.CHUNKING, "split")  # no error expected
+        collector = NoOpAppMetricsCollector()
+        collector.step(AppMetricKey.CHUNKING, "split")  # no error expected
 
     # ------------------------------------------------------------------
-    # 4. NoOpMetricsCollector accepts both time() and step() with MetricKey
+    # 4. NoOpAppMetricsCollector accepts both time() and step() with AppMetricKey
     # ------------------------------------------------------------------
 
     def test_noop_accepts_time_and_step_with_metric_key(self) -> None:
-        """NoOpMetricsCollector must accept time() and step() with MetricKey and suffix parts.
+        """NoOpAppMetricsCollector must accept time() and step() with AppMetricKey and suffix parts.
 
         Validates: Requirements 6.4, 6.5, 6.6
         """
-        collector = NoOpMetricsCollector()
+        collector = NoOpAppMetricsCollector()
         # time() — top-level and dotted
-        with collector.time(MetricKey.MERGE):
+        with collector.time(AppMetricKey.MERGE):
             pass
-        with collector.time(MetricKey.MERGE, "concat"):
+        with collector.time(AppMetricKey.MERGE, "concat"):
             pass
         # step() — top-level and dotted
-        collector.step(MetricKey.ENCODING)
-        collector.step(MetricKey.ENCODING, "h265")
+        collector.step(AppMetricKey.ENCODING)
+        collector.step(AppMetricKey.ENCODING, "h265")
         # flush() — no-op
         collector.flush()
 
@@ -1930,7 +1930,7 @@ class TestMetricKeySmoke:
     # ------------------------------------------------------------------
 
     def test_top_level_and_dotted_keys_coexist(self, tmp_path: Path) -> None:
-        """YamlMetricsCollector must store both top-level and dotted keys independently.
+        """YamlAppMetricsCollector must store both top-level and dotted keys independently.
 
         Bug guarded: recording a dotted sub-action overwriting (or being
         merged into) its same-named top-level row — the report must carry the
@@ -1938,18 +1938,18 @@ class TestMetricKeySmoke:
 
         Validates: Requirements 1.3, 6.1, 6.2
         """
-        from pyqenc.metrics import YamlMetricsCollector
+        from pyqenc.app_metrics import YamlAppMetricsCollector
 
         work_dir = tmp_path / "work"
         work_dir.mkdir()
-        collector = YamlMetricsCollector(work_dir=work_dir, force_wipe=True)
+        collector = YamlAppMetricsCollector(work_dir=work_dir, force_wipe=True)
         try:
             # Record through the public API under the stepping clock so each
             # span accrues >= 1 s and survives the report's integer rounding.
             with patch("time.monotonic", _SteppingClock()):
-                with collector.time(MetricKey.ENCODING):
+                with collector.time(AppMetricKey.ENCODING):
                     pass
-                with collector.time(MetricKey.ENCODING, "h265"):
+                with collector.time(AppMetricKey.ENCODING, "h265"):
                     pass
             collector.flush()
         finally:
@@ -1985,19 +1985,19 @@ class TestMetricKeySmoke:
 
         Validates: Requirements 5.4
         """
-        from pyqenc.metrics import YamlMetricsCollector
+        from pyqenc.app_metrics import YamlAppMetricsCollector
 
         work_dir = tmp_path / "work"
         work_dir.mkdir()
-        collector = YamlMetricsCollector(work_dir=work_dir, force_wipe=True)
+        collector = YamlAppMetricsCollector(work_dir=work_dir, force_wipe=True)
         try:
             # Only top-level keys — no dotted keys (public API, stepping clock).
             with patch("time.monotonic", _SteppingClock()):
-                with collector.time(MetricKey.ENCODING):
+                with collector.time(AppMetricKey.ENCODING):
                     pass
-                with collector.time(MetricKey.MERGE):
+                with collector.time(AppMetricKey.MERGE):
                     pass
-                with collector.time(MetricKey.EXTRACTION):
+                with collector.time(AppMetricKey.EXTRACTION):
                     pass
             collector.flush()
         finally:

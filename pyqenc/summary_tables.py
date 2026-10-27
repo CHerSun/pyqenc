@@ -20,15 +20,16 @@ marks exist only at render time — persisted rows stay absolute facts.
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
-from pyqenc.constants import FIXED_COMPARISON_STATS
 from pyqenc.models import QualityTarget
-from pyqenc.quality import (
+from pyqenc.quality_metrics import (
+    FIXED_COMPARISON_PAIRS,
     MetricStatKey,
-    MetricStatMap,
     MetricType,
     StatisticType,
+    TargetedMetrics,
+    TargetedMetricsYaml,
 )
 from pyqenc.utils.log_format import fmt_size_mb
 from pyqenc.utils.tables import Column, format_table
@@ -75,11 +76,6 @@ CONVENTION_SEPARATOR = " · "
 SUB_COLUMN_SEPARATOR = " | "
 """Between a metric column's compared statistics (Req 2.8 — the divider)."""
 
-COMPARISON_STATS: tuple[StatisticType, ...] = tuple(
-    StatisticType(token) for token in FIXED_COMPARISON_STATS
-)
-"""The fixed-mode compared statistics (search compares the targeted set)."""
-
 
 # ---------------------------------------------------------------------------
 # The persisted row shape (Req 1.3)
@@ -96,13 +92,15 @@ class StrategyRow(BaseModel):
     Attributes:
         strategy:   Display name of the strategy.
         size_bytes: Total size of the population's outputs (bytes).
-        metrics:    Measured values keyed by the metric-statistic pair type —
-                    typed keys in memory, canonical strings on disk.
+        metrics:    The targeted metric subset — the role instance in
+                    memory, canonical ``vmaf_median`` string keys on disk.
     """
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
     strategy:   str
     size_bytes: int
-    metrics:    MetricStatMap = Field(default_factory=dict)
+    metrics:    TargetedMetricsYaml = Field(default_factory=TargetedMetrics)
 
 
 # ---------------------------------------------------------------------------
@@ -245,7 +243,7 @@ def _metric_columns(table: ComparisonTable) -> list[_MetricColumn]:
     if table.targets is not None:
         by_metric: dict[MetricType, dict[StatisticType, float]] = {}
         for target in table.targets:
-            key = target.key()
+            key = target.identity
             by_metric.setdefault(key.metric, {})[key.statistic] = target.value
         return sorted(
             (
@@ -259,29 +257,33 @@ def _metric_columns(table: ComparisonTable) -> list[_MetricColumn]:
             key=lambda c: _METRIC_ORDER[c.metric],
         )
     # Fixed mode (anchor) and uncompared rendering compare the fixed
-    # comparison statistics, of every metric the carrier holds. The carrier
+    # comparison pairs, of every metric the carrier holds. The carrier
     # is the anchor row; uncompared falls back to the union across rows
     # (absolute rendering of what the population measured).
-    carrier: MetricStatMap = {}
+    carrier: TargetedMetrics = TargetedMetrics()
     if table.anchor is not None:
         anchor_row = next((r for r in table.rows if r.strategy == table.anchor), None)
         if anchor_row is not None:
             carrier = anchor_row.metrics
     else:
+        union: dict[MetricStatKey, float] = {}
         for row in table.rows:
-            carrier = {**carrier, **row.metrics}
+            union.update(row.metrics)
+        carrier = TargetedMetrics(union)
     metrics = sorted(
-        {key.metric for key in carrier if key.statistic in COMPARISON_STATS},
+        {key.metric for key in carrier if key in FIXED_COMPARISON_PAIRS},
         key=_METRIC_ORDER.__getitem__,
     )
     return [
         _MetricColumn(
             metric           = metric,
-            stats            = COMPARISON_STATS,
+            stats            = tuple(
+                pair.statistic for pair in FIXED_COMPARISON_PAIRS if pair.metric == metric
+            ),
             reference_values = {
                 key.statistic: value
                 for key, value in carrier.items()
-                if key.metric == metric and key.statistic in COMPARISON_STATS
+                if key.metric == metric and key in FIXED_COMPARISON_PAIRS
             },
         )
         for metric in metrics
@@ -431,7 +433,7 @@ def _convention_lines(table: ComparisonTable) -> list[str]:
         metrics = " · ".join(
             metric.info.name
             for metric in MetricType
-            if any(t.metric == metric.value for t in table.targets)
+            if any(t.identity.metric == metric for t in table.targets)
         )
         head = [f"targets: {ANCHOR_GLYPH}  configured ({metrics})"]
         segments = ["Δ vs targets", size_basis]

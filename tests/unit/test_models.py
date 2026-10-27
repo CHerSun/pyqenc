@@ -12,6 +12,7 @@ from pyqenc.models import (
     Resolution,
     Strategy,
 )
+from pyqenc.quality_metrics import MetricStatKey
 
 
 class TestQualityTarget:
@@ -20,22 +21,19 @@ class TestQualityTarget:
     def test_parse_valid_vmaf_min(self):
         """Test parsing valid VMAF minimum target."""
         target = QualityTarget.parse("vmaf-min:95")
-        assert target.metric == "vmaf"
-        assert target.statistic == "min"
+        assert target.identity == MetricStatKey.parse("vmaf-min")
         assert target.value == 95.0
 
     def test_parse_valid_ssim_median(self):
         """Test parsing valid SSIM median target."""
         target = QualityTarget.parse("ssim-med:0.98")
-        assert target.metric == "ssim"
-        assert target.statistic == "median"
+        assert target.identity == MetricStatKey.parse("ssim-median")
         assert target.value == 0.98
 
     def test_parse_valid_psnr_max(self):
         """Test parsing valid PSNR maximum target."""
         target = QualityTarget.parse("psnr-max:45.5")
-        assert target.metric == "psnr"
-        assert target.statistic == "max"
+        assert target.identity == MetricStatKey.parse("psnr-max")
         assert target.value == 45.5
 
     def test_parse_invalid_format(self):

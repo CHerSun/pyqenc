@@ -8,6 +8,13 @@ import pytest
 
 from pyqenc.models import CodecConfig, QualityTarget
 from pyqenc.quality import QualitySearch, QualitySearchBase, _score_attempt
+from pyqenc.quality_metrics import MetricStatKey, MetricType, TargetedMetrics
+
+
+def _tm(**pairs: float) -> TargetedMetrics:
+    """Build a targeted map from sidecar-form keys (``_tm(vmaf_min=96.0)``)."""
+    return TargetedMetrics({MetricStatKey.parse(key): value for key, value in pairs.items()})
+
 
 _QUALITY_MIN = Decimal("0")
 _QUALITY_MAX = Decimal("51")
@@ -21,17 +28,17 @@ def _d(v: str | float) -> Decimal:
 
 
 def _vmaf_target(value: float = 95.0) -> QualityTarget:
-    return QualityTarget(metric="vmaf", statistic="min", value=value)
+    return QualityTarget(identity=MetricStatKey.parse("vmaf-min"), value=value)
 
 
-def _pass_metrics(vmaf: float = 96.0) -> dict[str, float]:
+def _pass_metrics(vmaf: float = 96.0) -> TargetedMetrics:
     """Metrics that pass a vmaf-min=95 target."""
-    return {"vmaf_min": vmaf}
+    return _tm(vmaf_min=vmaf)
 
 
-def _fail_metrics(vmaf: float = 80.0) -> dict[str, float]:
+def _fail_metrics(vmaf: float = 80.0) -> TargetedMetrics:
     """Metrics that fail a vmaf-min=95 target."""
-    return {"vmaf_min": vmaf}
+    return _tm(vmaf_min=vmaf)
 
 
 def _make_search(
@@ -55,7 +62,7 @@ class TestQualitySearch:
     _WORSE  = Decimal("51")
     _GRAN   = Decimal("0.5")
     _TARGET: ClassVar[list[QualityTarget]] = [
-        QualityTarget(metric="vmaf", statistic="min", value=95.0)
+        QualityTarget(identity=MetricStatKey.parse("vmaf-min"), value=95.0)
     ]
 
     def _make(
@@ -82,22 +89,22 @@ class TestQualitySearch:
 
     def test_pass_updates_best(self) -> None:
         s = self._make()
-        s.record(Decimal("18.0"), {"vmaf_min": 96.0})
+        s.record(Decimal("18.0"), _tm(vmaf_min=96.0))
         assert s.best_targets_met is True
         assert s.best_quality == Decimal("18.0")
         assert s.attempts == 1
 
     def test_fail_updates_best_fail(self) -> None:
         s = self._make()
-        s.record(Decimal("25.0"), {"vmaf_min": 80.0})
+        s.record(Decimal("25.0"), _tm(vmaf_min=80.0))
         assert s.best_targets_met is False
         assert s.best_quality == Decimal("25.0")
         assert s.attempts == 1
 
     def test_attempts_increments_every_call(self) -> None:
         s = self._make()
-        s.record(Decimal("25.0"), {"vmaf_min": 80.0})
-        s.record(Decimal("15.0"), {"vmaf_min": 96.0})
+        s.record(Decimal("25.0"), _tm(vmaf_min=80.0))
+        s.record(Decimal("15.0"), _tm(vmaf_min=96.0))
         assert s.attempts == 2
 
     def test_exhaustion_returns_none(self) -> None:
@@ -109,8 +116,8 @@ class TestQualitySearch:
             granularity     = self._GRAN,
         )
         # First record a pass at better, then a fail at worse — bracket collapses
-        s.record(Decimal("19.0"), {"vmaf_min": 96.0})
-        result = s.record(Decimal("19.5"), {"vmaf_min": 80.0})
+        s.record(Decimal("19.0"), _tm(vmaf_min=96.0))
+        result = s.record(Decimal("19.5"), _tm(vmaf_min=80.0))
         assert result is None
 
     def test_subsequent_calls_after_exhaustion_return_none(self) -> None:
@@ -120,11 +127,11 @@ class TestQualitySearch:
             quality_targets = self._TARGET,
             granularity     = self._GRAN,
         )
-        s.record(Decimal("19.0"), {"vmaf_min": 96.0})
-        s.record(Decimal("19.5"), {"vmaf_min": 80.0})
+        s.record(Decimal("19.0"), _tm(vmaf_min=96.0))
+        s.record(Decimal("19.5"), _tm(vmaf_min=80.0))
         # All subsequent calls must return None
-        assert s.record(Decimal("19.0"), {"vmaf_min": 96.0}) is None
-        assert s.record(Decimal("19.5"), {"vmaf_min": 80.0}) is None
+        assert s.record(Decimal("19.0"), _tm(vmaf_min=96.0)) is None
+        assert s.record(Decimal("19.5"), _tm(vmaf_min=80.0)) is None
 
     def test_raises_if_better_equals_worse(self) -> None:
         # equal boundaries are now valid — single-point search: first record() returns None
@@ -134,7 +141,7 @@ class TestQualitySearch:
             quality_targets = self._TARGET,
             granularity     = self._GRAN,
         )
-        result = s.record(Decimal("18"), {"vmaf_min": 96.0})
+        result = s.record(Decimal("18"), _tm(vmaf_min=96.0))
         assert result is None
         assert s.best_quality == Decimal("18")
 
@@ -149,17 +156,16 @@ class TestQualitySearch:
 
     def test_early_acceptance_returns_none(self) -> None:
         # surplus well within acceptance_delta → early acceptance
-        from pyqenc.quality import MetricType
         delta  = MetricType.VMAF.info.acceptance_delta
         s      = self._make()
-        result = s.record(Decimal("18.0"), {"vmaf_min": 95.0 + delta * 0.5})
+        result = s.record(Decimal("18.0"), _tm(vmaf_min=95.0 + delta * 0.5))
         assert result is None
         assert s._exhausted is True
 
     def test_pass_then_fail_best_quality_is_pass(self) -> None:
         s = self._make()
-        s.record(Decimal("18.0"), {"vmaf_min": 96.0})  # pass
-        s.record(Decimal("20.0"), {"vmaf_min": 80.0})  # fail
+        s.record(Decimal("18.0"), _tm(vmaf_min=96.0))  # pass
+        s.record(Decimal("20.0"), _tm(vmaf_min=80.0))  # fail
         assert s.best_targets_met is True
         assert s.best_quality == Decimal("18.0")
 
@@ -225,11 +231,11 @@ class TestScoreAttempt:
 
     @staticmethod
     def _vmaf_target(value: float = 95.0) -> QualityTarget:
-        return QualityTarget(metric="vmaf", statistic="min", value=value)
+        return QualityTarget(identity=MetricStatKey.parse("vmaf-min"), value=value)
 
     @staticmethod
     def _psnr_target(value: float = 45.0) -> QualityTarget:
-        return QualityTarget(metric="psnr", statistic="median", value=value)
+        return QualityTarget(identity=MetricStatKey.parse("psnr-median"), value=value)
 
     # ------------------------------------------------------------------
     # Early acceptance (returns 0.0)
@@ -237,34 +243,31 @@ class TestScoreAttempt:
 
     def test_early_acceptance_single_target_at_delta(self):
         """All targets pass and surplus well within acceptance_delta → 0.0."""
-        from pyqenc.quality import MetricType
         target = self._vmaf_target(95.0)
         delta  = MetricType.VMAF.info.acceptance_delta
         # surplus = delta * 0.5 — clearly within, avoids float boundary issues
-        metrics = {"vmaf_min": 95.0 + delta * 0.5}
+        metrics = _tm(vmaf_min=95.0 + delta * 0.5)
         assert _score_attempt(metrics, [target]) == 0.0
 
     def test_early_acceptance_surplus_below_delta(self):
         """Surplus well below acceptance_delta → 0.0."""
-        from pyqenc.quality import MetricType
         target = self._vmaf_target(95.0)
         delta  = MetricType.VMAF.info.acceptance_delta
-        metrics = {"vmaf_min": 95.0 + delta * 0.1}
+        metrics = _tm(vmaf_min=95.0 + delta * 0.1)
         assert _score_attempt(metrics, [target]) == 0.0
 
     def test_early_acceptance_multiple_targets_all_within_delta(self):
         """Multiple targets all within acceptance_delta → 0.0."""
-        from pyqenc.quality import MetricType
         targets = [
-            QualityTarget(metric="vmaf", statistic="min",    value=95.0),
-            QualityTarget(metric="psnr", statistic="median", value=45.0),
+            QualityTarget(identity=MetricStatKey.parse("vmaf-min"), value=95.0),
+            QualityTarget(identity=MetricStatKey.parse("psnr-median"), value=45.0),
         ]
         vmaf_delta = MetricType.VMAF.info.acceptance_delta
         psnr_delta = MetricType.PSNR.info.acceptance_delta
-        metrics = {
-            "vmaf_min":    95.0 + vmaf_delta * 0.5,
-            "psnr_median": 45.0 + psnr_delta * 0.5,
-        }
+        metrics = _tm(
+            vmaf_min    = 95.0 + vmaf_delta * 0.5,
+            psnr_median = 45.0 + psnr_delta * 0.5,
+        )
         assert _score_attempt(metrics, targets) == 0.0
 
     # ------------------------------------------------------------------
@@ -274,21 +277,20 @@ class TestScoreAttempt:
     def test_pass_large_surplus_returns_positive(self):
         """All targets pass with surplus > acceptance_delta → positive score."""
         target  = self._vmaf_target(80.0)
-        metrics = {"vmaf_min": 95.0}   # surplus = 15, well above delta
+        metrics = _tm(vmaf_min=95.0)   # surplus = 15, well above delta
         score   = _score_attempt(metrics, [target])
         assert score > 0.0
 
     def test_pass_score_sums_all_targets(self):
         """Pass score sums surplus/comparison_range for ALL targets."""
-        from pyqenc.quality import MetricType
         targets = [
-            QualityTarget(metric="vmaf", statistic="min",    value=80.0),
-            QualityTarget(metric="psnr", statistic="median", value=40.0),
+            QualityTarget(identity=MetricStatKey.parse("vmaf-min"), value=80.0),
+            QualityTarget(identity=MetricStatKey.parse("psnr-median"), value=40.0),
         ]
-        metrics = {
-            "vmaf_min":    95.0,   # surplus = 15
-            "psnr_median": 50.0,   # surplus = 10
-        }
+        metrics = _tm(
+            vmaf_min    = 95.0,   # surplus = 15
+            psnr_median = 50.0,   # surplus = 10
+        )
         score = _score_attempt(metrics, targets)
         vmaf_info = MetricType.VMAF.info
         psnr_info = MetricType.PSNR.info
@@ -303,16 +305,15 @@ class TestScoreAttempt:
         further search cannot meaningfully improve the tightest metric.  The large
         VMAF surplus is irrelevant to the early-exit decision.
         """
-        from pyqenc.quality import MetricType
         targets = [
-            QualityTarget(metric="vmaf", statistic="min",    value=80.0),
-            QualityTarget(metric="psnr", statistic="median", value=44.9),
+            QualityTarget(identity=MetricStatKey.parse("vmaf-min"), value=80.0),
+            QualityTarget(identity=MetricStatKey.parse("psnr-median"), value=44.9),
         ]
         psnr_delta = MetricType.PSNR.info.acceptance_delta
-        metrics = {
-            "vmaf_min":    95.0,                     # large surplus > delta — not the binding constraint
-            "psnr_median": 44.9 + psnr_delta * 0.5,  # tiny surplus ≤ delta — least proficit
-        }
+        metrics = _tm(
+            vmaf_min    = 95.0,                     # large surplus > delta — not the binding constraint
+            psnr_median = 44.9 + psnr_delta * 0.5,  # tiny surplus ≤ delta — least proficit
+        )
         score = _score_attempt(metrics, targets)
         assert score == 0.0  # early acceptance: least-proficit metric is within its delta
 
@@ -323,21 +324,20 @@ class TestScoreAttempt:
     def test_fail_single_target_returns_negative(self):
         """Any target not met → negative score."""
         target  = self._vmaf_target(95.0)
-        metrics = {"vmaf_min": 90.0}   # deficit = -5
+        metrics = _tm(vmaf_min=90.0)   # deficit = -5
         score   = _score_attempt(metrics, [target])
         assert score < 0.0
 
     def test_fail_score_sums_only_failing_targets(self):
         """Fail score sums deficit/comparison_range for FAILING targets only."""
-        from pyqenc.quality import MetricType
         targets = [
-            QualityTarget(metric="vmaf", statistic="min",    value=95.0),
-            QualityTarget(metric="psnr", statistic="median", value=45.0),
+            QualityTarget(identity=MetricStatKey.parse("vmaf-min"), value=95.0),
+            QualityTarget(identity=MetricStatKey.parse("psnr-median"), value=45.0),
         ]
-        metrics = {
-            "vmaf_min":    90.0,   # fails: deficit = -5
-            "psnr_median": 50.0,   # passes: surplus = 5 (should NOT contribute)
-        }
+        metrics = _tm(
+            vmaf_min    = 90.0,   # fails: deficit = -5
+            psnr_median = 50.0,   # passes: surplus = 5 (should NOT contribute)
+        )
         score     = _score_attempt(metrics, targets)
         vmaf_info = MetricType.VMAF.info
         expected  = -5.0 / vmaf_info.comparison_range   # only vmaf contributes
@@ -346,15 +346,14 @@ class TestScoreAttempt:
 
     def test_fail_multiple_failing_targets(self):
         """Multiple failing targets all contribute to the negative score."""
-        from pyqenc.quality import MetricType
         targets = [
-            QualityTarget(metric="vmaf", statistic="min",    value=95.0),
-            QualityTarget(metric="psnr", statistic="median", value=45.0),
+            QualityTarget(identity=MetricStatKey.parse("vmaf-min"), value=95.0),
+            QualityTarget(identity=MetricStatKey.parse("psnr-median"), value=45.0),
         ]
-        metrics = {
-            "vmaf_min":    90.0,   # deficit = -5
-            "psnr_median": 40.0,   # deficit = -5
-        }
+        metrics = _tm(
+            vmaf_min    = 90.0,   # deficit = -5
+            psnr_median = 40.0,   # deficit = -5
+        )
         score     = _score_attempt(metrics, targets)
         vmaf_info = MetricType.VMAF.info
         psnr_info = MetricType.PSNR.info
@@ -369,23 +368,23 @@ class TestScoreAttempt:
     def test_missing_key_raises_value_error(self):
         """Missing metric key in metrics dict raises ValueError."""
         target  = self._vmaf_target(95.0)
-        metrics = {"psnr_min": 50.0}   # wrong key
+        metrics = _tm(psnr_min=50.0)   # wrong key
         with pytest.raises(ValueError, match="vmaf_min"):
             _score_attempt(metrics, [target])
 
     def test_missing_one_of_multiple_keys_raises(self):
         """Missing any one key among multiple targets raises ValueError."""
         targets = [
-            QualityTarget(metric="vmaf", statistic="min",    value=95.0),
-            QualityTarget(metric="psnr", statistic="median", value=45.0),
+            QualityTarget(identity=MetricStatKey.parse("vmaf-min"), value=95.0),
+            QualityTarget(identity=MetricStatKey.parse("psnr-median"), value=45.0),
         ]
-        metrics = {"vmaf_min": 96.0}   # psnr_median missing
+        metrics = _tm(vmaf_min=96.0)   # psnr_median missing
         with pytest.raises(ValueError, match="psnr_median"):
             _score_attempt(metrics, targets)
 
     def test_empty_targets_returns_zero(self):
         """No targets → all pass trivially → early acceptance → 0.0."""
-        assert _score_attempt({}, []) == 0.0
+        assert _score_attempt(_tm(), []) == 0.0
 
     # ------------------------------------------------------------------
     # Inf handling
@@ -393,10 +392,10 @@ class TestScoreAttempt:
 
     def test_inf_actual_not_expected_but_handled_gracefully(self):
         """inf actual value is not expected (metrics are pre-normalized) but doesn't crash."""
-        target  = QualityTarget(metric="psnr", statistic="min", value=45.0)
+        target  = QualityTarget(identity=MetricStatKey.parse("psnr-min"), value=45.0)
         # inf would be a bug upstream, but _score_attempt should not crash —
         # it just computes deficit(inf, 45.0) = inf - 45.0 = inf → positive score
-        metrics = {"psnr_min": float("inf")}
+        metrics = _tm(psnr_min=float("inf"))
         score   = _score_attempt(metrics, [target])
         # inf - 45.0 = inf → surplus is inf → positive score
         assert score > 0.0
@@ -417,20 +416,19 @@ class TestQualitySearchV2:
     _WORSE   = Decimal("51")
     _GRAN    = Decimal("0.5")
     _TARGET: ClassVar[list[QualityTarget]] = [
-        QualityTarget(metric="vmaf", statistic="min", value=95.0)
+        QualityTarget(identity=MetricStatKey.parse("vmaf-min"), value=95.0)
     ]
 
     # pass metrics: vmaf_min=96.0 → surplus > 0 → targets met
-    _PASS_M: ClassVar[dict[str, float]] = {"vmaf_min": 96.0}
+    _PASS_M: ClassVar[TargetedMetrics] = _tm(vmaf_min=96.0)
     # fail metrics: vmaf_min=80.0 → deficit → targets not met
-    _FAIL_M: ClassVar[dict[str, float]] = {"vmaf_min": 80.0}
+    _FAIL_M: ClassVar[TargetedMetrics] = _tm(vmaf_min=80.0)
 
     @staticmethod
-    def _early_m() -> dict[str, float]:
+    def _early_m() -> TargetedMetrics:
         """Metrics that trigger early acceptance: surplus = delta * 0.5."""
-        from pyqenc.quality import MetricType
         delta = MetricType.VMAF.info.acceptance_delta
-        return {"vmaf_min": 95.0 + delta * 0.5}
+        return _tm(vmaf_min=95.0 + delta * 0.5)
 
     def _make(self) -> QualitySearchV2:
         return QualitySearchV2(
@@ -501,16 +499,16 @@ class TestQualitySearchV2:
     def test_closer_fail_beats_farther_fail(self) -> None:
         """Among two failing attempts, the one with higher score (closer to 0) is best."""
         s = self._make()
-        s.record(Decimal("25"), {"vmaf_min": 80.0})   # score ≈ -0.75
-        s.record(Decimal("15"), {"vmaf_min": 88.0})   # score ≈ -0.35 — closer to target
+        s.record(Decimal("25"), _tm(vmaf_min=80.0))   # score ≈ -0.75
+        s.record(Decimal("15"), _tm(vmaf_min=88.0))   # score ≈ -0.35 — closer to target
         assert s.best_quality == Decimal("15")
         assert s.best_targets_met is False
 
     def test_closer_pass_beats_farther_pass(self) -> None:
         """Among two passing attempts, the one with lower score (closer to 0) is best."""
         s = self._make()
-        s.record(Decimal("18"), {"vmaf_min": 96.0})   # further from sweet spot
-        s.record(Decimal("22"), {"vmaf_min": 95.6})   # closer to sweet spot
+        s.record(Decimal("18"), _tm(vmaf_min=96.0))   # further from sweet spot
+        s.record(Decimal("22"), _tm(vmaf_min=95.6))   # closer to sweet spot
         assert s.best_quality == Decimal("22")
         assert s.best_targets_met is True
 
@@ -534,16 +532,16 @@ class TestQualitySearchV2:
     def test_sweet_spot_passed_next_q_between_two_fails(self) -> None:
         """After sweet spot is passed, next quality is within the full search range."""
         s = self._make()
-        s.record(Decimal("15"), {"vmaf_min": 88.0})   # closer to target
-        next_q = s.record(Decimal("25"), {"vmaf_min": 80.0})   # worse → sweet spot passed
+        s.record(Decimal("15"), _tm(vmaf_min=88.0))   # closer to target
+        next_q = s.record(Decimal("25"), _tm(vmaf_min=80.0))   # worse → sweet spot passed
         assert next_q is not None
         assert self._BETTER <= next_q <= self._WORSE
 
     def test_sweet_spot_passed_next_q_between_two_passes(self) -> None:
         """After sweet spot is passed on the pass side, next quality is within the full search range."""
         s = self._make()
-        s.record(Decimal("22"), {"vmaf_min": 95.6})   # closer to sweet spot
-        next_q = s.record(Decimal("18"), {"vmaf_min": 96.0})   # worse → sweet spot passed
+        s.record(Decimal("22"), _tm(vmaf_min=95.6))   # closer to sweet spot
+        next_q = s.record(Decimal("18"), _tm(vmaf_min=96.0))   # worse → sweet spot passed
         assert next_q is not None
         assert self._BETTER <= next_q <= self._WORSE
 
@@ -637,7 +635,7 @@ class TestEncodeChunkIntegration:
         from pyqenc.models import QualityTarget
         from pyqenc.quality import QualitySearch, QualitySearchBase
 
-        target = QualityTarget(metric="vmaf", statistic="min", value=95.0)
+        target = QualityTarget(identity=MetricStatKey.parse("vmaf-min"), value=95.0)
         s = QualitySearch(
             quality_better  = Decimal("0"),
             quality_worse   = Decimal("51"),
@@ -649,7 +647,7 @@ class TestEncodeChunkIntegration:
         assert s.best_quality is None
         assert s.best_metrics is None
         assert s.best_targets_met is False
-        result = s.record(Decimal("25"), {"vmaf_min": 96.0})   # passing attempt
+        result = s.record(Decimal("25"), _tm(vmaf_min=96.0))   # passing attempt
         assert result is None or isinstance(result, Decimal)
         # After one passing record call, attempts == 1 and best_quality is set.
         assert s.attempts == 1
@@ -661,7 +659,7 @@ class TestEncodeChunkIntegration:
         from pyqenc.models import QualityTarget
         from pyqenc.quality import QualitySearch, QualitySearchBase
 
-        target = QualityTarget(metric="vmaf", statistic="min", value=95.0)
+        target = QualityTarget(identity=MetricStatKey.parse("vmaf-min"), value=95.0)
         s = QualitySearch(
             quality_better  = Decimal("0"),
             quality_worse   = Decimal("51"),
@@ -675,7 +673,7 @@ class TestEncodeChunkIntegration:
         from pyqenc.models import QualityTarget
         from pyqenc.quality import QualitySearchBase, QualitySearchV2
 
-        target = QualityTarget(metric="vmaf", statistic="min", value=95.0)
+        target = QualityTarget(identity=MetricStatKey.parse("vmaf-min"), value=95.0)
         s = QualitySearchV2(
             quality_better  = Decimal("0"),
             quality_worse   = Decimal("51"),
@@ -703,18 +701,17 @@ class TestQualitySearchV3:
     _WORSE  = Decimal('51')
     _GRAN   = Decimal('0.5')
     _TARGET: ClassVar[list[QualityTarget]] = [
-        QualityTarget(metric='vmaf', statistic='min', value=95.0)
+        QualityTarget(identity=MetricStatKey.parse('vmaf-min'), value=95.0)
     ]
 
-    _PASS_M: ClassVar[dict[str, float]] = {'vmaf_min': 96.0}
-    _FAIL_M: ClassVar[dict[str, float]] = {'vmaf_min': 80.0}
+    _PASS_M: ClassVar[TargetedMetrics] = _tm(vmaf_min=96.0)
+    _FAIL_M: ClassVar[TargetedMetrics] = _tm(vmaf_min=80.0)
 
     @staticmethod
-    def _early_m() -> dict[str, float]:
+    def _early_m() -> TargetedMetrics:
         """Metrics that trigger early acceptance: surplus = delta * 0.5 -> score == 0."""
-        from pyqenc.quality import MetricType
         delta = MetricType.VMAF.info.acceptance_delta
-        return {'vmaf_min': 95.0 + delta * 0.5}
+        return _tm(vmaf_min=95.0 + delta * 0.5)
 
     def _make(
         self,
@@ -726,7 +723,7 @@ class TestQualitySearchV3:
         return QualitySearchV3(
             quality_better  = Decimal(better),
             quality_worse   = Decimal(worse),
-            quality_targets = [QualityTarget(metric='vmaf', statistic='min', value=target)],
+            quality_targets = [QualityTarget(identity=MetricStatKey.parse('vmaf-min'), value=target)],
             granularity     = Decimal(gran),
         )
 
@@ -872,8 +869,8 @@ class TestQualitySearchV3:
         Validates: Req 4.1, 13.3
         """
         s = self._make(gran='1')
-        s.record(Decimal('30'), {'vmaf_min': 80.0})   # fail, large deficit
-        result = s.record(Decimal('15'), {'vmaf_min': 90.0})  # fail, smaller deficit
+        s.record(Decimal('30'), _tm(vmaf_min=80.0))   # fail, large deficit
+        result = s.record(Decimal('15'), _tm(vmaf_min=90.0))  # fail, smaller deficit
         assert result is not None, 'Expected extrapolated value, got None'
         assert result < Decimal('15'), f'Expected extrapolated value < 15, got {result}'
 
@@ -887,8 +884,8 @@ class TestQualitySearchV3:
         Validates: Req 4.1, 13.3
         """
         s = self._make(gran='1')
-        s.record(Decimal('18'), {'vmaf_min': 98.0})   # pass, large surplus
-        result = s.record(Decimal('34'), {'vmaf_min': 96.0})  # pass, smaller surplus
+        s.record(Decimal('18'), _tm(vmaf_min=98.0))   # pass, large surplus
+        result = s.record(Decimal('34'), _tm(vmaf_min=96.0))  # pass, smaller surplus
         assert result is not None, 'Expected extrapolated value, got None'
         assert result > Decimal('34'), f'Expected extrapolated value > 34 (toward quality_worse), got {result}'
 
@@ -918,13 +915,13 @@ class TestQualitySearchV3:
             granularity     = Decimal('1'),
         )
         # Record CRF=10 -> fail (phase 0 steps to CRF=5)
-        r1 = s.record(Decimal('10'), {'vmaf_min': 88.0})
+        r1 = s.record(Decimal('10'), _tm(vmaf_min=88.0))
         assert r1 is not None
         # Record CRF=5 -> fail (extrapolates toward CRF=0)
-        r2 = s.record(Decimal('5'), {'vmaf_min': 92.0})
+        r2 = s.record(Decimal('5'), _tm(vmaf_min=92.0))
         assert r2 is not None
         # Record CRF=0 (quality_better boundary) -> fail
-        r3 = s.record(Decimal('0'), {'vmaf_min': 93.0})
+        r3 = s.record(Decimal('0'), _tm(vmaf_min=93.0))
         # Now quality_better=0 is in attempted_points -> direction exhausted for any fail pair
         # The best is CRF=5 (score closest to 0 among fails).
         # Its neighbour toward better is CRF=0 (tested) -> direction exhausted.
@@ -948,11 +945,11 @@ class TestQualitySearchV3:
             granularity     = Decimal('1'),
         )
         # Same setup as the midpoint probe test
-        r1 = s.record(Decimal('10'), {'vmaf_min': 88.0})
+        r1 = s.record(Decimal('10'), _tm(vmaf_min=88.0))
         assert r1 is not None
-        r2 = s.record(Decimal('5'), {'vmaf_min': 92.0})
+        r2 = s.record(Decimal('5'), _tm(vmaf_min=92.0))
         assert r2 is not None
-        s.record(Decimal('0'), {'vmaf_min': 93.0})
+        s.record(Decimal('0'), _tm(vmaf_min=93.0))
         # Drive to exhaustion — all remaining probes are fail
         current_q = Decimal('3')  # start somewhere in the remaining range
         for _ in range(30):
@@ -978,12 +975,12 @@ class TestQualitySearchV3:
             granularity     = Decimal('1'),
         )
         # Build up two fail points, then test the better boundary to exhaust direction
-        r1 = s.record(Decimal('20'), {'vmaf_min': 88.0})  # fail, phase 0 -> toward better
+        r1 = s.record(Decimal('20'), _tm(vmaf_min=88.0))  # fail, phase 0 -> toward better
         assert r1 is not None
-        r2 = s.record(Decimal('10'), {'vmaf_min': 92.0})  # fail, extrapolates toward CRF=0
+        r2 = s.record(Decimal('10'), _tm(vmaf_min=92.0))  # fail, extrapolates toward CRF=0
         assert r2 is not None
         # Test the better boundary -> direction exhausted
-        probe_q = s.record(Decimal('0'), {'vmaf_min': 93.0})
+        probe_q = s.record(Decimal('0'), _tm(vmaf_min=93.0))
         # probe_q is the midpoint probe (or None if range collapsed)
         if probe_q is None:
             pytest.skip('Range collapsed before midpoint probe scenario')
@@ -1042,9 +1039,9 @@ class TestQualitySearchV3:
         Validates: Req 7.1, 13.6
         """
         s = self._make(gran='1')
-        s.record(Decimal('25'), {'vmaf_min': 80.0})   # fail, large deficit
+        s.record(Decimal('25'), _tm(vmaf_min=80.0))   # fail, large deficit
         s.record(Decimal('15'), self._PASS_M)          # pass
-        result = s.record(Decimal('20'), {'vmaf_min': 93.0})  # fail, small deficit -> best fail
+        result = s.record(Decimal('20'), _tm(vmaf_min=93.0))  # fail, small deficit -> best fail
         assert result is not None, 'Expected value within straddling range, got None'
         assert Decimal('15') < result < Decimal('20'), (
             f'Expected result between 15 and 20, got {result}'
@@ -1062,14 +1059,14 @@ class TestQualitySearchV3:
         s = QualitySearchV3(
             quality_better  = Decimal('0'),
             quality_worse   = Decimal('51'),
-            quality_targets = [QualityTarget(metric='vmaf', statistic='min', value=95.0)],
+            quality_targets = [QualityTarget(identity=MetricStatKey.parse('vmaf-min'), value=95.0)],
             granularity     = Decimal('1'),
         )
         # Record in an order that builds up [10, 20, 40] without triggering exhaustion:
         # CRF=40 fail -> phase0 returns 20; CRF=20 fail -> extrapolates to 10; CRF=10 fail
-        s.record(Decimal('40'), {'vmaf_min': 82.0})   # fail, score ~ -0.87
-        s.record(Decimal('20'), {'vmaf_min': 93.0})   # fail, score ~ -0.13 (best)
-        result = s.record(Decimal('10'), {'vmaf_min': 85.0})  # fail, score ~ -0.67
+        s.record(Decimal('40'), _tm(vmaf_min=82.0))   # fail, score ~ -0.87
+        s.record(Decimal('20'), _tm(vmaf_min=93.0))   # fail, score ~ -0.13 (best)
+        result = s.record(Decimal('10'), _tm(vmaf_min=85.0))  # fail, score ~ -0.67
         # Now: sorted = [10(fail), 20(fail), 40(fail)], best=20
         # left_range=10, right_range=20 -> midpoint(20,40)=30
         assert result is not None, 'Expected sweet-spot midpoint, got None'
@@ -1086,8 +1083,8 @@ class TestQualitySearchV3:
         """
         s = self._make(gran='1')
         s.record(Decimal('20'), self._PASS_M)           # pass, best
-        s.record(Decimal('15'), {'vmaf_min': 93.0})     # fail
-        result = s.record(Decimal('25'), {'vmaf_min': 93.0})  # fail
+        s.record(Decimal('15'), _tm(vmaf_min=93.0))     # fail
+        result = s.record(Decimal('25'), _tm(vmaf_min=93.0))  # fail
         # sorted (quality_better=0 first) = [15(fail), 20(pass), 25(fail)]
         # best=20(pass), lower=15(fail), upper=25(fail) -> both pairs straddle
         # 25 is further from quality_better=0 -> worse-quality neighbour
@@ -1159,7 +1156,7 @@ class TestQualitySearchV3:
     @staticmethod
     def _drive_to_exhaustion(
         s:          QualitySearchV3,
-        metrics_fn:  Callable[[float], dict[str, float]],
+        metrics_fn:  Callable[[float], TargetedMetrics],
         start_q:   Decimal,
         max_iters: int = 200,
     ) -> None:
@@ -1178,8 +1175,8 @@ class TestQualitySearchV3:
         Validates: Req 13.9
         """
         # vmaf_min(q) = q - 105 -> always < 95 for q in [0, 51]
-        def metrics_fn(q: float) -> dict[str, float]:
-            return {'vmaf_min': max(0.0, q - 105.0)}
+        def metrics_fn(q: float) -> TargetedMetrics:
+            return _tm(vmaf_min=max(0.0, q - 105.0))
 
         s = self._make(gran='1')
         self._drive_to_exhaustion(s, metrics_fn, Decimal('25'))
@@ -1190,8 +1187,8 @@ class TestQualitySearchV3:
         Validates: Req 13.9
         """
         # vmaf_min(q) = 99 - q * 0.01 -> always > 95 for q in [0, 51]
-        def metrics_fn(q: float) -> dict[str, float]:
-            return {'vmaf_min': 99.0 - q * 0.01}
+        def metrics_fn(q: float) -> TargetedMetrics:
+            return _tm(vmaf_min=99.0 - q * 0.01)
 
         s = self._make(gran='1')
         self._drive_to_exhaustion(s, metrics_fn, Decimal('25'))
@@ -1206,15 +1203,15 @@ class TestQualitySearchV3:
         """
         q_cross = 25.0
 
-        def metrics_fn(q: float) -> dict[str, float]:
+        def metrics_fn(q: float) -> TargetedMetrics:
             vmaf = 95.0 + (q_cross - q) * 2.0
-            return {'vmaf_min': max(0.0, min(100.0, vmaf))}
+            return _tm(vmaf_min=max(0.0, min(100.0, vmaf)))
 
         gran = Decimal('1')
         s    = QualitySearchV3(
             quality_better  = Decimal('0'),
             quality_worse   = Decimal('51'),
-            quality_targets = [QualityTarget(metric='vmaf', statistic='min', value=95.0)],
+            quality_targets = [QualityTarget(identity=MetricStatKey.parse('vmaf-min'), value=95.0)],
             granularity     = gran,
         )
         self._drive_to_exhaustion(s, metrics_fn, Decimal('25'))
@@ -1232,8 +1229,8 @@ class TestQualitySearchV3:
         vmaf_min(q) = 90 - (q-25)^2 * 0.1 -> max is 90 < 95.
         Validates: Req 13.10
         """
-        def metrics_fn(q: float) -> dict[str, float]:
-            return {'vmaf_min': max(0.0, 90.0 - (q - 25.0) ** 2 * 0.1)}
+        def metrics_fn(q: float) -> TargetedMetrics:
+            return _tm(vmaf_min=max(0.0, 90.0 - (q - 25.0) ** 2 * 0.1))
 
         s = self._make(gran='1')
         self._drive_to_exhaustion(s, metrics_fn, Decimal('25'))
@@ -1244,8 +1241,8 @@ class TestQualitySearchV3:
         vmaf_min(q) = 99 - (q-25)^2 * 0.001 -> always > 95 for q in [0, 51].
         Validates: Req 13.10
         """
-        def metrics_fn(q: float) -> dict[str, float]:
-            return {'vmaf_min': max(0.0, 99.0 - (q - 25.0) ** 2 * 0.001)}
+        def metrics_fn(q: float) -> TargetedMetrics:
+            return _tm(vmaf_min=max(0.0, 99.0 - (q - 25.0) ** 2 * 0.001))
 
         s = self._make(gran='1')
         self._drive_to_exhaustion(s, metrics_fn, Decimal('25'))
@@ -1261,14 +1258,14 @@ class TestQualitySearchV3:
         q_root_lower = 15.0
         q_root_upper = 35.0
 
-        def metrics_fn(q: float) -> dict[str, float]:
-            return {'vmaf_min': max(0.0, min(100.0, 85.0 + (q - 25.0) ** 2 * 0.1))}
+        def metrics_fn(q: float) -> TargetedMetrics:
+            return _tm(vmaf_min=max(0.0, min(100.0, 85.0 + (q - 25.0) ** 2 * 0.1)))
 
         gran = Decimal('1')
         s    = QualitySearchV3(
             quality_better  = Decimal('0'),
             quality_worse   = Decimal('51'),
-            quality_targets = [QualityTarget(metric='vmaf', statistic='min', value=95.0)],
+            quality_targets = [QualityTarget(identity=MetricStatKey.parse('vmaf-min'), value=95.0)],
             granularity     = gran,
         )
         self._drive_to_exhaustion(s, metrics_fn, Decimal('25'))
@@ -1296,14 +1293,14 @@ class TestQualitySearchV3:
         import math as _math
         q_root = 60.0 - _math.sqrt(250.0)  # ~44.2
 
-        def metrics_fn(q: float) -> dict[str, float]:
-            return {'vmaf_min': max(0.0, min(100.0, 100.0 - (q - 60.0) ** 2 * 0.02))}
+        def metrics_fn(q: float) -> TargetedMetrics:
+            return _tm(vmaf_min=max(0.0, min(100.0, 100.0 - (q - 60.0) ** 2 * 0.02)))
 
         gran = Decimal('1')
         s    = QualitySearchV3(
             quality_better  = Decimal('0'),
             quality_worse   = Decimal('51'),
-            quality_targets = [QualityTarget(metric='vmaf', statistic='min', value=95.0)],
+            quality_targets = [QualityTarget(identity=MetricStatKey.parse('vmaf-min'), value=95.0)],
             granularity     = gran,
         )
         self._drive_to_exhaustion(s, metrics_fn, Decimal('45'))
@@ -1351,8 +1348,8 @@ class TestQualitySearchV3:
         Validates: Req 10.4
         """
         s = self._make()
-        s.record(Decimal('30'), {'vmaf_min': 80.0})   # large deficit
-        s.record(Decimal('20'), {'vmaf_min': 93.0})   # small deficit, closer to target
+        s.record(Decimal('30'), _tm(vmaf_min=80.0))   # large deficit
+        s.record(Decimal('20'), _tm(vmaf_min=93.0))   # small deficit, closer to target
         assert s.best_quality == Decimal('20')
         assert s.best_targets_met is False
 
@@ -1418,7 +1415,7 @@ class TestRunMetricsCommandGolden:
         from unittest.mock import patch
 
         from pyqenc.models import CropParams
-        from pyqenc.quality import MetricType, run_metrics
+        from pyqenc.quality import run_metrics
         from pyqenc.utils.ffmpeg_runner import (
             _PROGRESS_FLAGS,
             FFmpegInput,
@@ -1475,7 +1472,7 @@ class TestRunMetricsCommandGolden:
         from unittest.mock import patch
 
         from pyqenc.models import CropParams
-        from pyqenc.quality import MetricType, run_metrics
+        from pyqenc.quality import run_metrics
         from pyqenc.utils.ffmpeg_runner import (
             _PROGRESS_FLAGS,
             FFmpegInput,

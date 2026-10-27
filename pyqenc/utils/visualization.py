@@ -22,12 +22,14 @@ from pyqenc.constants import (
 from pyqenc.models import CropParams
 from pyqenc.quality import (
     FullMetricStatistics,
-    MetricStats,
-    MetricType,
-    PerMetricStats,
     QualityLogs,
     QualityMeasurement,
     run_metrics,
+)
+from pyqenc.quality_metrics import (
+    MetricStats,
+    MetricType,
+    PerMetricStats,
 )
 from pyqenc.utils.alive import AdvanceState, BarAdvance, ProgressBar
 from pyqenc.utils.ffmpeg_runner import FFmpegInput

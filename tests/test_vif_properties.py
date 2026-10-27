@@ -23,7 +23,8 @@ from pyqenc.models import QualityTarget
 
 # Module-level imports avoid first-example import overhead (pandas/matplotlib
 # take ~2-3 s on first import on Windows, which would exceed the deadline).
-from pyqenc.quality import MetricInfo, MetricType, QualityLogs
+from pyqenc.quality import QualityLogs
+from pyqenc.quality_metrics import MetricInfo, MetricType, StatisticType
 from pyqenc.utils.visualization import (
     QualityMeasurer,
     compute_metric_stats,
@@ -107,16 +108,16 @@ def test_quality_target_parse_accepts_vif(stat: str, value: float) -> None:
     # Feature: vif-metric-support, Property 12: QualityTarget.parse accepts VIF
     """
     result = QualityTarget.parse(f"{MetricType.VIF.value}-{stat}:{value}")
-    assert result.metric    == MetricType.VIF.value
-    assert result.statistic == stat
+    assert result.identity.metric    == MetricType.VIF
+    assert result.identity.statistic == StatisticType(stat)
     assert abs(result.value - value) < 1e-9
 
 
 def test_quality_target_parse_vif_example() -> None:
     """Concrete example: 'vif-min:85.0' parses correctly (Req 7.1)."""
     result = QualityTarget.parse("vif-min:85.0")
-    assert result.metric    == MetricType.VIF.value
-    assert result.statistic == "min"
+    assert result.identity.metric    == MetricType.VIF
+    assert result.identity.statistic == StatisticType.MIN
     assert result.value     == 85.0
 
 
@@ -265,7 +266,7 @@ def test_generate_metrics_vif_shares_vmaf_path(tmp_path: Path) -> None:
     Validates: Requirements 6.2, 12.1, 12.2
     # Feature: vif-metric-support, Property 15: _generate_metrics VIF shares vmaf path
     """
-    from pyqenc.quality import MetricType as _MetricType
+    from pyqenc.quality_metrics import MetricType as _MetricType
     from pyqenc.utils.ffmpeg_runner import FFmpegInput, FFmpegRunResult
 
     evaluator = QualityMeasurer(work_dir=tmp_path)
@@ -465,7 +466,7 @@ def test_sidecar_vif_keys(vif_stats: dict[str, float]) -> None:
     Validates: Requirements 9.1
     # Feature: vif-metric-support, Property 14: Sidecar YAML VIF key generation
     """
-    from pyqenc.quality import MetricStats, PerMetricStats
+    from pyqenc.quality_metrics import MetricStats, PerMetricStats
 
     # hypothesis-generated dict — runtime shape is the test's own strategy
     stats: PerMetricStats = {MetricType.VIF: cast(MetricStats, vif_stats)}

@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, ClassVar
 from pydantic import BaseModel
 from scenedetect import ContentDetector, detect
 
-from pyqenc.metrics import MetricKey
+from pyqenc.app_metrics import AppMetricKey
 from pyqenc.models import PhaseOutcome, SceneBoundary, SizedFingerprintYaml
 from pyqenc.phase import (
     Artifact,
@@ -44,7 +44,7 @@ from pyqenc.utils.yaml_utils import load_model, save_model
 
 if TYPE_CHECKING:
     from pyqenc.app_config import AppConfig
-    from pyqenc.metrics import MetricsCollector
+    from pyqenc.app_metrics import AppMetricsCollector
 
 
 class SceneRecord(BaseModel):
@@ -249,14 +249,14 @@ class ChunkingPhase(Phase[ChunkingPhaseResult]):
     name:        str       = "chunking"
     SIDECAR_NAME = "chunking.yaml"
     DEPENDS_ON:  ClassVar[tuple[type[Phase], ...]] = (JobPhase, ProbePhase)
-    _METRIC_KEY: MetricKey = MetricKey.CHUNKING
+    _METRIC_KEY: AppMetricKey = AppMetricKey.CHUNKING
 
     def __init__(
         self,
         config:    AppConfig,
         phases:    PhaseRegistry,
         *,
-        collector: MetricsCollector,
+        collector: AppMetricsCollector,
     ) -> None:
         super().__init__(config, phases, collector=collector)
 
@@ -391,7 +391,7 @@ class ChunkingPhase(Phase[ChunkingPhaseResult]):
             )
         else:
             try:
-                with self._collector.time(MetricKey.CHUNKING, "scene_detect"):
+                with self._collector.time(AppMetricKey.CHUNKING, "scene_detect"):
                     boundaries = detect_scenes(
                         stream           = extended,
                         scene_threshold  = self._config.chunking.scene_threshold,

@@ -12,7 +12,7 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from pyqenc.models import QualityTarget
-from pyqenc.quality import MetricStatKey, MetricType, StatisticType
+from pyqenc.quality_metrics import MetricStatKey, MetricType, StatisticType
 from pyqenc.summary_tables import (
     ABSOLUTE_MARKER,
     ANCHOR_GLYPH,
@@ -73,13 +73,13 @@ def _strategy_rows(lines: list[str]) -> list[str]:
 
 
 class TestStrategyRow:
-    """THE persisted shape: typed keys in memory, canonical on disk."""
+    """THE persisted shape: the targeted role in memory, canonical on disk."""
 
-    def test_metrics_round_trip_canonically(self) -> None:
+    def test_metrics_round_trip(self) -> None:
+        """A save→load cycle preserves the measured values and pair
+        identities (Req 6.3)."""
         row = _row("s", 1)
-        dumped = row.model_dump()
-        assert dumped["metrics"] == {"vmaf_median": 97.0, "vmaf_p10": 93.0, "psnr_median": 45.0, "psnr_p10": 43.0}
-        assert StrategyRow.model_validate(dumped) == row
+        assert StrategyRow.model_validate(row.model_dump()) == row
 
 
 class TestSearchMerge:

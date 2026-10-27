@@ -223,7 +223,7 @@ class TestResolveCrop:
 
 
 from pyqenc.phases.measure import _write_sidecar
-from pyqenc.quality import MetricStats, MetricType
+from pyqenc.quality_metrics import MetricStats, MetricType
 
 
 class TestWriteSidecar:

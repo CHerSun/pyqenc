@@ -16,7 +16,7 @@ from unittest.mock import patch
 import pytest
 
 from pyqenc.app_config import AppConfig, load_app_config
-from pyqenc.metrics import NoOpMetricsCollector
+from pyqenc.app_metrics import NoOpAppMetricsCollector
 from pyqenc.models import CleanupLevel, PhaseOutcome, SceneBoundary, SizedFingerprint
 from pyqenc.phase import Artifact, PhaseRegistry
 from pyqenc.phases.chunking import (
@@ -78,7 +78,7 @@ def _make_registry(
     force:   bool = False,
 ) -> PhaseRegistry:
     """A real registry with pre-set Job/Extraction/Probe results."""
-    collector = NoOpMetricsCollector()
+    collector = NoOpAppMetricsCollector()
     config = config.model_copy(deep=True) if config is not None else _APP_CONFIG.model_copy(deep=True)
     source = work_dir / "source.mkv"
 
@@ -120,7 +120,7 @@ def _make_registry(
 
 
 def _make_phase(work_dir: Path, stream: ExtendedVideoStream | None) -> ChunkingPhase:
-    collector = NoOpMetricsCollector()
+    collector = NoOpAppMetricsCollector()
     config = _APP_CONFIG.model_copy(deep=True)
     registry = _make_registry(work_dir, stream)
     return ChunkingPhase(config, registry, collector=collector)
@@ -317,7 +317,7 @@ class TestChunkingPhaseLifecycle:
 
         # With permission: discard + re-detect.
         registry = _make_registry(work_dir, _stream(), force=True)
-        collector = NoOpMetricsCollector()
+        collector = NoOpAppMetricsCollector()
         config = _APP_CONFIG.model_copy(deep=True)
         phase2 = ChunkingPhase(config, registry, collector=collector)
         with patch("pyqenc.phases.chunking.detect_scenes", return_value=_boundaries()) as detect_mock:
@@ -340,7 +340,7 @@ class TestChunkingPhaseLifecycle:
         config = _APP_CONFIG.model_copy(deep=True)
         config.chunking.scene_threshold = 0.99
         registry = _make_registry(work_dir, _stream(), config=config)
-        phase2 = ChunkingPhase(config, registry, collector=NoOpMetricsCollector())
+        phase2 = ChunkingPhase(config, registry, collector=NoOpAppMetricsCollector())
         with patch("pyqenc.phases.chunking.detect_scenes", return_value=_boundaries()) as detect_mock:
             phase2.run(dry_run=False)
 

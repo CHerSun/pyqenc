@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from pyqenc.constants import (
     DEFAULT_SCREENSHOT_COUNT,
@@ -28,7 +28,13 @@ from pyqenc.models import CropParams, Resolution
 from pyqenc.phases.extraction import _probe_streams_json
 from pyqenc.phases.job import JobSidecar
 from pyqenc.phases.probe import ProbeSidecar
-from pyqenc.quality import MetricType, PerMetricStats, flatten_metric_stats
+from pyqenc.quality_metrics import (
+    MeasuredMetrics,
+    MeasuredMetricsYaml,
+    MetricType,
+    PerMetricStats,
+    flatten_metric_stats,
+)
 from pyqenc.stream_model import File, LongPathYaml, VideoStream, VideoStreamInfo
 from pyqenc.utils.alive import AdvanceState, BarAdvance, ProgressBar
 from pyqenc.utils.concurrency import run_bounded
@@ -49,11 +55,12 @@ class MeasureSidecar(BaseModel):
     screenshots.  Records source/distorted paths, durations, crop parameters,
     the frame subsampling factor, and per-metric statistics.
 
-    The ``metrics`` field uses the same flat ``{metric_stat: value}`` format
-    as ``AttemptSidecar`` (e.g. ``vmaf_min``, ``ssim_median``), with all
-    ten statistics: min, p05, p10, p25, median, p75, p90, p95, max, std.
-    The YAML key for the sampling factor is ``sampling``.
+    The ``metrics`` field is the full measured set (the role instance in
+    memory; canonical ``vmaf_min`` / ``ssim_median`` string keys on disk,
+    all ten statistics). The YAML key for the sampling factor is ``sampling``.
     """
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
     source_video:               LongPathYaml
     distorted_video:               LongPathYaml
@@ -62,7 +69,7 @@ class MeasureSidecar(BaseModel):
     source_duration_seconds:    float | None          = None
     distorted_duration_seconds:    float | None          = None
     effective_duration_seconds: float | None          = None
-    metrics:                    dict[str, float]      = Field(default_factory=dict)
+    metrics:                    MeasuredMetricsYaml = Field(default_factory=MeasuredMetrics)
 
 
 logger = logging.getLogger(__name__)

@@ -3,10 +3,10 @@
 Covers enum membership, protocol conformance, and lifecycle behaviour.
 """
 
-from pyqenc.metrics import MetricKey, NoOpMetricsCollector
+from pyqenc.app_metrics import AppMetricKey, NoOpAppMetricsCollector
 
 # ---------------------------------------------------------------------------
-# MetricKey enum membership
+# AppMetricKey enum membership
 # ---------------------------------------------------------------------------
 
 _EXPECTED_METRIC_KEYS: list[tuple[str, str]] = [
@@ -23,30 +23,30 @@ _EXPECTED_METRIC_KEYS: list[tuple[str, str]] = [
 
 
 def test_metric_key_member_count() -> None:
-    """MetricKey must have exactly 9 members (Req 6.1, 6.2; PROBE added by phase-run-template)."""
-    assert len(MetricKey) == 9
+    """AppMetricKey must have exactly 9 members (Req 6.1, 6.2; PROBE added by phase-run-template)."""
+    assert len(AppMetricKey) == 9
 
 
 def test_metric_key_member_names_and_values() -> None:
-    """Every MetricKey member must have the correct flat string value (Req 6.1, 6.2)."""
+    """Every AppMetricKey member must have the correct flat string value (Req 6.1, 6.2)."""
     for name, expected_value in _EXPECTED_METRIC_KEYS:
-        member = MetricKey[name]
+        member = AppMetricKey[name]
         assert member.value == expected_value, (
-            f"MetricKey.{name}: expected {expected_value!r}, got {member.value!r}"
+            f"AppMetricKey.{name}: expected {expected_value!r}, got {member.value!r}"
         )
 
 
 def test_metric_key_is_str() -> None:
-    """MetricKey values must be plain strings (StrEnum contract)."""
-    for member in MetricKey:
+    """AppMetricKey values must be plain strings (StrEnum contract)."""
+    for member in AppMetricKey:
         assert isinstance(member, str)
 
 
 def test_metric_key_values_have_no_dot() -> None:
-    """MetricKey values must contain no dot separator (top-level keys only)."""
-    for member in MetricKey:
+    """AppMetricKey values must contain no dot separator (top-level keys only)."""
+    for member in AppMetricKey:
         assert "." not in member.value, (
-            f"MetricKey.{member.name} value {member.value!r} must not contain a dot"
+            f"AppMetricKey.{member.name} value {member.value!r} must not contain a dot"
         )
 
 
@@ -56,31 +56,31 @@ def test_metric_key_values_have_no_dot() -> None:
 
 
 def test_noop_collector_time_returns_context_manager() -> None:
-    """NoOpMetricsCollector.time() must return a usable context manager."""
-    collector = NoOpMetricsCollector()
-    with collector.time(MetricKey.ENCODING):
+    """NoOpAppMetricsCollector.time() must return a usable context manager."""
+    collector = NoOpAppMetricsCollector()
+    with collector.time(AppMetricKey.ENCODING):
         pass  # must not raise
 
 
 def test_noop_collector_step_is_noop() -> None:
-    """NoOpMetricsCollector.step() must accept all args without error."""
-    from pyqenc.metrics import ConvergenceUpdate
-    collector = NoOpMetricsCollector()
-    collector.step(MetricKey.ENCODING)
+    """NoOpAppMetricsCollector.step() must accept all args without error."""
+    from pyqenc.app_metrics import ConvergenceUpdate
+    collector = NoOpAppMetricsCollector()
+    collector.step(AppMetricKey.ENCODING)
     collector.step(
-        MetricKey.ENCODING,
+        AppMetricKey.ENCODING,
         convergence_update=ConvergenceUpdate(strategy="h265+slow", attempt_count=3),
     )
 
 
 def test_noop_collector_flush_is_noop() -> None:
-    """NoOpMetricsCollector.flush() must not raise."""
-    collector = NoOpMetricsCollector()
+    """NoOpAppMetricsCollector.flush() must not raise."""
+    collector = NoOpAppMetricsCollector()
     collector.flush()
 
 
 # ---------------------------------------------------------------------------
-# YamlMetricsCollector lifecycle tests
+# YamlAppMetricsCollector lifecycle tests
 # ---------------------------------------------------------------------------
 
 import logging
@@ -90,15 +90,15 @@ from unittest.mock import patch
 import pytest
 import yaml
 
-from pyqenc.metrics import (
+from pyqenc.app_metrics import (
     METRICS_YAML_FILENAME,
     ConvergenceUpdate,
-    YamlMetricsCollector,
+    YamlAppMetricsCollector,
 )
 
 
-def _make_collector(tmp_path: Path, *, force_wipe: bool = False) -> YamlMetricsCollector:
-    return YamlMetricsCollector(work_dir=tmp_path, force_wipe=force_wipe)
+def _make_collector(tmp_path: Path, *, force_wipe: bool = False) -> YamlAppMetricsCollector:
+    return YamlAppMetricsCollector(work_dir=tmp_path, force_wipe=force_wipe)
 
 
 def test_force_wipe_deletes_existing_metrics(tmp_path: Path) -> None:
@@ -130,7 +130,7 @@ def test_write_failure_logs_warning_and_does_not_raise(
     """Write failure must log WARNING and not propagate (Req 1.5)."""
     collector = _make_collector(tmp_path)
     with (
-        caplog.at_level(logging.WARNING, logger="pyqenc.metrics"),
+        caplog.at_level(logging.WARNING, logger="pyqenc.app_metrics"),
         patch.object(Path, "replace", side_effect=OSError("disk full")),
     ):
         collector.flush()  # must not raise
@@ -160,7 +160,7 @@ def test_convergence_present_after_step(tmp_path: Path) -> None:
     """Convergence section must appear after a step() with convergence_update."""
     collector = _make_collector(tmp_path)
     collector.step(
-        MetricKey.ENCODING,
+        AppMetricKey.ENCODING,
         convergence_update=ConvergenceUpdate(strategy="h265+slow", attempt_count=3),
     )
     collector.flush()
@@ -175,13 +175,13 @@ def test_convergence_present_after_step(tmp_path: Path) -> None:
 def test_resume_restores_time_accum(tmp_path: Path) -> None:
     """Resuming from persisted metrics.yaml must restore time accumulators (Req 1.1)."""
     # First run: set time directly and flush
-    c1 = YamlMetricsCollector(work_dir=tmp_path)
-    c1._store[MetricKey.AUDIO] = 120.0
+    c1 = YamlAppMetricsCollector(work_dir=tmp_path)
+    c1._store[AppMetricKey.AUDIO] = 120.0
     c1.flush()
 
     # Second run: resume and check accumulator
-    c2 = YamlMetricsCollector(work_dir=tmp_path)
-    assert c2._store[MetricKey.AUDIO] == pytest.approx(120.0, abs=1.0)
+    c2 = YamlAppMetricsCollector(work_dir=tmp_path)
+    assert c2._store[AppMetricKey.AUDIO] == pytest.approx(120.0, abs=1.0)
 
 
 def test_resume_bad_file_starts_fresh(
@@ -191,8 +191,8 @@ def test_resume_bad_file_starts_fresh(
     """Corrupt metrics.yaml must log WARNING and start fresh (Req 1.5)."""
     (tmp_path / METRICS_YAML_FILENAME).write_text("not: valid: yaml: [[[", encoding="utf-8")
 
-    with caplog.at_level(logging.WARNING, logger="pyqenc.metrics"):
-        collector = YamlMetricsCollector(work_dir=tmp_path)
+    with caplog.at_level(logging.WARNING, logger="pyqenc.app_metrics"):
+        collector = YamlAppMetricsCollector(work_dir=tmp_path)
 
     assert all(v == 0.0 for v in collector._store.values())
     assert any("starting fresh" in r.message for r in caplog.records)
@@ -216,7 +216,7 @@ def test_job_phase_stores_collector(tmp_path: Path) -> None:
     from pyqenc.models import CleanupLevel
     from pyqenc.phases.job import JobPhase
     config    = _make_app_config()
-    collector = NoOpMetricsCollector()
+    collector = NoOpAppMetricsCollector()
     source    = tmp_path / "source.mkv"
     source.write_bytes(b"\x00" * 64)
     phase     = JobPhase(
@@ -235,7 +235,7 @@ def test_extraction_phase_stores_collector(tmp_path: Path) -> None:
     """ExtractionPhase must store the injected collector as self._collector."""
     from pyqenc.phases.extraction import ExtractionPhase
     config    = _make_app_config()
-    collector = NoOpMetricsCollector()
+    collector = NoOpAppMetricsCollector()
     phase     = ExtractionPhase(config, {}, collector=collector)
     assert phase._collector is collector
 
@@ -244,7 +244,7 @@ def test_chunking_phase_stores_collector(tmp_path: Path) -> None:
     """ChunkingPhase must store the injected collector as self._collector."""
     from pyqenc.phases.chunking import ChunkingPhase
     config    = _make_app_config()
-    collector = NoOpMetricsCollector()
+    collector = NoOpAppMetricsCollector()
     phase     = ChunkingPhase(config, {}, collector=collector)
     assert phase._collector is collector
 
@@ -253,7 +253,7 @@ def test_optimization_phase_stores_collector(tmp_path: Path) -> None:
     """OptimizationPhase must store the injected collector as self._collector."""
     from pyqenc.phases.optimization import OptimizationPhase
     config    = _make_app_config()
-    collector = NoOpMetricsCollector()
+    collector = NoOpAppMetricsCollector()
     phase     = OptimizationPhase(config, {}, collector=collector)
     assert phase._collector is collector
 
@@ -262,7 +262,7 @@ def test_encoding_phase_stores_collector(tmp_path: Path) -> None:
     """EncodingPhase must store the injected collector as self._collector."""
     from pyqenc.phases.encoding import EncodingPhase
     config    = _make_app_config()
-    collector = NoOpMetricsCollector()
+    collector = NoOpAppMetricsCollector()
     phase     = EncodingPhase(config, {}, collector=collector)
     assert phase._collector is collector
 
@@ -271,7 +271,7 @@ def test_audio_phase_stores_collector(tmp_path: Path) -> None:
     """AudioPhase must store the injected collector as self._collector."""
     from pyqenc.phases.audio import AudioPhase
     config    = _make_app_config()
-    collector = NoOpMetricsCollector()
+    collector = NoOpAppMetricsCollector()
     phase     = AudioPhase(config, {}, collector=collector)
     assert phase._collector is collector
 
@@ -280,7 +280,7 @@ def test_merge_phase_stores_collector(tmp_path: Path) -> None:
     """MergePhase must store the injected collector as self._collector."""
     from pyqenc.phases.merge import MergePhase
     config    = _make_app_config()
-    collector = NoOpMetricsCollector()
+    collector = NoOpAppMetricsCollector()
     phase     = MergePhase(config, {}, collector=collector)
     assert phase._collector is collector
 
@@ -294,7 +294,7 @@ def test_flush_while_timer_active_includes_partial_elapsed(tmp_path: Path) -> No
     """flush() called while a time() context is active must include partial elapsed (Req 1.4)."""
     collector = _make_collector(tmp_path)
 
-    ctx = collector.time(MetricKey.AUDIO)
+    ctx = collector.time(AppMetricKey.AUDIO)
     ctx.__enter__()
 
     # Flush while the context is still open
@@ -305,11 +305,11 @@ def test_flush_while_timer_active_includes_partial_elapsed(tmp_path: Path) -> No
 
     # The partial elapsed must be >= 0 (timer was running when flush happened)
     # Key may be absent if elapsed rounds to 0 (zero entries are omitted)
-    elapsed_in_yaml = top_level.get(MetricKey.AUDIO.value, 0)
+    elapsed_in_yaml = top_level.get(AppMetricKey.AUDIO.value, 0)
     assert elapsed_in_yaml >= 0, "Expected non-negative partial elapsed for active timer"
 
     # _store must NOT have been mutated by the flush
-    assert collector._store.get(MetricKey.AUDIO, 0.0) == 0.0, (
+    assert collector._store.get(AppMetricKey.AUDIO, 0.0) == 0.0, (
         "flush() must not mutate _store for in-flight timers"
     )
 
@@ -321,14 +321,14 @@ def test_active_timer_not_double_counted_after_exit(tmp_path: Path) -> None:
     """After a time() context exits normally, the elapsed must not be double-counted (Req 1.4)."""
     collector = _make_collector(tmp_path)
 
-    with collector.time(MetricKey.AUDIO):
+    with collector.time(AppMetricKey.AUDIO):
         # Trigger a flush mid-context via the flush counter
         collector.flush()
         # _store still 0 here — timer not yet exited
 
     # After exit: _store holds the real elapsed; active_timers is empty
     assert len(collector._active_timers) == 0
-    elapsed_after = collector._store.get(MetricKey.AUDIO, 0.0)
+    elapsed_after = collector._store.get(AppMetricKey.AUDIO, 0.0)
     assert elapsed_after > 0.0
 
     # A second flush must report the same value (no double-count)
@@ -338,26 +338,26 @@ def test_active_timer_not_double_counted_after_exit(tmp_path: Path) -> None:
     # seconds is int(round(elapsed)); if it rounds to 0 the key is absent (zeros omitted)
     expected_secs = round(elapsed_after)
     if expected_secs == 0:
-        assert MetricKey.AUDIO.value not in top_level
+        assert AppMetricKey.AUDIO.value not in top_level
     else:
-        assert top_level[MetricKey.AUDIO.value] == expected_secs
+        assert top_level[AppMetricKey.AUDIO.value] == expected_secs
 
 
 def test_snapshot_active_timers_does_not_mutate(tmp_path: Path) -> None:
     """_snapshot_active_timers() must not modify _active_timers or _time_accum."""
     collector = _make_collector(tmp_path)
 
-    ctx = collector.time(MetricKey.ENCODING)
+    ctx = collector.time(AppMetricKey.ENCODING)
     ctx.__enter__()
 
-    before_accum  = collector._store.get(MetricKey.ENCODING, 0.0)
+    before_accum  = collector._store.get(AppMetricKey.ENCODING, 0.0)
     before_timers = len(collector._active_timers)
 
     snapshot = collector._snapshot_active_timers()
 
-    assert collector._store.get(MetricKey.ENCODING, 0.0) == before_accum
+    assert collector._store.get(AppMetricKey.ENCODING, 0.0) == before_accum
     assert len(collector._active_timers) == before_timers
-    assert MetricKey.ENCODING in snapshot
-    assert snapshot[MetricKey.ENCODING] >= 0.0
+    assert AppMetricKey.ENCODING in snapshot
+    assert snapshot[AppMetricKey.ENCODING] >= 0.0
 
     ctx.__exit__(None, None, None)

@@ -40,8 +40,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from pyqenc.app_config import load_app_config
+from pyqenc.app_metrics import NoOpAppMetricsCollector
 from pyqenc.constants import EXTRACTED_DIR, MERGED_OUTPUT_DIR, TIMESTAMPS_FILENAME
-from pyqenc.metrics import NoOpMetricsCollector
 from pyqenc.models import (
     CleanupLevel,
     PhaseOutcome,
@@ -59,6 +59,7 @@ from pyqenc.phases.job import JobPhase, JobPhaseResult
 from pyqenc.phases.merge import MergePhase
 from pyqenc.phases.optimization import OptimizationPhase, OptimizationPhaseResult
 from pyqenc.phases.probe import ProbePhase, ProbePhaseResult
+from pyqenc.quality_metrics import MeasuredMetrics, MetricStatKey, TargetedMetrics
 from pyqenc.state import ArtifactState
 from pyqenc.stream_model import (
     ExtendedVideoStream,
@@ -70,6 +71,16 @@ from pyqenc.stream_model import (
 from pyqenc.utils.fs import remove_stale_tmp_files
 from pyqenc.utils.long_path import LongPath
 from pyqenc.utils.yaml_utils import load_model
+
+
+def _tm(**pairs: float) -> TargetedMetrics:
+    """Build a targeted map from sidecar-form keys (``_tm(vmaf_min=96.0)``)."""
+    return TargetedMetrics({MetricStatKey.parse(key): value for key, value in pairs.items()})
+
+
+def _mm(**pairs: float) -> MeasuredMetrics:
+    """Build a measured map from sidecar-form keys (``_mm(vmaf_min=96.0)``)."""
+    return MeasuredMetrics({MetricStatKey.parse(key): value for key, value in pairs.items()})
 
 
 def _extended_stream(path: Path, frame_count: int) -> ExtendedVideoStream:
@@ -200,7 +211,7 @@ def _make_merge_phase(
                          path exercises the merge guard's existence check.
         frame_count:     Source frame count recorded by the ProbePhase result.
     """
-    collector = NoOpMetricsCollector()
+    collector = NoOpAppMetricsCollector()
     config    = _APP_CONFIG.model_copy(deep=True)
     plan      = config.build_encoding_plan(optimize=True, measure=True)
 
@@ -882,10 +893,10 @@ class TestMergeFailsWithoutTimestamps:
 
 def _make_phase() -> MergePhase:
     """A minimal MergePhase (real config, empty registry) for the warning tests."""
-    from pyqenc.metrics import NoOpMetricsCollector
+    from pyqenc.app_metrics import NoOpAppMetricsCollector
 
     return MergePhase(
-        _APP_CONFIG, {}, collector=NoOpMetricsCollector(),
+        _APP_CONFIG, {}, collector=NoOpAppMetricsCollector(),
     )
 
 
@@ -905,10 +916,10 @@ class TestMissedTargetsWarning:
         from pyqenc.models import QualityTarget
 
         targets = [
-            QualityTarget(metric="vmaf", statistic="min", value=93.0),
-            QualityTarget(metric="psnr", statistic="min", value=43.0),
+            QualityTarget(identity=MetricStatKey.parse("vmaf-min"), value=93.0),
+            QualityTarget(identity=MetricStatKey.parse("psnr-min"), value=43.0),
         ]
-        metrics = {"vmaf_min": 88.3, "psnr_min": 43.5}   # vmaf missed, psnr met
+        metrics = _mm(vmaf_min=88.3, psnr_min=43.5)   # vmaf missed, psnr met
 
         with caplog.at_level(_logging.WARNING, logger="pyqenc.phases.merge"):
             _make_phase()._log_missed_targets_warning(
@@ -928,8 +939,8 @@ class TestMissedTargetsWarning:
 
         from pyqenc.models import QualityTarget
 
-        targets = [QualityTarget(metric="vmaf", statistic="min", value=93.0)]
-        metrics = {"vmaf_min": 96.5}
+        targets = [QualityTarget(identity=MetricStatKey.parse("vmaf-min"), value=93.0)]
+        metrics = _mm(vmaf_min=96.5)
 
         with caplog.at_level(_logging.WARNING, logger="pyqenc.phases.merge"):
             _make_phase()._log_missed_targets_warning(
@@ -946,8 +957,8 @@ class TestMissedTargetsWarning:
 
         from pyqenc.models import QualityTarget
 
-        targets = [QualityTarget(metric="vmaf", statistic="min", value=93.0)]
-        metrics = {"vmaf_min": 88.3}  # missed — but no warning on a fixed run
+        targets = [QualityTarget(identity=MetricStatKey.parse("vmaf-min"), value=93.0)]
+        metrics = _mm(vmaf_min=88.3)  # missed — but no warning on a fixed run
 
         with caplog.at_level(_logging.WARNING, logger="pyqenc.phases.merge"):
             _make_phase()._log_missed_targets_warning(
@@ -963,8 +974,8 @@ class TestMissedTargetsWarning:
 
         from pyqenc.models import QualityTarget
 
-        targets = [QualityTarget(metric="vmaf", statistic="min", value=93.0)]
-        metrics = {"vmaf_min": 88.3}
+        targets = [QualityTarget(identity=MetricStatKey.parse("vmaf-min"), value=93.0)]
+        metrics = _mm(vmaf_min=88.3)
 
         with caplog.at_level(_logging.WARNING, logger="pyqenc.phases.merge"):
             _make_phase()._log_missed_targets_warning(
@@ -1208,10 +1219,10 @@ def _run_full_merge(
             tmp_out.write_bytes(b"\x00" * 128)
         return result
 
-    measured = {
-        "vmaf_min": 94.5, "vmaf_p10": 95.0, "vmaf_median": 96.5, "vmaf_max": 99.0,
-        "vmaf_std": 1.2, "ssim_median": 98.2, "psnr_median": 46.0,
-    }
+    measured = _mm(
+        vmaf_min=94.5, vmaf_p10=95.0, vmaf_median=96.5, vmaf_max=99.0,
+        vmaf_std=1.2, ssim_median=98.2, psnr_median=46.0,
+    )
 
     with (
         patch("pyqenc.phases.merge.subprocess.run", side_effect=fake_subprocess_run),
@@ -1239,8 +1250,8 @@ class TestPerOutputSidecarShape:
         assert record.winners.size == 1
         assert record.strategy.token, "strategy IS the args fingerprint (Req 61)"
         # Retention: the FULL measured set (incl. stats outside any target set).
-        assert record.metrics["vmaf_std"] == 1.2
-        assert record.metrics["vmaf_max"] == 99.0
+        assert record.metrics[MetricStatKey.parse("vmaf_std")] == 1.2
+        assert record.metrics[MetricStatKey.parse("vmaf_max")] == 99.0
 
     def test_search_record_round_trips_via_the_mode_union(self, tmp_path: Path) -> None:
         """Save → load dispatches to the SEARCH variant carrying the targets
@@ -1311,7 +1322,7 @@ class TestMeasureOptOut:
             next((work_dir / MERGED_OUTPUT_DIR).glob("*.yaml")),
         )
         assert isinstance(record, FixedMergedOutputSidecar)
-        assert record.metrics == {}
+        assert record.metrics == MeasuredMetrics()
 
     def test_search_opt_out_renders_no_verdict(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture,
@@ -1483,7 +1494,7 @@ class TestUnifiedMergeSummary:
         # anchor — the test-subset anchor stays only as the audit reference.
         shift_row = StrategyRow.model_validate(
             {"strategy": "h264+ultrafast", "size_bytes": 100,
-             "metrics": {"vmaf_p10": 92.0, "vmaf_median": 93.0}},
+             "metrics": _tm(vmaf_p10=92.0, vmaf_median=93.0)},
         )
         save_model(merge_yaml, persisted.model_copy(
             update={"summary": [shift_row, *persisted.summary]},

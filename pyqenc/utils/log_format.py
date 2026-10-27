@@ -26,6 +26,7 @@ from pyqenc.constants import (
     THICK_LINE,
     VISUAL_HASH_EMOJIS_WIDE,
 )
+from pyqenc.quality_metrics import MetricStatKey, TargetedMetrics
 from pyqenc.state import ArtifactState
 
 if TYPE_CHECKING:
@@ -57,8 +58,8 @@ def fmt_metric_value(value: float) -> str:
 
 
 def fmt_metric_summary(
-    metrics_dict: dict[str, float],
-    worst_key:    str | None,
+    metrics_dict: TargetedMetrics,
+    worst_key:    MetricStatKey | None,
     worst_passed: bool,
 ) -> str:
     """Format a metric summary string, marking the worst-deficit metric.
@@ -70,8 +71,8 @@ def fmt_metric_summary(
     selection.
 
     Args:
-        metrics_dict: Measured metrics keyed as ``"<metric>_<stat>"``.
-        worst_key:    Key of the worst-deficit metric, or ``None`` if unknown.
+        metrics_dict: The attempt's targeted metric subset.
+        worst_key:    Identity of the worst-deficit metric, or ``None`` if unknown.
         worst_passed: ``True`` when the worst metric still passed its target.
 
     Returns:
@@ -83,12 +84,12 @@ def fmt_metric_summary(
     """
 
     parts: list[str] = []
-    for k, v in metrics_dict.items():
-        if k == worst_key:
+    for key, value in metrics_dict.items():
+        if key == worst_key:
             symbol = NEUTRAL_INDICATOR_SYMBOL if worst_passed else FAILURE_SYMBOL_MINOR
         else:
             symbol = " "
-        parts.append(f"{k}={fmt_metric_value(v)}{symbol}")
+        parts.append(f"{key.sidecar_key()}={fmt_metric_value(value)}{symbol}")
     return " ".join(parts).strip()
 
 def emit_phase_banner(name: str, log: logging.Logger) -> None:

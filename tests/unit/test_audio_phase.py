@@ -108,7 +108,7 @@ def _make_phase(tmp_path: Path, config: AudioConfig, tracks: list[AudioStream]) 
     ``work_dir`` is ``tmp_path`` so chain outputs land in the phase's dedicated
     ``tmp_path/audio`` directory (Phase Contract: the phase owns its folder).
     """
-    from pyqenc.metrics import NoOpMetricsCollector
+    from pyqenc.app_metrics import NoOpAppMetricsCollector
 
     app_config = MagicMock()
     app_config.audio = config
@@ -139,7 +139,7 @@ def _make_phase(tmp_path: Path, config: AudioConfig, tracks: list[AudioStream]) 
 
 
     registry: PhaseRegistry = {}
-    phase = AudioPhase(app_config, registry, collector=NoOpMetricsCollector())
+    phase = AudioPhase(app_config, registry, collector=NoOpAppMetricsCollector())
     registry[JobPhase]        = job_mock
     registry[ExtractionPhase] = extraction_mock
     return phase
@@ -517,7 +517,7 @@ class TestBoundedExecution:
         """
         import yaml
 
-        from pyqenc.metrics import YamlMetricsCollector
+        from pyqenc.app_metrics import YamlAppMetricsCollector
 
         config = _audio_config(
             [ChainSpec(name="normal", filters=["peaknorm"]),
@@ -548,7 +548,7 @@ class TestBoundedExecution:
         from pyqenc.phases.extraction import ExtractionPhase
         from pyqenc.phases.job import JobPhase
 
-        collector = YamlMetricsCollector(tmp_path)
+        collector = YamlAppMetricsCollector(tmp_path)
         phase = AudioPhase(app_config, registry, collector=collector)
         registry[JobPhase] = job_mock
         registry[ExtractionPhase] = extraction_mock
