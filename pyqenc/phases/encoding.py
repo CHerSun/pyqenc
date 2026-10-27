@@ -64,7 +64,6 @@ from pyqenc.quality_metrics import (
     MeasuredMetricsYaml,
     TargetedMetrics,
     TargetedMetricsYaml,
-    flatten_metric_stats,
 )
 from pyqenc.state import ArtifactState
 from pyqenc.stream_model import (
@@ -1331,7 +1330,7 @@ class ChunkEncoder:
                         plot_path            = output_file.parent / f"{output_file.stem}.png",
                         chunk_start_seconds  = chunk.start_timestamp,
                     )
-                all_metrics         = flatten_metric_stats(measurement.metrics)
+                all_metrics         = measurement.metrics
                 # The metric run decoded the attempt whole — its progress
                 # count IS the file's frame count (the most recent authority;
                 # subsampling reduces scoring, not the frame flow). Replaces

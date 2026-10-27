@@ -13,7 +13,7 @@ from pathlib import Path
 
 from pyqenc.app_config import load_app_config
 from pyqenc.phases.encoding import AttemptSidecar, _recover_pairs
-from pyqenc.quality_metrics import MetricStatKey
+from pyqenc.quality_metrics import MeasuredMetrics, MetricStatKey
 from pyqenc.state import ArtifactState
 from pyqenc.stream_model import EncodedChunk as _EC
 from pyqenc.utils.yaml_utils import load_model, write_yaml_atomic
@@ -21,6 +21,11 @@ from pyqenc.utils.yaml_utils import load_model, write_yaml_atomic
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
 # ---------------------------------------------------------------------------
+
+
+def _measured(**pairs: float) -> MeasuredMetrics:
+    """Build a full measured set from sidecar-form keys (``_measured(vmaf_min=95.0)``)."""
+    return MeasuredMetrics({MetricStatKey.parse(key): value for key, value in pairs.items()})
 
 _STRATEGY_OBJ = next(
     s for s in load_app_config(default_only=True).build_encoding_plan(optimize=True, measure=True).strategies
@@ -169,7 +174,6 @@ from pyqenc.phases.encoding import ChunkEncoder as _ChunkEncoder
 from pyqenc.phases.encoding import _ChunkEncodingResult
 from pyqenc.quality import QualityLogs as _QL
 from pyqenc.quality import QualityMeasurement as _QE
-from pyqenc.quality_metrics import MetricType as _MetricType
 from pyqenc.stream_model import VideoStreamChunk as _VSC
 from pyqenc.utils.ffmpeg_runner import FFmpegRunResult as _FFR
 from pyqenc.utils.visualization import QualityMeasurer as _QMeasurer
@@ -226,7 +230,7 @@ def _run_encode(
     fake_eval = _MM(spec=_QE)
     fake_eval.targets_met  = True
     fake_eval.logs         = _QL()
-    fake_eval.metrics      = {_MetricType.VMAF: {"min": 95.0, "median": 96.5}}
+    fake_eval.metrics      = _measured(vmaf_min=95.0, vmaf_median=96.5)
     fake_eval.frame_count  = 120
 
     evaluator = _MM(spec=_QMeasurer)
@@ -336,7 +340,7 @@ class TestMeasureAttemptsSeam:
         fake_eval = _MM(spec=_QE)
         fake_eval.targets_met  = True
         fake_eval.logs         = _QL()
-        fake_eval.metrics      = {_MetricType.VMAF: {"min": 95.0, "median": 96.5}}
+        fake_eval.metrics      = _measured(vmaf_min=95.0, vmaf_median=96.5)
         fake_eval.frame_count  = 120
 
         evaluator = _MM(spec=_QMeasurer)
@@ -510,7 +514,7 @@ def _run_encode_with_targets(
         95.0 >= t.value for t in targets
     )
     fake_eval.logs = _QL()
-    fake_eval.metrics = {_MetricType.VMAF: {"min": 95.0, "median": 96.5}}
+    fake_eval.metrics = _measured(vmaf_min=95.0, vmaf_median=96.5)
     fake_eval.frame_count = 120
 
     evaluator = _MM(spec=_QMeasurer)
@@ -598,7 +602,7 @@ class TestAttemptFrameCountSourcing:
         fake_eval = _MM(spec=_QE)
         fake_eval.targets_met  = True
         fake_eval.logs         = _QL()
-        fake_eval.metrics      = {_MetricType.VMAF: {"min": 95.0, "median": 96.5}}
+        fake_eval.metrics      = _measured(vmaf_min=95.0, vmaf_median=96.5)
         fake_eval.frame_count  = 120
         evaluator = _MM(spec=_QMeasurer)
         evaluator.work_dir = tmp_path

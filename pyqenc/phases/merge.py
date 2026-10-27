@@ -68,7 +68,6 @@ from pyqenc.quality import QualitySearchBase
 from pyqenc.quality_metrics import (
     MeasuredMetrics,
     MeasuredMetricsYaml,
-    flatten_metric_stats,
 )
 from pyqenc.state import ProbeFacet
 from pyqenc.stream_model import (
@@ -1189,7 +1188,7 @@ class MergePhase(Phase[MergePhaseResult]):
             plot_path          = plot_path,
         )
 
-        metrics_dict = flatten_metric_stats(measurement.metrics)
+        metrics_dict = measurement.metrics
         return metrics_dict, measurement.logs.plot if measurement.logs.plot else None
 
     def _fmt_inline_metrics(

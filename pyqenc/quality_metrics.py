@@ -2,21 +2,24 @@
 
 Owns the metric vocabulary end to end: the metric and statistic types, the
 metric-statistic pair, the measured/targeted set roles, the fixed comparison
-pairs, and the flattening of nested per-metric statistics into the flat
-measured set. The module imports nothing from ``pyqenc.models`` or
-``pyqenc.quality`` — the quality target and the sidecars embed these types,
-so the dependency direction is one-way (everything imports this, this
-imports nothing of ours).
+pairs, and the per-metric log parsing (each metric's ``MetricInfo`` subclass
+parses its own measurement output into plain per-frame floats — pandas and
+the shared quantile step stay in the measurer). The module imports nothing
+from ``pyqenc.models`` or ``pyqenc.quality`` — the quality target and the
+sidecars embed these types, so the dependency direction is one-way
+(everything imports this, this imports nothing of ours).
 """
 # CHerSun 2026
 
+import json
+from abc import ABC, abstractmethod
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from enum import Enum
+from pathlib import Path
 from types import MappingProxyType
 from typing import (
     Annotated,
-    TypedDict,
     cast,
 )
 
@@ -28,16 +31,16 @@ from pydantic import BeforeValidator, PlainSerializer
 # ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
-class MetricInfo:
+class MetricInfo(ABC):
     """Descriptor carrying all metric-specific properties.
 
-    Single source of truth for normalization, display, and quality search behaviour.
-    Accessed via ``MetricType.PSNR.info``, etc.
+    Single source of truth for normalization, display, quality search
+    behaviour, and the parsing of the metric's own measurement output.
+    Accessed via ``MetricType.PSNR.info`` etc. — one static singleton
+    subclass instance per metric, never re-instantiated.
 
     Attributes:
         name:              Human-readable display name (e.g. ``"PSNR"``).
-        id:                Lowercase string key matching ``MetricType.value``
-                           (e.g. ``"psnr"``).  Used for dict keys and filenames.
         higher_is_better:  ``True`` when a higher normalized value is better
                            (VMAF, SSIM, PSNR, VIF after normalization).
         _offset:           Additive offset applied before scaling in the
@@ -78,6 +81,10 @@ class MetricInfo:
                            combined ffmpeg pass (PSNR, SSIM).  When ``False``,
                            subsampling is handled internally by the filter itself
                            (VMAF via ``n_subsample``) or is not applicable (VIF).
+        log_extension:     The metric's measurement-output file extension
+                           (``.log`` stats files or the ``.json`` VMAF report).
+        std_cutoff_max:    Upper bound on the values entering the std statistic
+                           (``None`` = every value); PSNR caps at its clip ceiling.
     """
 
     name:                 str
@@ -94,6 +101,21 @@ class MetricInfo:
     comparison_range:     float
     acceptance_delta:     float
     subsample_via_filter: bool
+    log_extension:        str
+    std_cutoff_max:       float | None
+
+    @abstractmethod
+    def parse_log(self, path: Path) -> list[float]:
+        """Parse the metric's measurement output into per-frame raw values.
+
+        Args:
+            path: The metric's log/report file.
+
+        Returns:
+            Per-frame raw values in frame order (plain floats; the
+            subsample-factor index mapping and the shared quantile step
+            live in the measurer).
+        """
 
     def normalize(self, value: float | pd.Series) -> float | pd.Series:
         """Normalize a raw metric value (or Series) to the display scale.
@@ -151,6 +173,176 @@ class MetricInfo:
 
 
 # ---------------------------------------------------------------------------
+# Per-metric log parsing (each subclass owns its own output format)
+# ---------------------------------------------------------------------------
+
+def _parse_psnr_line(line: str) -> float | None:
+    """Parse one PSNR log line into its average value, or ``None``."""
+    try:
+        parts = line.split()
+        parsed: dict[str, int | float] = {}
+        for part in parts:
+            if ":" in part:
+                key, value = part.split(":", 1)
+                parsed[key] = int(value) if key == "n" else float(value)
+        if "n" in parsed and "psnr_avg" in parsed:
+            return float(parsed["psnr_avg"])
+        return None
+    except ValueError, IndexError:
+        return None
+
+
+def _parse_ssim_line(line: str) -> float | None:
+    """Parse one SSIM log line into its ``All`` value, or ``None``."""
+    try:
+        parts = line.split()
+        parsed: dict[str, int | float] = {}
+        for part in parts:
+            if ":" in part:
+                key, value = part.split(":", 1)
+                parsed[key] = int(value) if key == "n" else float(value)
+        if "n" in parsed and "All" in parsed:
+            return float(parsed["All"])
+        return None
+    except ValueError, IndexError:
+        return None
+
+
+def _load_vmaf_frames(path: Path) -> list[dict[str, object]]:
+    """Load and validate the ``frames`` array of a VMAF JSON report.
+
+    Raises:
+        ValueError: The file is not valid JSON or carries no frames.
+        TypeError:  The JSON structure has wrong types.
+    """
+    try:
+        with path.open("r") as fh:
+            vmaf_data = json.load(fh)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid JSON in VMAF file {path}: {exc}") from exc
+
+    frames = vmaf_data.get("frames") if isinstance(vmaf_data, dict) else None
+    if not isinstance(frames, list):
+        raise TypeError(f"VMAF 'frames' is not an array: {path}")
+    if not frames:
+        raise ValueError(f"VMAF 'frames' array is empty: {path}")
+    return cast(list[dict[str, object]], frames)
+
+
+@dataclass(frozen=True)
+class _PsnrMetricInfo(MetricInfo):
+    """PSNR: ffmpeg ``psnr`` stats-file lines (``n:1 psnr_avg:42.0 …``)."""
+
+    def parse_log(self, path: Path) -> list[float]:
+        """Parse the PSNR stats file into per-frame average PSNR values.
+
+        Leading non-matching lines end the scan (the file is not a PSNR
+        log); trailing junk after the first match is skipped.
+
+        Raises:
+            ValueError: No PSNR lines were found.
+        """
+        values: list[float] = []
+        with path.open("r") as fh:
+            for line in fh:
+                parsed = _parse_psnr_line(line)
+                if parsed is not None:
+                    values.append(parsed)
+                elif not values:
+                    break
+        if not values:
+            raise ValueError(f"Not a PSNR log file: {path}")
+        return values
+
+
+@dataclass(frozen=True)
+class _SsimMetricInfo(MetricInfo):
+    """SSIM: ffmpeg ``ssim`` stats-file lines (the ``All`` column)."""
+
+    def parse_log(self, path: Path) -> list[float]:
+        """Parse the SSIM stats file into per-frame ``All`` values.
+
+        Leading non-matching lines end the scan (the file is not an SSIM
+        log); trailing junk after the first match is skipped.
+
+        Raises:
+            ValueError: No SSIM lines were found.
+        """
+        values: list[float] = []
+        with path.open("r") as fh:
+            for line in fh:
+                parsed = _parse_ssim_line(line)
+                if parsed is not None:
+                    values.append(parsed)
+                elif not values:
+                    break
+        if not values:
+            raise ValueError(f"Not an SSIM log file: {path}")
+        return values
+
+
+@dataclass(frozen=True)
+class _VmafMetricInfo(MetricInfo):
+    """VMAF: the libvmaf JSON report's per-frame ``vmaf`` scores."""
+
+    def parse_log(self, path: Path) -> list[float]:
+        """Parse the VMAF JSON report into per-frame VMAF scores.
+
+        Raises:
+            ValueError: No valid frame entries carry a ``vmaf`` score.
+            TypeError:  The JSON structure has wrong types.
+        """
+        values: list[float] = []
+        for frame in _load_vmaf_frames(path):
+            if not isinstance(frame, dict):
+                raise TypeError(f"VMAF frame is not a dictionary: {path}")
+            metrics = frame.get("metrics")
+            vmaf    = metrics.get("vmaf") if isinstance(metrics, dict) else None
+            if vmaf is None:
+                raise ValueError(f"NOT a VMAF file: {path}")
+            values.append(float(vmaf))
+        return values
+
+
+_VIF_SCALES: tuple[str, ...] = (
+    "integer_vif_scale0",
+    "integer_vif_scale1",
+    "integer_vif_scale2",
+    "integer_vif_scale3",
+)
+
+
+@dataclass(frozen=True)
+class _VifMetricInfo(MetricInfo):
+    """VIF: the four per-scale scores embedded in the VMAF JSON, averaged."""
+
+    def parse_log(self, path: Path) -> list[float]:
+        """Parse VIF per-frame scores from the VMAF JSON report.
+
+        libvmaf embeds VIF when run with ``feature=name=vif``: each frame
+        carries ``integer_vif_scale0`` … ``integer_vif_scale3`` (range 0–1,
+        1.0 = lossless); the combined score is the average of the four.
+
+        Raises:
+            ValueError: A frame lacks the VIF scale data.
+            TypeError:  The JSON structure has wrong types.
+        """
+        values: list[float] = []
+        for frame in _load_vmaf_frames(path):
+            if not isinstance(frame, dict):
+                raise TypeError(f"VMAF frame is not a dictionary: {path}")
+            metrics = frame.get("metrics", {})
+            scales  = [metrics.get(s) for s in _VIF_SCALES] if isinstance(metrics, dict) else [None] * 4
+            if any(scale is None for scale in scales):
+                raise ValueError(
+                    f"VIF scale data missing from frame {frame.get('frameNum')} in {path}. "
+                    f"Ensure libvmaf was run with feature=name=vif."
+                )
+            values.append(sum(cast(list[float], scales)) / len(_VIF_SCALES))
+        return values
+
+
+# ---------------------------------------------------------------------------
 # Metric types
 # ---------------------------------------------------------------------------
 
@@ -174,7 +366,7 @@ class MetricType(Enum):
 
 
 _METRIC_INFO: dict[MetricType, MetricInfo] = {
-    MetricType.VMAF: MetricInfo(
+    MetricType.VMAF: _VmafMetricInfo(
         name              = "VMAF",
         higher_is_better  = True,
         _offset           = 0.0,
@@ -189,8 +381,10 @@ _METRIC_INFO: dict[MetricType, MetricInfo] = {
         comparison_range  = 15.0,  # practical target range ~85-100
         acceptance_delta  = 0.15,  # 0.15% surplus should be negligible
         subsample_via_filter = False,  # VMAF uses n_subsample internally
+        log_extension     = ".json",
+        std_cutoff_max    = None,
     ),
-    MetricType.SSIM: MetricInfo(
+    MetricType.SSIM: _SsimMetricInfo(
         name              = "SSIM",
         higher_is_better  = True,
         _offset           = 0.0,
@@ -205,8 +399,10 @@ _METRIC_INFO: dict[MetricType, MetricInfo] = {
         comparison_range  = 5.0,   # practical target range ~95-100
         acceptance_delta  = 0.05,  # 0.05% after scaling (0.0005 raw). Metric is quite compressed towards 100, so we have to use a low value.
         subsample_via_filter = True,   # uses select='not(mod(n,factor))' on its branch
+        log_extension     = ".log",
+        std_cutoff_max    = None,
     ),
-    MetricType.PSNR: MetricInfo(
+    MetricType.PSNR: _PsnrMetricInfo(
         name              = "PSNR",
         higher_is_better  = True,
         _offset           = 0.0,
@@ -221,8 +417,10 @@ _METRIC_INFO: dict[MetricType, MetricInfo] = {
         comparison_range  = 20.0,  # practical target range ~40-60 dB
         acceptance_delta  = 0.3,   # 0.3 dB surplus should be negligible
         subsample_via_filter = True,   # uses select='not(mod(n,factor))' on its branch
+        log_extension     = ".log",
+        std_cutoff_max    = 100.0,
     ),
-    MetricType.VIF: MetricInfo(
+    MetricType.VIF: _VifMetricInfo(
         name              = "VIF",
         higher_is_better  = True,
         _offset           = 0.0,
@@ -237,33 +435,10 @@ _METRIC_INFO: dict[MetricType, MetricInfo] = {
         comparison_range  = 20.0,  # Practical target range being ~80-100
         acceptance_delta  = 0.15,  # 0.15 after scaling should be good. VIF scales nicely with ~92 being quite good.
         subsample_via_filter = False,  # VIF has no independent branch; embedded in VMAF
+        log_extension     = ".json",
+        std_cutoff_max    = None,
     ),
 }
-
-
-class MetricStats(TypedDict):
-    """Key statistics for a single metric.
-
-    Subset of :class:`FullMetricStatistics` stored in sidecars and used for
-    targeting. Includes the same percentile selection used by the
-    visualization plots: min, p05, p10, p25, median (p50), p75, p90, p95,
-    max, std.
-    """
-
-    min:    float
-    p05:    float
-    p10:    float
-    p25:    float
-    median: float
-    p75:    float
-    p90:    float
-    p95:    float
-    max:    float
-    std:    float
-
-
-PerMetricStats = dict[MetricType, MetricStats]
-"""Measured statistics per metric (one measurement's full nested form)."""
 
 
 # ---------------------------------------------------------------------------
@@ -554,24 +729,3 @@ metric-major order (stable table columns; the stat rank follows the closed
 set's declaration order). The sole narrower authority for fixed runs:
 shrinking the compared metric dimension is an edit to this constant alone
 (which metrics get measured remains ``measurement.metrics``' job)."""
-
-
-# ---------------------------------------------------------------------------
-# Flattening (the nested per-metric form → the flat measured set)
-# ---------------------------------------------------------------------------
-
-def flatten_metric_stats(metrics: PerMetricStats) -> MeasuredMetrics:
-    """Flatten per-metric statistics into the flat measured set.
-
-    Owns the single cast over the ``MetricStats`` TypedDict (its ``.items()``
-    values type as object to ty) and the single definition of the
-    ``{metric}_{stat}`` key construction from the nested form.
-    """
-    return MeasuredMetrics({
-        MetricStatKey(
-            metric    = metric,
-            statistic = StatisticType(stat),
-        ): value
-        for metric, stats in metrics.items()
-        for stat, value in cast(dict[str, float], stats).items()
-    })

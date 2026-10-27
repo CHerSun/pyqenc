@@ -12,13 +12,11 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from decimal import ROUND_HALF_EVEN, Decimal
 from pathlib import Path
-from typing import TypedDict
 
 from pyqenc.models import CropParams, QualityTarget
 from pyqenc.quality_metrics import (
     MeasuredMetrics,
     MetricType,
-    PerMetricStats,
     TargetedMetrics,
 )
 from pyqenc.utils.ffmpeg_runner import (
@@ -30,24 +28,6 @@ from pyqenc.utils.ffmpeg_runner import (
 )
 
 logger = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------------
-# Plot-vocabulary statistics (computed by the visualization layer)
-# ---------------------------------------------------------------------------
-
-class FullMetricStatistics(TypedDict):
-    """Full percentile statistics (computed by the visualization layer)."""
-
-    min: float
-    p5:  float
-    p10: float
-    p25: float
-    p50: float
-    p75: float
-    p90: float
-    p95: float
-    max: float
-    std: float
 
 
 async def run_metrics(
@@ -106,8 +86,9 @@ async def run_metrics(
                            of what the containers declare (mkvmerge-written
                            finals have been observed declaring 500/21 for a
                            24000/1001 stream). ``None`` falls back to each
-                           input's self-declared ``FRAME_RATE``.  When ``None``, defaults are
-                           used (``.log`` for PSNR/SSIM, ``.json`` for VMAF).
+                           input's self-declared ``FRAME_RATE``.  When ``None``, each
+                           branch's metric output takes the metric's own
+                           ``log_extension``.
 
     Returns:
         ``FFmpegRunResult`` with returncode, success, stderr_lines, and frame_count.
@@ -189,18 +170,18 @@ async def run_metrics(
             options: str = "" if use_gpu else "n_threads=4:"
             if sampling > 1:
                 options += f"n_subsample={sampling}:"
-            ext = output_extension if output_extension is not None else ".json"
+            ext = output_extension if output_extension is not None else branch.info.log_extension
             metric_filters.append(
                 f"[{ld}][{lr}]{lib}={options}"
                 f"log_path={output_prefix}{branch.value}{ext}:log_fmt=json:feature=name=vif"
             )
         elif branch == MetricType.SSIM:
-            ext = output_extension if output_extension is not None else ".log"
+            ext = output_extension if output_extension is not None else branch.info.log_extension
             metric_filters.append(
                 f"[{ld}][{lr}]ssim=stats_file={output_prefix}{branch.value}{ext}"
             )
         elif branch == MetricType.PSNR:
-            ext = output_extension if output_extension is not None else ".log"
+            ext = output_extension if output_extension is not None else branch.info.log_extension
             metric_filters.append(
                 f"[{ld}][{lr}]psnr=stats_file={output_prefix}{branch.value}{ext}"
             )
@@ -247,7 +228,9 @@ class QualityMeasurement:
     nothing here compares against foreign state.
 
     Attributes:
-        metrics:     Parsed quality metrics with statistics.
+        metrics:     The full measured set — one flat map over the
+                     metric-statistic pairs (the measurer's shared quantile
+                     step produces it from the per-frame values).
         logs:        The transient metric logs/paths (``QualityLogs``).
         frame_count: Frames of the measured (encoded) file, from the measure
                      run's own progress — the file's count observed by its
@@ -256,7 +239,7 @@ class QualityMeasurement:
                      this is exact; ``0`` = not determined by this run.
     """
 
-    metrics:     PerMetricStats
+    metrics:     MeasuredMetrics
     logs:        QualityLogs
     frame_count: int
 

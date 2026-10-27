@@ -91,48 +91,48 @@ the three gates green between waves. Version bumps ride each wave (MINOR).
 
 ## 7. Test surface, Phase A (Req 12)
 
-- [ ] 7.1 `test_metric_stat_key` rework: sidecar-form and display-mirror
+- [x] 7.1 `test_metric_stat_key` rework: sidecar-form and display-mirror
   tests replaced by round-trip/behavioral assertions; dump-shape and
   yaml-text assertions removed (load→dump→load stability stays).
-- [ ] 7.2 Construction-rejection tests for `QualityTarget` (replacing
+- [x] 7.2 Construction-rejection tests for `QualityTarget` (replacing
   `TestQualityTargetKey`'s accessor-failure premise); `QualityTarget.parse`
   happy/property/error structure preserved.
-- [ ] 7.3 `MetricMap` suite: happy (narrowing of a representative full set),
+- [x] 7.3 `MetricMap` suite: happy (narrowing of a representative full set),
   properties (narrowed ⊆ full by keys, `narrowed_to`∘identity, `covers`
   agreement with subset checks, `worst_of` = per-key min, immutability),
   error (mutation rejected).
-- [ ] 7.4 Fixture migration to typed constructions (quality-search
+- [x] 7.4 Fixture migration to typed constructions (quality-search
   properties, encoding phase/winner-scan, encoding quality); summary-table
   dump-shape assertion → round-trip only; encoding-phase sidecar reads →
   `load_model` round-trips.
-- [ ] 7.5 Glossary (Req 11) + `docs/architecture.md` pass; TODO §116 status
+- [x] 7.5 Glossary (Req 11) + `docs/architecture.md` pass; TODO §116 status
   line updated.
-- [ ] 7.6 Gates green (ruff, ty, pytest); commit wave A (version bump
+- [x] 7.6 Gates green (ruff, ty, pytest); commit wave A (version bump
   included).
 
 ## Phase B — the parsers
 
 ## 8. Per-metric parse (Req 10)
 
-- [ ] 8.1 `parse_log` on `MetricInfo` subclasses — four static singletons;
+- [x] 8.1 `parse_log` on `MetricInfo` subclasses — four static singletons;
   per-frame plain floats; pandas stays out of the identity module.
-- [ ] 8.2 Quirks single-homed: PSNR inf fallback + std cutoff (one place),
+- [x] 8.2 Quirks single-homed: PSNR inf fallback + std cutoff (one place),
   VIF scale averaging from the VMAF JSON, SSIM `All` column, factor
   application.
-- [ ] 8.3 Measurer rewire: shared quantile step stays; `_parsers` dispatch,
+- [x] 8.3 Measurer rewire: shared quantile step stays; `_parsers` dispatch,
   `FullMetricStatistics`, `_extract_key_stats`, `PerMetricStats`/`MetricStats`,
   `flatten_metric_stats` deleted; `QualityMeasurement.metrics` is a flat
   `MeasuredMetrics`; measure-phase nested readers retargeted.
-- [ ] 8.4 Plot output unchanged.
+- [x] 8.4 Plot output unchanged.
 
 ## 9. Test surface, Phase B (Req 12)
 
-- [ ] 9.1 VIF property suite re-pointed at the parse seam, invariants
+- [x] 9.1 VIF property suite re-pointed at the parse seam, invariants
   preserved.
-- [ ] 9.2 Differential fixtures across the rehoming, edges included (PSNR
+- [x] 9.2 Differential fixtures across the rehoming, edges included (PSNR
   inf, single-frame chunks, sampling factor); happy/property/error structure
   per agent-testing.md.
-- [ ] 9.3 Gates green; commit wave B (version bump included).
+- [x] 9.3 Gates green; commit wave B (version bump included).
 
 ## 10. Close-out
 

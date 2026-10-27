@@ -223,15 +223,22 @@ class TestResolveCrop:
 
 
 from pyqenc.phases.measure import _write_sidecar
-from pyqenc.quality_metrics import MetricStats, MetricType
+from pyqenc.quality_metrics import MeasuredMetrics, MetricStatKey, MetricType, StatisticType
 
 
 class TestWriteSidecar:
     """Tests for _write_sidecar failure handling."""
 
-    def _make_metrics(self) -> dict:
-        stats: MetricStats = {"min": 90.0, "p05": 91.0, "p10": 91.5, "p25": 93.0, "median": 95.0, "p75": 97.0, "p90": 98.0, "p95": 98.5, "max": 99.0, "std": 1.5}
-        return {MetricType.VMAF: stats}
+    def _make_metrics(self) -> MeasuredMetrics:
+        return MeasuredMetrics({
+            MetricStatKey(MetricType.VMAF, statistic): value
+            for statistic, value in [
+                (StatisticType.MIN, 90.0), (StatisticType.P05, 91.0), (StatisticType.P10, 91.5),
+                (StatisticType.P25, 93.0), (StatisticType.MEDIAN, 95.0), (StatisticType.P75, 97.0),
+                (StatisticType.P90, 98.0), (StatisticType.P95, 98.5), (StatisticType.MAX, 99.0),
+                (StatisticType.STD, 1.5),
+            ]
+        })
 
     def test_write_failure_raises_loudly(
         self, tmp_path: Path,
