@@ -853,7 +853,8 @@ class MergePhase(Phase[MergePhaseResult]):
 
                     # Quality-knob distribution plot — searched runs only: a
                     # fixed run's knob is constant, so the per-chunk plot
-                    # carries zero information.
+                    # carries zero information. Skipping it there is the
+                    # design, not a problem: no warning for user intent.
                     quality_data = (
                         MergePhase._collect_quality_data(
                             self._deps[JobPhase].work_dir,
@@ -876,8 +877,13 @@ class MergePhase(Phase[MergePhaseResult]):
                             logger.debug("  Quality plot saved: %s", quality_plot_path.name)
                         except (OSError, ValueError) as exc:
                             logger.warning("  Could not generate quality plot: %s", exc)
-                    else:
+                    elif not plan.fixed_quality:
                         logger.warning("No quality data available for strategy %s — skipping quality plot", strategy_name)
+                    else:
+                        logger.debug(
+                            "Quality plot skipped (fixed knob — no distribution): %s",
+                            strategy_name,
+                        )
 
                     # Write the per-output acceptance record (facts + identity,
                     # no verdict — Req 27).
