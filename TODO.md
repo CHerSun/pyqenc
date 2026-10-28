@@ -418,7 +418,7 @@ With the CLI going intent-based, the phase-mirroring API becomes the odd one out
 
 ## 102. Evolutionary / anytime encoding — deficit-driven scheduler (idea)
 
-**Status:** idea (discussed 2026-10-05; NOT for right now — needs a full scheduler rework, or an alternative scheduler. Deliberately separate from §51: QualitySearchV4 stays the per-chunk next-attempt search, untouched by this)
+**Status:** idea (discussed 2026-10-05; extended 2026-10-28 with the size-targeting objective — see the rider section below; NOT for right now — needs a full scheduler rework, or an alternative scheduler. Deliberately separate from §51: QualitySearchV4 stays the per-chunk next-attempt search, untouched by this)
 
 Today the encoding phase finishes chunks one at a time — each chunk runs its whole CRF search before the pipeline moves on. The idea inverts the order: encode ALL chunks once at an initial quality (wave 1 → a complete, valid video immediately), measure, then iteratively re-encode the WORST chunks toward their targets — always improving the largest deficit — until convergence. The user can stop anytime and materialize as-is.
 
@@ -445,6 +445,32 @@ Research links (from the 2026-10-05 discussion):
 - VCA — Video Complexity Analyzer (per-frame SI/TI-style complexity without encoding; aimed at shot detection + per-title encoding): https://vca.itec.aau.at - EVCA — Extended Video Complexity Analyzer (ACM MMSys 2024) — complexity features for rate control and per-segment parameter selection: https://dl.acm.org/doi/10.1145/3625468.3652171
 - IVCA — Inter-relation-aware Video Complexity Analyzer: https://arxiv.org/html/2407.00280v1
 - "Video Encoding Complexity Characterization" (IEEE Access) — SI/TI vs encoding complexity; scene complexity ≠ encoding complexity: https://ieeexplore.ieee.org/document/9900917
+
+### Size-targeting objective — second rider on the same scheduler (2026-10-28 discussion)
+
+Chunking makes global 2-pass VBR impossible — splitting the total budget across chunks IS the per-title encoding problem (Netflix Dynamic Optimizer does it as a full-grid batch). Evolution is the closed-loop, sparse-update version: encode all chunks once at a fixed knob (wave 1), measure — we then know per-chunk metrics, per-chunk sizes, and the exact total — and re-encode outliers until the total converges on the target. Best effort, no guarantee — same posture as §51's unreachable targets: converge until a stop fires, then report achieved size vs target with the gap stated.
+
+Converged mechanics (rulings from the discussion):
+
+- **Water level = live winner-population medians** over the same pair set fixed-mode comparison uses (p10 + median × all four metrics). Outliers are detected against it, and it recomputes after every actively-accepted winner replacement — no stable external target. Median robustness makes the level a quasi-stable reference (it doesn't chase the peaks it trims); it migrates as winner mass settles.
+- **Two signals, two jobs:** the water level is only the fairness reference (who's mispriced); the exact size gap (total vs target) drives direction, stop, and the shrink→fill flip. Never mixed.
+- **Direction-gated acceptance:** over budget → only size-reducing winner replacements are accepted. Structurally kills ping-pong against the moving level.
+- **Priority = perceptually-adjusted worst-dimension deviation × raw size share.** Raw size is the leverage (how much the total moves); density (size per second) is the mispricing signal, frozen at wave 1 — later waves confound density with diverging knobs. Minimum-size threshold below which a chunk is never worth a re-encode. Two tolerances with different justifications: ROI (size-based — coarse steps where payoff is big) and perceptual (motion-based — deeper cuts where the eye won't notice).
+- **Worst dimension governs:** harvest is bounded by the chunk's smallest surplus across the pair set (per-stat floors veto); fill is driven by the deepest deficit. Outlier thresholds are relative to the run's own spread — raw deviations are incomparable across metrics (SSIM compressed near 100, PSNR in dB). Worst-of aggregation is already house vocabulary (`MetricMap.worst_of`).
+- **Motion tolerance = motion-weighted water level:** adjusted quality Q* = measured + motion bonus, water-fill on Q*. Grounded in temporal masking (VMAF carries a motion feature; ITU P.1203 models it). Grain trap: complexity ≠ motion — grain is expensive-but-static, so a density-based motion bonus sends grainy chunks to the harvest line first, exactly what VIF guards (§82); the free wave-1-density proxy conflates them, TI from the already-linked VCA/EVCA separates them, or VIF floors veto. VMAF already bakes masking in — our own factor stacked on VMAF double-counts; PSNR/SSIM/VIF are motion-blind and are where adjustment is principled.
+- **Attempts are the substrate:** every attempt stays keyed by its quality-embedded filename, so the loop consumes already-existing attempts for free before encoding anything new. Sparse updates vs the manual alternative (whole-movie CRF bisection re-encodes all chunks per iteration).
+- **Greedy and order-dependent:** with a live level, the priority rule IS the algorithm — different rules converge to different quality distributions at similar sizes.
+
+Rulings still open before any spec:
+
+- Quality floor on the shrink path — unbounded, the loop starves the easiest chunks (config-targets vocabulary exists; fixed runs currently ignore targets).
+- Which stats get the motion adjustment (and the VMAF double-count); the floor becomes a per-chunk band (motion-tolerance factor in config).
+- Termination set: within tolerance, best-so-far acceptance, min-expected-gain threshold (near convergence each re-encode buys little), unreachability exit (knob range/floors exhausted → stop, report).
+- Scope: single-strategy or the post-optimization winner — fixed-mode strategy comparison assumes nominally equal knobs, per-chunk deviation breaks that premise. Composes with §133 (massive reductions are downscale territory; knob evolution handles moderate deltas).
+- What "size" is: target file size − audio size (known upfront) − container overhead = the video budget the loop steers.
+- Measurement is implied by the mode (flag-semantics doctrine: measure iff consumed).
+
+---
 
 Adjacent but separate (same discussion, NOT folded into this item): intra-chunk quality refinement via x264/x265 `--zones` (per-frame-range `q=`/`b=`; x265 `crf=` zones silently don't work; SVT-AV1 has none — our segment+concat architecture IS its standard workaround) — a per-chunk post-convergence refinement idea, also not now. Zone mechanics docs: x264 manpage (https://manpages.debian.org — frame-based `<start>,<end>,q=|b=`); x265 docs (https://x265.readthedocs.io — `q=`/`b=` only).
 
