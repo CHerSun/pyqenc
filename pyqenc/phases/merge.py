@@ -24,12 +24,13 @@ from typing import TYPE_CHECKING, Annotated, ClassVar, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
+from pyqenc.app_metrics import AppMetricKey
 from pyqenc.constants import (
+    APP_METRIC_KEY_MEASURE,
     BRACKET_LEFT,
     BRACKET_RIGHT,
     FAILURE_SYMBOL_MINOR,
     MERGED_OUTPUT_DIR,
-    METRIC_KEY_MEASURE,
     SUCCESS_SYMBOL_MAJOR,
     SUCCESS_SYMBOL_MINOR,
     TEMP_SUFFIX,
@@ -37,7 +38,6 @@ from pyqenc.constants import (
     TIME_SEPARATOR_SAFE,
     WARNING_SYMBOL,
 )
-from pyqenc.metrics import MetricKey
 from pyqenc.models import (
     CropParams,
     EncodingPlan,
@@ -64,7 +64,11 @@ from pyqenc.phases.extraction import ExtractionPhase
 from pyqenc.phases.job import JobPhase
 from pyqenc.phases.optimization import OptimizationPhase
 from pyqenc.phases.probe import ProbePhase
-from pyqenc.quality import MetricStatKey, QualitySearchBase, flatten_metric_stats
+from pyqenc.quality import QualitySearchBase
+from pyqenc.quality_metrics import (
+    MeasuredMetrics,
+    MeasuredMetricsYaml,
+)
 from pyqenc.state import ProbeFacet
 from pyqenc.stream_model import (
     DecimalYaml,
@@ -75,10 +79,8 @@ from pyqenc.stream_model import (
     MergedVideo,
 )
 from pyqenc.summary_tables import (
-    COMPARISON_STATS,
     ComparisonTable,
     Mark,
-    MetricStatMap,
     SourceInfo,
     StrategyRow,
     render_comparison_table,
@@ -119,7 +121,7 @@ class _MergedSidecarBase(BaseModel):
     plot path derives from the stem and is never persisted.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
 
     source:      SizedFingerprintYaml
     strategy:    FingerprintYaml
@@ -127,7 +129,7 @@ class _MergedSidecarBase(BaseModel):
     sampling:    int
     winners:     SizedFingerprintYaml
     frame_count: int
-    metrics:     dict[str, float] = Field(default_factory=dict)
+    metrics:     MeasuredMetricsYaml = Field(default_factory=MeasuredMetrics)
 
 
 class FixedMergedOutputSidecar(_MergedSidecarBase):
@@ -194,7 +196,7 @@ class MergeSidecar(BaseModel):
 
 if TYPE_CHECKING:
     from pyqenc.app_config import AppConfig
-    from pyqenc.metrics import MetricsCollector
+    from pyqenc.app_metrics import AppMetricsCollector
 
 logger = logging.getLogger(__name__)
 
@@ -243,7 +245,7 @@ class _SidecarBuilder:
         self,
         strategy:    Strategy,
         frame_count: int,
-        all_metrics: dict[str, float],
+        all_metrics: MeasuredMetrics,
     ) -> MergedOutputSidecar:
         """Build the per-output acceptance record (the mode's variant).
 
@@ -260,7 +262,7 @@ class _SidecarBuilder:
                 sampling    = self._sampling,
                 winners     = self._winners,
                 frame_count = frame_count,
-                metrics     = {k: float(v) for k, v in all_metrics.items()},
+                metrics     = all_metrics,
                 quality     = codec.quality_better.quantize(codec.quality_granularity),
             )
         return SearchMergedOutputSidecar(
@@ -270,7 +272,7 @@ class _SidecarBuilder:
             sampling    = self._sampling,
             winners     = self._winners,
             frame_count = frame_count,
-            metrics     = {k: float(v) for k, v in all_metrics.items()},
+            metrics     = all_metrics,
             targets     = targets_as_strings(self._plan.targets),
         )
 
@@ -378,7 +380,7 @@ class MergePhase(Phase[MergePhaseResult]):
         JobPhase, ExtractionPhase, ProbePhase, OptimizationPhase,
         EncodingPhase,
     )
-    _METRIC_KEY: MetricKey = MetricKey.MERGE
+    _METRIC_KEY: AppMetricKey = AppMetricKey.MERGE
 
     # ------------------------------------------------------------------
     # Phase hooks
@@ -389,7 +391,7 @@ class MergePhase(Phase[MergePhaseResult]):
         config:    AppConfig,
         phases:    PhaseRegistry,
         *,
-        collector: MetricsCollector,
+        collector: AppMetricsCollector,
     ) -> None:
         """Store the shared constructor state and the per-run stash."""
         super().__init__(config, phases, collector=collector)
@@ -407,7 +409,7 @@ class MergePhase(Phase[MergePhaseResult]):
             kv["Quality:"] = [f"{strategy.codec.quality_label}={strategy.codec.quality_range[0]} for {strategy.display_name()}" for strategy in strategies]
         else:
             kv["Strategies:"] = [s.display_name() for s in strategies]
-            kv["Targets:"] = [f"{t.metric}-{t.statistic}≥{t.value}" for t in plan.targets]
+            kv["Targets:"] = [str(t) for t in plan.targets]
 
         fmt_key_value_table(kv)
 
@@ -555,7 +557,7 @@ class MergePhase(Phase[MergePhaseResult]):
                 if reason is None:
                     # COMPLETE — accepted: facts load for the live-verdict
                     # summary; the verdict itself is never persisted (Req 51).
-                    metrics = {k: float(v) for k, v in record.metrics.items()}
+                    metrics = record.metrics
                     rows.append(Artifact(
                         payload = MergedVideo(
                             source_stem = source_stem,
@@ -630,7 +632,7 @@ class MergePhase(Phase[MergePhaseResult]):
             return []
         return list(plan.targets)
 
-    def _live_verdict(self, metrics: dict[str, float]) -> bool:
+    def _live_verdict(self, metrics: MeasuredMetrics) -> bool:
         """The live pass/fail against the verdict targets (Req 51).
 
         Fixed runs carry no verdict reference — ``True`` with
@@ -650,28 +652,6 @@ class MergePhase(Phase[MergePhaseResult]):
                 for row in self._deps[EncodingPhase].winners
             ),
         )
-
-    def _rendered_basis(self, measured: dict[str, float]) -> MetricStatMap:
-        """The rendered basis of one output's measurement — what rows persist.
-
-        The presentation reference's keys: the configured target statistics in
-        search, the fixed comparison statistics in fixed mode (the merge
-        anchor election and the table both consume them; full retention
-        stays on the per-video sidecars).
-        """
-        plan = self._deps[ProbePhase].plan
-        if plan.fixed_quality:
-            return {
-                key: value for key, value in
-                ((MetricStatKey.parse(k), v) for k, v in measured.items())
-                if key.statistic in COMPARISON_STATS
-            }
-        target_keys = {t.key() for t in plan.targets}
-        return {
-            key: value for key, value in
-            ((MetricStatKey.parse(k), v) for k, v in measured.items())
-            if key in target_keys
-        }
 
     def _reused_result(self, wanted: list[Artifact], message: str) -> MergePhaseResult:
         """Build the reused result, emerging the summary from the persisted rows."""
@@ -851,11 +831,11 @@ class MergePhase(Phase[MergePhaseResult]):
                     # parameterizes it. Verdicts are live (Req 51). The
                     # `--no-measure` opt-out is the one exception: the user
                     # explicitly traded reporting for speed.
-                    metrics_dict: dict[str, float] = {}
+                    metrics_dict: MeasuredMetrics = MeasuredMetrics()
                     plot_path:    Path | None       = None
                     if plan.measure:
                         try:
-                            with self._collector.time(MetricKey.MERGE, METRIC_KEY_MEASURE):
+                            with self._collector.time(AppMetricKey.MERGE, APP_METRIC_KEY_MEASURE):
                                 metrics_dict, plot_path = self._measure_quality(
                                     final_result  = output_file,
                                     source_stream = source_stream,
@@ -873,7 +853,8 @@ class MergePhase(Phase[MergePhaseResult]):
 
                     # Quality-knob distribution plot — searched runs only: a
                     # fixed run's knob is constant, so the per-chunk plot
-                    # carries zero information.
+                    # carries zero information. Skipping it there is the
+                    # design, not a problem: no warning for user intent.
                     quality_data = (
                         MergePhase._collect_quality_data(
                             self._deps[JobPhase].work_dir,
@@ -896,8 +877,13 @@ class MergePhase(Phase[MergePhaseResult]):
                             logger.debug("  Quality plot saved: %s", quality_plot_path.name)
                         except (OSError, ValueError) as exc:
                             logger.warning("  Could not generate quality plot: %s", exc)
-                    else:
+                    elif not plan.fixed_quality:
                         logger.warning("No quality data available for strategy %s — skipping quality plot", strategy_name)
+                    else:
+                        logger.debug(
+                            "Quality plot skipped (fixed knob — no distribution): %s",
+                            strategy_name,
+                        )
 
                     # Write the per-output acceptance record (facts + identity,
                     # no verdict — Req 27).
@@ -1054,7 +1040,7 @@ class MergePhase(Phase[MergePhaseResult]):
         cmd_mkvmerge: list[str | os.PathLike] = ["mkvmerge", f"@{options_file}"]
         logger.debug("mkvmerge command: %s", " ".join(str(a) for a in cmd_mkvmerge))
 
-        with self._collector.time(MetricKey.MERGE, "concat"):
+        with self._collector.time(AppMetricKey.MERGE, "concat"):
             mkvmerge_result = subprocess.run(
                 cmd_mkvmerge, capture_output=True, text=True, check=False,
             )
@@ -1163,7 +1149,7 @@ class MergePhase(Phase[MergePhaseResult]):
             summaries.append(StrategyRow(
                 strategy   = payload.strategy.display_name(),
                 size_bytes = safe_stat_size(payload.output_path) or 0,
-                metrics    = self._rendered_basis(payload.metrics),
+                metrics    = self._deps[ProbePhase].plan.targeted(payload.metrics),
             ))
         return summaries
 
@@ -1174,7 +1160,7 @@ class MergePhase(Phase[MergePhaseResult]):
         ref_crop:      CropParams,
         output_dir:    Path,
         show_progress: bool | BarAdvance = False,
-    ) -> tuple[dict[str, float], Path | None]:
+    ) -> tuple[MeasuredMetrics, Path | None]:
         """Measure the final output against the source (measurement only).
 
         The measurer takes no target set (Req 52): measurement requires the
@@ -1208,12 +1194,12 @@ class MergePhase(Phase[MergePhaseResult]):
             plot_path          = plot_path,
         )
 
-        metrics_dict = flatten_metric_stats(measurement.metrics)
+        metrics_dict = measurement.metrics
         return metrics_dict, measurement.logs.plot if measurement.logs.plot else None
 
     def _fmt_inline_metrics(
         self,
-        metrics_dict: dict[str, float],
+        metrics_dict: MeasuredMetrics,
     ) -> str:
         """Return a compact single-line metrics string for the completion log line.
 
@@ -1225,7 +1211,7 @@ class MergePhase(Phase[MergePhaseResult]):
         surface.
 
         Args:
-            metrics_dict: Measured metric values keyed by ``"{metric}_{statistic}"``.
+            metrics_dict: The full measured set of the merged output.
 
         Returns:
             Space-separated metric readings, or empty string when nothing renders.
@@ -1234,21 +1220,16 @@ class MergePhase(Phase[MergePhaseResult]):
         parts: list[str] = []
 
         if plan.fixed_quality:
-            for key_text, value in metrics_dict.items():
-                key = MetricStatKey.parse(key_text)
-                if key.statistic in COMPARISON_STATS:
-                    parts.append(
-                        f"{key.metric.value}-{key.statistic.value}={fmt_metric_value(value)}"
-                    )
+            for key, value in plan.targeted(metrics_dict).items():
+                parts.append(f"{key.cli_key()}={fmt_metric_value(value)}")
             return "  ".join(parts)
 
         for target in plan.targets:
-            key   = f"{target.metric}_{target.statistic}"
-            value = metrics_dict.get(key)
+            value = metrics_dict.get(target.identity)
             if value is None:
                 continue
             symbol = SUCCESS_SYMBOL_MINOR if value >= target.value else FAILURE_SYMBOL_MINOR
-            parts.append(f"{target.metric}-{target.statistic}={fmt_metric_value(value)} {symbol}")
+            parts.append(f"{target.identity.cli_key()}={fmt_metric_value(value)} {symbol}")
         return "  ".join(parts)
 
     def _log_missed_targets_warning(
@@ -1257,7 +1238,7 @@ class MergePhase(Phase[MergePhaseResult]):
         *,
         fixed_quality:   bool,
         strategy_name:   str,
-        metrics_dict:    dict[str, float],
+        metrics_dict:    MeasuredMetrics,
     ) -> None:
         """Log a WARNING naming every target this strategy missed, with wanted vs actual.
 
@@ -1273,16 +1254,16 @@ class MergePhase(Phase[MergePhaseResult]):
             quality_targets: The run's resolved quality targets (the plan's).
             fixed_quality:   Whether the run fixes the quality knob.
             strategy_name:   The merged strategy.
-            metrics_dict:    Measured metrics keyed by ``"{metric}_{statistic}"``.
+            metrics_dict:    The full measured set of the merged output.
         """
         if fixed_quality:
             return
         missed: list[str] = []
         for target in quality_targets:
-            value = metrics_dict.get(f"{target.metric}_{target.statistic}")
+            value = metrics_dict.get(target.identity)
             if value is not None and value < target.value:
                 missed.append(
-                    f"{target.metric}-{target.statistic} = {fmt_metric_value(value)} "
+                    f"{target.identity.cli_key()} = {fmt_metric_value(value)} "
                     f"(target ≥ {fmt_metric_value(target.value)})"
                 )
         if missed:
@@ -1335,7 +1316,7 @@ class MergePhase(Phase[MergePhaseResult]):
                 verdict: bool | None = None
                 if plan.measure:
                     verdict = all(
-                        (value := row.metrics.get(target.key())) is not None and value >= target.value
+                        (value := row.metrics.get(target.identity)) is not None and value >= target.value
                         for target in plan.targets
                     ) if row.metrics else False
                 marks[row.strategy] = Mark(verdict=verdict)

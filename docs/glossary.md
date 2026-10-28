@@ -20,9 +20,10 @@ gate as new packages/dependencies. Established 2026-10-17 (TODO §129).
 - **quality range** — the knob's `[better, worse]` domain, config order;
   `quality_better`/`quality_worse` are the endpoints; granularity and max-step
   quantize proposals.
-- **quality target** (plural: **targets**) — an acceptance constraint: metric +
-  statistic + value. `QualityTarget`, config `encoding.targets`, `--targets`.
-  Bare "target" in encoding context means this.
+- **quality target** (plural: **targets**) — an acceptance constraint: the
+  metric-statistic pair + value. `QualityTarget` (field `identity`), config
+  `encoding.targets`, `--targets`. Bare "target" in encoding context means
+  this.
 
 ## Judging and comparison
 
@@ -44,9 +45,22 @@ gate as new packages/dependencies. Established 2026-10-17 (TODO §129).
   (VMAF/PSNR/SSIM/VIF); facts only, never verdicts. `QualityMeasurement`,
   `QualityMeasurer`, `measure_chunk`.
 - **quality metrics** — the VMAF/PSNR/SSIM/VIF world. Where a more specific
-  word applies, it wins: targets, sampling, measurement.
-- **app metrics** — telemetry about how the app runs (`metrics.py`,
-  `metrics.yaml`, `MetricsCollector`, `--no-metrics`).
+  word applies, it wins: targets, sampling, measurement. The identity
+  vocabulary lives in `quality_metrics.py`.
+- **metric-statistic pair** — the identity of one measured value: a metric
+  paired with a statistic (`MetricStatKey`). The single naming authority for
+  its key forms: canonical persistence (`vmaf_median`), CLI/config
+  (`vmaf-min`), display (`VMAF 50%`).
+- **measured set / targeted set** — the full set of one measurement's pairs
+  and values (`MeasuredMetrics`; the re-judging substrate on sidecars) vs.
+  the subset narrowed to a pair set (`TargetedMetrics`; the judging and
+  presentation basis). Narrowing goes through `narrowed_to` / the plan's
+  `targeted()` front — never hand-rolled.
+- **fixed comparison pairs** — `FIXED_COMPARISON_PAIRS`: the fixed-mode
+  narrower (every metric × {p10, median}); the sole authority for what
+  fixed-mode comparison consumes.
+- **app metrics** — telemetry about how the app runs (`app_metrics.py`,
+  `metrics.yaml`, `AppMetricsCollector`, `--no-metrics`).
 - **sampling** — the frame subsampling factor (config `measurement.sampling`);
   the one spelling everywhere.
 - **source / distorted** — the standalone measure command's pair:

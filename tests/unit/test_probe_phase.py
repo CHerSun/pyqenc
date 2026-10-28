@@ -25,7 +25,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from pyqenc.app_config import load_app_config
-from pyqenc.metrics import NoOpMetricsCollector
+from pyqenc.app_metrics import NoOpAppMetricsCollector
 from pyqenc.models import (
     CleanupLevel,
     CropParams,
@@ -118,7 +118,7 @@ def _make_probe_phase(
     dependency walk treats them as already-run without any mocking.
     """
     if collector is None:
-        collector = NoOpMetricsCollector()
+        collector = NoOpAppMetricsCollector()
 
     job = JobPhase(
         _APP_CONFIG, {},

@@ -12,6 +12,7 @@ Covers:
 """
 
 import logging
+from collections.abc import Mapping
 from pathlib import Path
 from typing import ClassVar
 from unittest.mock import MagicMock
@@ -39,9 +40,10 @@ from pyqenc.phases.optimization import (
     current_optimization_sidecar,
     load_optimization_sidecar,
 )
-from pyqenc.quality import MetricStatKey as _K
-from pyqenc.quality import MetricType as _MT
-from pyqenc.quality import StatisticType as _ST
+from pyqenc.quality_metrics import MetricStatKey, TargetedMetrics
+from pyqenc.quality_metrics import MetricStatKey as _K
+from pyqenc.quality_metrics import MetricType as _MT
+from pyqenc.quality_metrics import StatisticType as _ST
 from pyqenc.state import ArtifactState, ProbeFacet
 from pyqenc.stream_model import ProbedFile
 from pyqenc.summary_tables import StrategyRow
@@ -54,7 +56,7 @@ _TOL = 5.0
 # Helpers
 # ---------------------------------------------------------------------------
 
-_QUALITY_TARGETS = [QualityTarget(metric="vmaf", statistic="min", value=93.0)]
+_QUALITY_TARGETS = [QualityTarget(identity=MetricStatKey.parse("vmaf-min"), value=93.0)]
 
 _APP_CONFIG = load_app_config(default_only=True)
 
@@ -66,6 +68,11 @@ _STRATEGY_MAP = {s.display_name(): s for s in _ALL_STRATEGIES}
 _S1 = next(s for s in _ALL_STRATEGIES if s.preset == "slow" and s.profile == "h265-aq")
 _S2 = next(s for s in _ALL_STRATEGIES if s.preset == "slow" and s.profile == "h265")
 _S3 = next(s for s in _ALL_STRATEGIES if s.preset == "slow" and s.profile == "h265-crisp")
+
+
+def _tm(**pairs: float) -> TargetedMetrics:
+    """Build a targeted map from sidecar-form keys (``_tm(vmaf_min=96.0)``)."""
+    return TargetedMetrics({MetricStatKey.parse(key): value for key, value in pairs.items()})
 
 
 def _make_job_phase(
@@ -1088,11 +1095,16 @@ class TestFixedQualityBanner:
 # Fixed compared-run optimization: pruning, anchor, anchor targets (Req 8)
 # ---------------------------------------------------------------------------
 
-def _result(name: str, size: int, metrics: dict[str, float]) -> StrategyRow:
+def _result(
+    name: str,
+    size: int,
+    metrics: Mapping[MetricStatKey, float] | dict[str, float],
+) -> StrategyRow:
     """A StrategyRow with metrics (the fixed-mode pruning input).
 
-    ``metrics`` arrive in the persisted (stringly) form and validate through
-    the pair type's own parse — the sanctioned boundary conversion.
+    ``metrics`` arrive in the persisted (stringly) form or as a typed
+    targeted map — both validate through the row's own boundary (string
+    keys parse into pairs; a role instance passes through).
     """
     return StrategyRow.model_validate(
         {"strategy": name, "size_bytes": size, "metrics": metrics},
@@ -1102,21 +1114,21 @@ def _result(name: str, size: int, metrics: dict[str, float]) -> StrategyRow:
 class TestDominancePruning:
     """Pareto dominance pruning — selection removes only dominated strategies."""
 
-    _M: ClassVar[dict[str, float]] = {"vmaf_median": 91.0, "vif_median": 84.0}
+    _M: ClassVar[TargetedMetrics] = _tm(vmaf_median=91.0, vif_median=84.0)
 
     def test_h264_pruned_by_h265(self) -> None:
         """Strictly-worse (bigger AND lower metrics) strategy is pruned."""
         results = [
-            _result("h265+slow", 1000, {"vmaf_median": 93.0, "vif_median": 90.0}),
-            _result("h264+slow", 1200, {"vmaf_median": 91.5, "vif_median": 85.0}),
+            _result("h265+slow", 1000, _tm(vmaf_median=93.0, vif_median=90.0)),
+            _result("h264+slow", 1200, _tm(vmaf_median=91.5, vif_median=85.0)),
         ]
         assert OptimizationPhase._dominance_survivors(results, _TOL) == ["h265+slow"]
 
     def test_av1_vs_h265_both_survive(self) -> None:
         """Smaller-but-worse vs bigger-but-better — neither dominates."""
         results = [
-            _result("av1+slow", 1000, {"vmaf_median": 91.0, "vif_median": 84.0}),
-            _result("h265+slow", 1400, {"vmaf_median": 93.0, "vif_median": 90.0}),
+            _result("av1+slow", 1000, _tm(vmaf_median=91.0, vif_median=84.0)),
+            _result("h265+slow", 1400, _tm(vmaf_median=93.0, vif_median=90.0)),
         ]
         assert OptimizationPhase._dominance_survivors(results, _TOL) == [
             "av1+slow", "h265+slow",
@@ -1134,8 +1146,8 @@ class TestDominancePruning:
     def test_size_tie_metric_advantage_dominates(self) -> None:
         """Equal size, better metrics on one — the better one dominates."""
         results = [
-            _result("a+slow", 1000, {"vmaf_median": 90.0}),
-            _result("b+slow", 1000, {"vmaf_median": 91.0}),
+            _result("a+slow", 1000, _tm(vmaf_median=90.0)),
+            _result("b+slow", 1000, _tm(vmaf_median=91.0)),
         ]
         assert OptimizationPhase._dominance_survivors(results, _TOL) == ["b+slow"]
 
@@ -1143,15 +1155,15 @@ class TestDominancePruning:
         """size_bytes == 0 (failed encodes) never survives."""
         results = [
             _result("a+slow", 0, {}),
-            _result("b+slow", 1000, {"vmaf_median": 91.0}),
+            _result("b+slow", 1000, _tm(vmaf_median=91.0)),
         ]
         assert OptimizationPhase._dominance_survivors(results, _TOL) == ["b+slow"]
 
     def test_metric_key_mismatch_incomparable(self) -> None:
         """Partial measurements cannot be honestly compared — both survive."""
         results = [
-            _result("a+slow", 1000, {"vmaf_median": 91.0}),
-            _result("b+slow", 1400, {"vmaf_median": 93.0, "vif_median": 90.0}),
+            _result("a+slow", 1000, _tm(vmaf_median=91.0)),
+            _result("b+slow", 1400, _tm(vmaf_median=93.0, vif_median=90.0)),
         ]
         assert OptimizationPhase._dominance_survivors(results, _TOL) == ["a+slow", "b+slow"]
 
@@ -1159,8 +1171,8 @@ class TestDominancePruning:
         """Dominance needs advantage on every compared statistic — a single
         deficit blocks the prune even when every other compared stat wins."""
         results = [
-            _result("a+slow", 1000, {"vmaf_median": 93.0, "vif_median": 83.5}),
-            _result("b+slow", 1400, {"vmaf_median": 91.0, "vif_median": 84.0}),
+            _result("a+slow", 1000, _tm(vmaf_median=93.0, vif_median=83.5)),
+            _result("b+slow", 1400, _tm(vmaf_median=91.0, vif_median=84.0)),
         ]
         assert OptimizationPhase._dominance_survivors(results, _TOL) == ["a+slow", "b+slow"]
 
@@ -1182,8 +1194,8 @@ class TestDominancePruning:
         no meaningful deficit, the strictly-cheaper one dominates (size is
         the tiebreak; the 2026-10-09 real-data shape)."""
         results = [
-            _result("a+slow", 1000, {"vmaf_median": 91.0}),
-            _result("b+slow", 1010, {"vmaf_median": 91.05}),
+            _result("a+slow", 1000, _tm(vmaf_median=91.0)),
+            _result("b+slow", 1010, _tm(vmaf_median=91.05)),
         ]
         assert OptimizationPhase._dominance_survivors(results, _TOL) == ["a+slow"]
 
@@ -1191,8 +1203,8 @@ class TestDominancePruning:
         """At equal size with ±stats inside the tolerances both directions —
         mutual near-duplicates coexist (size cannot break the tie)."""
         results = [
-            _result("a+slow", 1000, {"vmaf_median": 93.0, "vif_median": 83.9}),
-            _result("b+slow", 1000, {"vmaf_median": 91.0, "vif_median": 84.0}),
+            _result("a+slow", 1000, _tm(vmaf_median=93.0, vif_median=83.9)),
+            _result("b+slow", 1000, _tm(vmaf_median=91.0, vif_median=84.0)),
         ]
         assert OptimizationPhase._dominance_survivors(results, _TOL) == ["a+slow", "b+slow"]
 
@@ -1200,8 +1212,8 @@ class TestDominancePruning:
         """A deficit smaller than the metric's acceptance_delta (VIF 0.15)
         no longer blocks pruning — the tolerance is the 'good enough' bar."""
         results = [
-            _result("a+slow", 1000, {"vmaf_median": 93.0, "vif_median": 83.9}),
-            _result("b+slow", 1400, {"vmaf_median": 91.0, "vif_median": 84.0}),
+            _result("a+slow", 1000, _tm(vmaf_median=93.0, vif_median=83.9)),
+            _result("b+slow", 1400, _tm(vmaf_median=91.0, vif_median=84.0)),
         ]
         assert OptimizationPhase._dominance_survivors(results, _TOL) == ["a+slow"]
 
@@ -1209,8 +1221,8 @@ class TestDominancePruning:
         """A deficit clearly beyond the acceptance_delta still blocks — a
         median surplus never covers a floor deficit (no compensation)."""
         results = [
-            _result("a+slow", 1000, {"vmaf_median": 93.0, "vif_median": 83.5}),
-            _result("b+slow", 1400, {"vmaf_median": 91.0, "vif_median": 84.0}),
+            _result("a+slow", 1000, _tm(vmaf_median=93.0, vif_median=83.5)),
+            _result("b+slow", 1400, _tm(vmaf_median=91.0, vif_median=84.0)),
         ]
         assert OptimizationPhase._dominance_survivors(results, _TOL) == ["a+slow", "b+slow"]
 
@@ -1220,8 +1232,8 @@ class TestAnchorSelection:
 
     def test_smallest_survivor_anchors(self) -> None:
         results = [
-            _result("av1+slow", 1000, {"vmaf_median": 91.0}),
-            _result("h265+slow", 1400, {"vmaf_median": 93.0}),
+            _result("av1+slow", 1000, _tm(vmaf_median=91.0)),
+            _result("h265+slow", 1400, _tm(vmaf_median=93.0)),
         ]
         survivors = OptimizationPhase._dominance_survivors(results, _TOL)
         assert OptimizationPhase._select_anchor(
@@ -1232,9 +1244,9 @@ class TestAnchorSelection:
         """The overall size minimum can itself be dominated (equal size,
         worse metrics) — pruning first guarantees the anchor is on the front."""
         results = [
-            _result("a+slow", 900, {"vmaf_median": 80.0}),
-            _result("b+slow", 900, {"vmaf_median": 85.0}),
-            _result("c+slow", 1200, {"vmaf_median": 90.0}),
+            _result("a+slow", 900, _tm(vmaf_median=80.0)),
+            _result("b+slow", 900, _tm(vmaf_median=85.0)),
+            _result("c+slow", 1200, _tm(vmaf_median=90.0)),
         ]
         survivors = OptimizationPhase._dominance_survivors(results, _TOL)
         assert survivors == ["b+slow", "c+slow"]
@@ -1245,8 +1257,8 @@ class TestAnchorSelection:
     def test_size_tie_breaks_by_resolved_order(self) -> None:
         """Exact-duplicate survivors at equal size: resolved order decides."""
         results = [
-            _result("a+slow", 1000, {"vmaf_median": 91.0}),
-            _result("b+slow", 1000, {"vmaf_median": 91.0}),
+            _result("a+slow", 1000, _tm(vmaf_median=91.0)),
+            _result("b+slow", 1000, _tm(vmaf_median=91.0)),
         ]
         survivors = OptimizationPhase._dominance_survivors(results, _TOL)
         assert survivors == ["a+slow", "b+slow"]
@@ -1257,7 +1269,7 @@ class TestAnchorSelection:
     def test_unmeasured_survivor_cannot_anchor(self) -> None:
         results = [
             _result("a+slow", 1000, {}),
-            _result("b+slow", 1400, {"vmaf_median": 91.0}),
+            _result("b+slow", 1400, _tm(vmaf_median=91.0)),
         ]
         survivors = OptimizationPhase._dominance_survivors(results, _TOL)
         assert OptimizationPhase._select_anchor(
@@ -1268,8 +1280,8 @@ class TestAnchorSelection:
         """A survivor measured only on stats outside the comparison set has
         empty anchor targets — it must not anchor over a compared survivor."""
         results = [
-            _result("a+slow", 1000, {"vmaf_std": 1.5, "vmaf_max": 98.0}),
-            _result("b+slow", 1400, {"vmaf_p10": 88.0, "vmaf_median": 91.0}),
+            _result("a+slow", 1000, _tm(vmaf_std=1.5, vmaf_max=98.0)),
+            _result("b+slow", 1400, _tm(vmaf_p10=88.0, vmaf_median=91.0)),
         ]
         survivors = OptimizationPhase._dominance_survivors(results, _TOL)
         assert OptimizationPhase._select_anchor(
@@ -1295,11 +1307,11 @@ class TestAnchorTargets:
             },
         )
         targets = OptimizationPhase._anchor_targets_from(anchor)
-        assert [(t.metric, t.statistic, t.value) for t in targets] == [
-            ("vif", "p10", 81.0),
-            ("vif", "median", 84.0),
-            ("vmaf", "p10", 88.5),
-            ("vmaf", "median", 91.2),
+        assert [(t.identity.metric, t.identity.statistic, t.value) for t in targets] == [
+            (_MT.VMAF, _ST.P10, 88.5),
+            (_MT.VMAF, _ST.MEDIAN, 91.2),
+            (_MT.VIF, _ST.P10, 81.0),
+            (_MT.VIF, _ST.MEDIAN, 84.0),
         ]
 
     def test_none_anchor_empty_set(self) -> None:
@@ -1327,7 +1339,7 @@ class TestAggregateStrategyMetrics:
                 WinnerSidecar(
                     quality = Decimal(20),
                     frame_count = 24,
-                    metrics = {"vmaf_median": 91.0 + i, "vif_median": 84.0 - i},
+                    metrics = _tm(vmaf_median=91.0 + i, vif_median=84.0 - i),
                     targets_met = True,
                 ),
             )
@@ -1343,10 +1355,10 @@ class TestAggregateStrategyMetrics:
         mins = phase._aggregate_strategy_metrics(
             tmp_path, chunks, strategy, encoded_chunks[strategy.display_name()],
         )
-        assert mins == {
+        assert mins == TargetedMetrics({
             _K(_MT.VMAF, _ST.MEDIAN): 91.0,
             _K(_MT.VIF, _ST.MEDIAN): 83.0,
-        }
+        })
 
     def test_missing_sidecar_chunk_contributes_nothing(self, tmp_path: Path) -> None:
         from pyqenc.phases.encoding import _build_encoded_chunk
@@ -1370,7 +1382,7 @@ class TestAggregateStrategyMetrics:
         phase, _, _ = _make_fixed_phase(tmp_path, strategy_names=["h265-aq+slow"])
         assert phase._aggregate_strategy_metrics(
             tmp_path, [chunk], strategy, encoded_chunks[strategy.display_name()],
-        ) == {}
+        ) == TargetedMetrics()
 class TestFixedComparedExecute:
     """The fixed compared-run execute path end to end (mocked encoder pool).
 
@@ -1503,11 +1515,11 @@ class TestFixedComparedExecute:
         # The anchor is the smallest survivor; the anchor targets mirror its
         # min-aggregated COMPARED stats only (sorted) — std/max stay out.
         assert result.anchor == "h265-aq+slow"
-        assert [(t.metric, t.statistic, t.value) for t in result.anchor_targets] == [
-            ("vif", "p10", 81.0),
-            ("vif", "median", 84.0),
-            ("vmaf", "p10", 87.0),
-            ("vmaf", "median", 91.0),
+        assert [(t.identity.metric, t.identity.statistic, t.value) for t in result.anchor_targets] == [
+            (_MT.VMAF, _ST.P10, 87.0),
+            (_MT.VMAF, _ST.MEDIAN, 91.0),
+            (_MT.VIF, _ST.P10, 81.0),
+            (_MT.VIF, _ST.MEDIAN, 84.0),
         ]
 
         # The sidecar persists facts only — selection/anchor are live
@@ -1527,13 +1539,13 @@ class TestFixedComparedExecute:
             r for r in persisted.summary if r.strategy == result.anchor
         )
         assert [
-            (t.metric, t.statistic, t.value)
+            (t.identity.metric, t.identity.statistic, t.value)
             for t in OptimizationPhase._anchor_targets_from(anchor_result)
         ] == [
-            ("vif", "p10", 81.0),
-            ("vif", "median", 84.0),
-            ("vmaf", "p10", 87.0),
-            ("vmaf", "median", 91.0),
+            (_MT.VMAF, _ST.P10, 87.0),
+            (_MT.VMAF, _ST.MEDIAN, 91.0),
+            (_MT.VIF, _ST.P10, 81.0),
+            (_MT.VIF, _ST.MEDIAN, 84.0),
         ]
 
     def test_size_tolerance_does_not_rescue_stat_dominance(
@@ -1614,8 +1626,8 @@ class TestFixedReuseFromPersisted:
         _persist_optimization(
             phase,
             [
-                _result("h265-aq+slow", 1000, {"vmaf_median": 91.0}),
-                _result("h265+slow", 1400, {"vmaf_median": 93.0}),
+                _result("h265-aq+slow", 1000, _tm(vmaf_median=91.0)),
+                _result("h265+slow", 1400, _tm(vmaf_median=93.0)),
             ],
             test_chunks=[c.safe_name() for c in chunks],
         )
@@ -1627,8 +1639,8 @@ class TestFixedReuseFromPersisted:
         assert [s.display_name() for s in result.selected_strategies] == [
             "h265-aq+slow", "h265+slow",
         ]
-        assert [(t.metric, t.statistic, t.value) for t in result.anchor_targets] == [
-            ("vmaf", "median", 91.0),
+        assert [(t.identity.metric, t.identity.statistic, t.value) for t in result.anchor_targets] == [
+            (_MT.VMAF, _ST.MEDIAN, 91.0),
         ]
         assert "anchor: ◎  h265-aq+slow" in caplog.text
 
@@ -1699,8 +1711,8 @@ class TestFixedAlwaysRuns:
 
         assert result.outcome is PhaseOutcome.COMPLETED
         assert result.anchor == strategy.display_name()
-        assert [(t.metric, t.statistic, t.value) for t in result.anchor_targets] == [
-            ("vmaf", "p10", 87.0), ("vmaf", "median", 91.0),
+        assert [(t.identity.metric, t.identity.statistic, t.value) for t in result.anchor_targets] == [
+            (_MT.VMAF, _ST.P10, 87.0), (_MT.VMAF, _ST.MEDIAN, 91.0),
         ]
 
     def test_partial_retest_derives_untested_rows_from_disk(

@@ -11,6 +11,12 @@ Basis: the grounding documents in this folder (`logical-vs-code.md`, `per-phase-
 
 ### Superseded by a later spec
 
+- `2026-10-27 metric-stat-identity` retypes the sidecar `metrics` fields:
+  attempt/standalone-measure/merged-output sidecars hold `MeasuredMetrics`
+  (the full set), the winner sidecar holds `TargetedMetrics` (the narrowed
+  subset) — typed maps in memory, identical canonical string keys on disk.
+  Acceptance/identity mechanics are untouched; a work directory written
+  before the change stays valid.
 - `2026-10-03 unified-quality-summaries` (implemented 2026-10-12) converges
   the two replay-row models this spec landed (`StrategySummaryRow` in
   `optimization.yaml`, `MergeSummaryRow` in `merge.yaml`) into ONE

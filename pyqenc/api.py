@@ -27,8 +27,8 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from pyqenc.app_metrics import NoOpAppMetricsCollector, YamlAppMetricsCollector
 from pyqenc.constants import DEFAULT_SCREENSHOT_COUNT
-from pyqenc.metrics import NoOpMetricsCollector, YamlMetricsCollector
 from pyqenc.models import CleanupLevel, CropParams
 from pyqenc.phase import Phase, _build_registry
 from pyqenc.phases.audio import AudioPhase
@@ -134,9 +134,9 @@ def _drive(
     work_dir.mkdir(parents=True, exist_ok=True)
 
     collector = (
-        NoOpMetricsCollector()
+        NoOpAppMetricsCollector()
         if no_metrics
-        else YamlMetricsCollector(work_dir=work_dir, force_wipe=force)
+        else YamlAppMetricsCollector(work_dir=work_dir, force_wipe=force)
     )
 
     registry = _build_registry(

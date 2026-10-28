@@ -12,14 +12,20 @@ from decimal import Decimal
 from pathlib import Path
 
 from pyqenc.app_config import load_app_config
-from pyqenc.phases.encoding import _recover_pairs
+from pyqenc.phases.encoding import AttemptSidecar, _recover_pairs
+from pyqenc.quality_metrics import MeasuredMetrics, MetricStatKey
 from pyqenc.state import ArtifactState
 from pyqenc.stream_model import EncodedChunk as _EC
-from pyqenc.utils.yaml_utils import write_yaml_atomic
+from pyqenc.utils.yaml_utils import load_model, write_yaml_atomic
 
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
 # ---------------------------------------------------------------------------
+
+
+def _measured(**pairs: float) -> MeasuredMetrics:
+    """Build a full measured set from sidecar-form keys (``_measured(vmaf_min=95.0)``)."""
+    return MeasuredMetrics({MetricStatKey.parse(key): value for key, value in pairs.items()})
 
 _STRATEGY_OBJ = next(
     s for s in load_app_config(default_only=True).build_encoding_plan(optimize=True, measure=True).strategies
@@ -34,6 +40,13 @@ _STRATEGY   = _STRATEGY_OBJ.display_name()
 _SAFE_STRAT = _STRATEGY_OBJ.safe_name()
 _RESOLUTION = "1920x800"
 _QUALITY     = Decimal("18.0")
+_FIXED_PLAN = load_app_config(default_only=True).build_encoding_plan(
+    optimize=True, measure=True,
+    strategies=["h265-aq+slow"], quality=(_QUALITY, _QUALITY),
+)
+
+
+
 
 
 def _make_complete_pair(encoded_dir: Path, chunk_id: str = _CHUNK_ID, quality: Decimal = _QUALITY) -> Path:
@@ -155,11 +168,10 @@ from unittest.mock import patch as _patch
 
 import yaml as _yaml
 
-from pyqenc.metrics import MetricsCollector as _MetricsCollector
+from pyqenc.app_metrics import AppMetricsCollector as _AppMetricsCollector
 from pyqenc.models import Strategy as _Strategy
 from pyqenc.phases.encoding import ChunkEncoder as _ChunkEncoder
 from pyqenc.phases.encoding import _ChunkEncodingResult
-from pyqenc.quality import MetricType as _MetricType
 from pyqenc.quality import QualityLogs as _QL
 from pyqenc.quality import QualityMeasurement as _QE
 from pyqenc.stream_model import VideoStreamChunk as _VSC
@@ -218,7 +230,7 @@ def _run_encode(
     fake_eval = _MM(spec=_QE)
     fake_eval.targets_met  = True
     fake_eval.logs         = _QL()
-    fake_eval.metrics      = {_MetricType.VMAF: {"min": 95.0, "median": 96.5}}
+    fake_eval.metrics      = _measured(vmaf_min=95.0, vmaf_median=96.5)
     fake_eval.frame_count  = 120
 
     evaluator = _MM(spec=_QMeasurer)
@@ -229,24 +241,26 @@ def _run_encode(
         encoder = _ChunkEncoder(
             quality_measurer  = evaluator,
             work_dir          = tmp_path,
-            collector         = _MM(spec=_MetricsCollector),
+            plan              = _FIXED_PLAN,
+            collector         = _MM(spec=_AppMetricsCollector),
             crop_params       = None,
             cleanup_level     = CleanupLevel.NONE,
             visual_hash       = True,
             sampling           = 10,
-            metric_prefix     = MetricKey.ENCODING,
+            metric_prefix     = AppMetricKey.ENCODING,
             measure_attempts  = True,
         )
     else:
         encoder = _ChunkEncoder(
             quality_measurer  = evaluator,
             work_dir          = tmp_path,
-            collector         = _MM(spec=_MetricsCollector),
+            plan              = _FIXED_PLAN,
+            collector         = _MM(spec=_AppMetricsCollector),
             crop_params       = None,
             cleanup_level     = CleanupLevel.NONE,
             visual_hash       = True,
             sampling           = 10,
-            metric_prefix     = MetricKey.ENCODING,
+            metric_prefix     = AppMetricKey.ENCODING,
             measure_attempts  = measure_attempts,
         )
 
@@ -311,8 +325,9 @@ class TestMeasureAttemptsSeam:
         sidecar_path = (
             tmp_path / "encoding" / "test_strategy" / "chunk_001.q18.0.yaml"
         )
-        sidecar = _yaml.safe_load(sidecar_path.read_text(encoding="utf-8"))
-        assert sidecar["metrics"]["vmaf_min"] == 95.0
+        sidecar = load_model(sidecar_path, AttemptSidecar)
+        assert sidecar is not None
+        assert sidecar.metrics[MetricStatKey.parse("vmaf_min")] == 95.0
 
     def test_sidecarless_attempt_video_heals_by_remeasure(self, tmp_path: Path) -> None:
         """The upgrade path: an attempt video left by an unmeasured run (no
@@ -325,7 +340,7 @@ class TestMeasureAttemptsSeam:
         fake_eval = _MM(spec=_QE)
         fake_eval.targets_met  = True
         fake_eval.logs         = _QL()
-        fake_eval.metrics      = {_MetricType.VMAF: {"min": 95.0, "median": 96.5}}
+        fake_eval.metrics      = _measured(vmaf_min=95.0, vmaf_median=96.5)
         fake_eval.frame_count  = 120
 
         evaluator = _MM(spec=_QMeasurer)
@@ -335,12 +350,13 @@ class TestMeasureAttemptsSeam:
         encoder = _ChunkEncoder(
             quality_measurer = evaluator,
             work_dir         = tmp_path,
-            collector        = _MM(spec=_MetricsCollector),
+            plan             = _FIXED_PLAN,
+            collector        = _MM(spec=_AppMetricsCollector),
             crop_params       = None,
             cleanup_level     = CleanupLevel.NONE,
             visual_hash       = True,
             sampling          = 10,
-            metric_prefix     = MetricKey.ENCODING,
+            metric_prefix     = AppMetricKey.ENCODING,
             measure_attempts = True,
         )
 
@@ -361,8 +377,9 @@ class TestMeasureAttemptsSeam:
         evaluator.measure_chunk.assert_called_once()
         assert result.success is True
 
-        sidecar = _yaml.safe_load(attempt.with_suffix(".yaml").read_text(encoding="utf-8"))
-        assert sidecar["metrics"]["vmaf_min"] == 95.0
+        sidecar = load_model(attempt.with_suffix(".yaml"), AttemptSidecar)
+        assert sidecar is not None
+        assert sidecar.metrics[MetricStatKey.parse("vmaf_min")] == 95.0
         assert (
             tmp_path / "encoded" / "test_strategy" / "chunk_001.yaml"
         ).exists()
@@ -383,7 +400,7 @@ class TestMeasureAttemptsSeam:
 # (fixed-quality spec Req 9.1, 9.4, 9.5, 9.7)
 # ---------------------------------------------------------------------------
 
-from pyqenc.metrics import MetricKey, NoOpMetricsCollector
+from pyqenc.app_metrics import AppMetricKey, NoOpAppMetricsCollector
 from pyqenc.models import CleanupLevel, CropParams, PhaseOutcome, QualityTarget
 from pyqenc.phase import Artifact as _PAArtifact
 from pyqenc.phase import PhaseRegistry
@@ -423,7 +440,7 @@ class TestFixedDegenerateSinglePoint:
         presentation-only targets_met=False verdict (Req 9.7), and the
         acceptance line still logs in the uniform success shape (INFO for a
         fixed-mode miss — expected behavior, not a search failure)."""
-        unreachable = [QualityTarget(metric="vmaf", statistic="min", value=99.0)]
+        unreachable = [QualityTarget(identity=MetricStatKey.parse("vmaf-min"), value=99.0)]
         with _patch("pyqenc.phases.encoding.logger") as captured:
             result, _ = _run_encode_with_targets(
                 tmp_path, targets=unreachable, measure_attempts=True,
@@ -462,7 +479,7 @@ class TestFixedDegenerateSinglePoint:
         strategy.safe_name.return_value    = "test_strategy"
         strategy.codec = codec
 
-        unreachable = [QualityTarget(metric="vmaf", statistic="min", value=99.0)]
+        unreachable = [QualityTarget(identity=MetricStatKey.parse("vmaf-min"), value=99.0)]
         with _patch("pyqenc.phases.encoding.logger") as captured:
             result, _ = _run_encode_with_targets(
                 tmp_path, targets=unreachable, measure_attempts=True,
@@ -497,7 +514,7 @@ def _run_encode_with_targets(
         95.0 >= t.value for t in targets
     )
     fake_eval.logs = _QL()
-    fake_eval.metrics = {_MetricType.VMAF: {"min": 95.0, "median": 96.5}}
+    fake_eval.metrics = _measured(vmaf_min=95.0, vmaf_median=96.5)
     fake_eval.frame_count = 120
 
     evaluator = _MM(spec=_QMeasurer)
@@ -507,12 +524,13 @@ def _run_encode_with_targets(
     encoder = _ChunkEncoder(
         quality_measurer  = evaluator,
         work_dir          = tmp_path,
-        collector         = _MM(spec=_MetricsCollector),
+        plan              = _FIXED_PLAN,
+        collector         = _MM(spec=_AppMetricsCollector),
         crop_params       = None,
         cleanup_level     = CleanupLevel.NONE,
         visual_hash       = True,
         sampling           = 10,
-        metric_prefix     = MetricKey.ENCODING,
+        metric_prefix     = AppMetricKey.ENCODING,
         measure_attempts  = measure_attempts,
     )
 
@@ -561,19 +579,20 @@ class TestAttemptFrameCountSourcing:
         return _ChunkEncoder(
             quality_measurer  = evaluator,
             work_dir          = tmp_path,
-            collector         = _MM(spec=_MetricsCollector),
+            plan              = _FIXED_PLAN,
+            collector         = _MM(spec=_AppMetricsCollector),
             crop_params       = None,
             cleanup_level     = CleanupLevel.NONE,
             visual_hash       = True,
             sampling           = 10,
-            metric_prefix     = MetricKey.ENCODING,
+            metric_prefix     = AppMetricKey.ENCODING,
             measure_attempts  = True,
         )
 
     def _target(self):
         from pyqenc.models import QualityTarget
 
-        return [QualityTarget(metric="vmaf", statistic="min", value=95.0)]
+        return [QualityTarget(identity=MetricStatKey.parse("vmaf-min"), value=95.0)]
 
     def test_zero_count_sidecar_remeasures_and_heals_the_count(self, tmp_path: Path) -> None:
         """A complete-metrics sidecar with frame_count 0 is NOT a cache hit;
@@ -583,7 +602,7 @@ class TestAttemptFrameCountSourcing:
         fake_eval = _MM(spec=_QE)
         fake_eval.targets_met  = True
         fake_eval.logs         = _QL()
-        fake_eval.metrics      = {_MetricType.VMAF: {"min": 95.0, "median": 96.5}}
+        fake_eval.metrics      = _measured(vmaf_min=95.0, vmaf_median=96.5)
         fake_eval.frame_count  = 120
         evaluator = _MM(spec=_QMeasurer)
         evaluator.work_dir = tmp_path
@@ -665,7 +684,7 @@ class TestEncodingPresentationTargets:
         job = JobPhase(
             config, {}, source=src, work_dir=work_dir, force=False,
             cleanup=CleanupLevel.NONE, no_metrics=True,
-            collector=NoOpMetricsCollector(),
+            collector=NoOpAppMetricsCollector(),
         )
         job.run(dry_run=False)
 
@@ -691,7 +710,7 @@ class TestEncodingPresentationTargets:
             ),
             frame_count=240, crop=CropParams(),
         )
-        probe = ProbePhase(config, {}, collector=NoOpMetricsCollector(), crop_params=None, plan=plan)
+        probe = ProbePhase(config, {}, collector=NoOpAppMetricsCollector(), crop_params=None, plan=plan)
         probe.result = ProbePhaseResult(
             outcome=PhaseOutcome.COMPLETED, message="stub",
             plan=plan,
@@ -700,14 +719,14 @@ class TestEncodingPresentationTargets:
 
         chunk = VideoStreamChunk(stream=extended, start_timestamp=0.0,
                                  end_timestamp=10.0, frame_count=240)
-        chunking = _CCP(config, {}, collector=NoOpMetricsCollector())
+        chunking = _CCP(config, {}, collector=NoOpAppMetricsCollector())
         chunking.result = ChunkingPhaseResult(
             outcome=PhaseOutcome.COMPLETED, message="stub",
             chunks=[_PAArtifact(payload=chunk, state=_PAState.COMPLETE)],
         )
 
         strategy = plan.strategies[0]
-        optimization = OptimizationPhase(config, {}, collector=NoOpMetricsCollector())
+        optimization = OptimizationPhase(config, {}, collector=NoOpAppMetricsCollector())
         optimization.result = OptimizationPhaseResult(
             outcome=PhaseOutcome.COMPLETED, message="stub",
             selected_strategies=[strategy],
@@ -718,7 +737,7 @@ class TestEncodingPresentationTargets:
             JobPhase: job, ProbePhase: probe,
             _CCP: chunking, OptimizationPhase: optimization,
         }
-        phase = EncodingPhase(config, registry, collector=NoOpMetricsCollector())
+        phase = EncodingPhase(config, registry, collector=NoOpAppMetricsCollector())
 
         # The encoded winner the stubbed pool reports back. Pre-seeded only
         # when attempts are measured — a video-only winner is COMPLETE under
@@ -763,8 +782,8 @@ class TestEncodingPresentationTargets:
 
     def test_fixed_compared_uses_anchor_targets(self, tmp_path: Path, monkeypatch) -> None:
         anchor_targets_fixture = [
-            QualityTarget(metric="vmaf", statistic="median", value=91.0),
-            QualityTarget(metric="vif", statistic="median", value=84.0),
+            QualityTarget(identity=MetricStatKey.parse("vmaf-median"), value=91.0),
+            QualityTarget(identity=MetricStatKey.parse("vif-median"), value=84.0),
         ]
         _, captured = self._run_phase(
             tmp_path, monkeypatch,
@@ -792,7 +811,7 @@ class TestEncodingPresentationTargets:
         result, captured = self._run_phase(
             tmp_path, monkeypatch,
             quality_range_override=(_D("18"), _D("18")),
-            anchor_targets=[QualityTarget(metric="vmaf", statistic="median", value=91.0)],
+            anchor_targets=[QualityTarget(identity=MetricStatKey.parse("vmaf-median"), value=91.0)],
             optimize=False,
             measure=False,
         )
@@ -813,7 +832,7 @@ class TestEncodingPresentationTargets:
         # byte-identical to before the spec.
         from pyqenc.models import QualityTarget as _QT
         assert captured["quality_targets"] == [
-            _QT(metric="vmaf", statistic="min", value=93.0),
+            _QT(identity=MetricStatKey.parse("vmaf-min"), value=93.0),
         ]
 
 
@@ -841,7 +860,7 @@ class TestSuboptimalOutcome:
         result, _ = TestEncodingPresentationTargets()._run_phase(
             tmp_path, monkeypatch,
             quality_range_override=(_D("18"), _D("18")),
-            anchor_targets=[QualityTarget(metric="vmaf", statistic="median", value=91.0)],
+            anchor_targets=[QualityTarget(identity=MetricStatKey.parse("vmaf-median"), value=91.0)],
             winner_metrics={"vmaf_median": 80.0},
             winner_targets_met=False,
         )
@@ -937,7 +956,7 @@ class TestWinningLimiterBasisLine:
         job = JobPhase(
             config, {}, source=src, work_dir=work_dir, force=False,
             cleanup=CleanupLevel.NONE, no_metrics=True,
-            collector=NoOpMetricsCollector(),
+            collector=NoOpAppMetricsCollector(),
         )
         job.run(dry_run=False)
 
@@ -950,7 +969,7 @@ class TestWinningLimiterBasisLine:
             stream=VideoStream(file=_File(path=src), info=info),
             frame_count=240, crop=CropParams(),
         )
-        probe = ProbePhase(config, {}, collector=NoOpMetricsCollector(), crop_params=None, plan=plan)
+        probe = ProbePhase(config, {}, collector=NoOpAppMetricsCollector(), crop_params=None, plan=plan)
         probe.result = ProbePhaseResult(
             outcome=PhaseOutcome.COMPLETED, message="stub",
             plan=plan,
@@ -959,14 +978,14 @@ class TestWinningLimiterBasisLine:
 
         chunk = VideoStreamChunk(stream=extended, start_timestamp=0.0,
                                  end_timestamp=10.0, frame_count=240)
-        chunking = _CCP(config, {}, collector=NoOpMetricsCollector())
+        chunking = _CCP(config, {}, collector=NoOpAppMetricsCollector())
         chunking.result = ChunkingPhaseResult(
             outcome=PhaseOutcome.COMPLETED, message="stub",
             chunks=[_PAArtifact(payload=chunk, state=_PAState.COMPLETE)],
         )
 
         strategy = plan.strategies[0]
-        optimization = OptimizationPhase(config, {}, collector=NoOpMetricsCollector())
+        optimization = OptimizationPhase(config, {}, collector=NoOpAppMetricsCollector())
         optimization.result = OptimizationPhaseResult(
             outcome=PhaseOutcome.COMPLETED, message="stub",
             selected_strategies=[strategy],
@@ -993,7 +1012,7 @@ class TestWinningLimiterBasisLine:
         phase = EncodingPhase(config, {
             JobPhase: job, ProbePhase: probe,
             _CCP: chunking, OptimizationPhase: optimization,
-        }, collector=NoOpMetricsCollector())
+        }, collector=NoOpAppMetricsCollector())
         caplog.clear()
         with caplog.at_level(logging.INFO):
             result = phase.run(dry_run=False)
@@ -1016,8 +1035,8 @@ class TestWinningLimiterBasisLine:
             tmp_path, caplog,
             fixed=True, plan_targets=["vmaf-min:93.0"],
             anchor_targets=[
-                QualityTarget(metric="vmaf", statistic="median", value=91.0),
-                QualityTarget(metric="vif", statistic="median", value=84.0),
+                QualityTarget(identity=MetricStatKey.parse("vmaf-median"), value=91.0),
+                QualityTarget(identity=MetricStatKey.parse("vif-median"), value=84.0),
             ],
             limiter_keys=["vmaf_median"],
         )

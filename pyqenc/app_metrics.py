@@ -1,21 +1,23 @@
-"""Pipeline metrics collection and reporting.
+"""App metrics — telemetry about how the app runs (timing, convergence).
 
-Provides `MetricsCollector` (Protocol), `YamlMetricsCollector` (YAML-backed
-implementation), and `NoOpMetricsCollector` (no-op for tests / standalone callers).
+Provides `AppMetricsCollector` (Protocol), `YamlAppMetricsCollector` (YAML-backed
+implementation), and `NoOpAppMetricsCollector` (no-op for tests / standalone callers).
 
-Metrics are accumulated throughout a pipeline run and persisted incrementally to
+App metrics are accumulated throughout a pipeline run and persisted incrementally to
 ``metrics.yaml`` in the work directory root using the `.tmp`-then-rename atomic
 write protocol.  The report survives interruptions and resumes across runs.
 
 Usage::
 
-    collector = YamlMetricsCollector(work_dir=config.work_dir)
+    collector = YamlAppMetricsCollector(work_dir=config.work_dir)
     # ... run phases ...
     collector.flush()
 """
 
 __all__ = [
+    "AppMetricKey",
     "AppMetrics",
+    "AppMetricsCollector",
     # Pydantic models
     "AttemptStats",
     "ConvergenceStats",
@@ -23,16 +25,12 @@ __all__ = [
     "ConvergenceUpdate",
     "DottedEntry",
     "DottedGroup",
-    # Enums
-    "MetricKey",
-    # Protocol + implementations
-    "MetricsCollector",
     # Type aliases
     "MetricsStore",
-    "NoOpMetricsCollector",
+    "NoOpAppMetricsCollector",
     "TimeDistribution",
     "TopLevelEntry",
-    "YamlMetricsCollector",
+    "YamlAppMetricsCollector",
     # Internal helpers exposed for testing
     "_ConvergenceAccumulator",
     "_compute_convergence",
@@ -81,12 +79,12 @@ _TEMP_SUFFIX: str = ".tmp"
 # ---------------------------------------------------------------------------
 
 
-class MetricKey(StrEnum):
+class AppMetricKey(StrEnum):
     """Flat top-level keys identifying pipeline timing categories.
 
     Each value is a plain string with no dot separator (e.g. ``"encoding"``,
     ``"merge"``).  Dotted keys are formed at call time by passing one or more
-    suffix parts to :meth:`MetricsCollector.time` or :meth:`MetricsCollector.step`,
+    suffix parts to :meth:`AppMetricsCollector.time` or :meth:`AppMetricsCollector.step`,
     which joins them with :data:`~pyqenc.constants.DOTTED_KEY_SEPARATOR` internally.
     """
 
@@ -166,7 +164,7 @@ def _format_duration(seconds: int) -> str:
 
 @dataclass
 class ConvergenceUpdate:
-    """Passed by phases to :meth:`MetricsCollector.step` when a chunk's
+    """Passed by phases to :meth:`AppMetricsCollector.step` when a chunk's
     quality search converges.
     """
 
@@ -256,7 +254,7 @@ class AppMetrics(BaseModel):
 # ---------------------------------------------------------------------------
 
 _live_collectors_lock: threading.Lock = threading.Lock()
-_live_collectors: set[YamlMetricsCollector] = set()
+_live_collectors: set[YamlAppMetricsCollector] = set()
 
 
 def flush_all_metrics() -> None:
@@ -279,7 +277,7 @@ def flush_all_metrics() -> None:
 # ---------------------------------------------------------------------------
 
 
-class MetricsCollector(Protocol):
+class AppMetricsCollector(Protocol):
     """Phase-facing recording surface for pipeline metrics.
 
     Defined as a ``Protocol`` so that alternative backends (e.g. OpenTelemetry,
@@ -293,7 +291,7 @@ class MetricsCollector(Protocol):
     it is reserved for the orchestrator.
     """
 
-    def time(self, key: MetricKey, *parts: str) -> contextlib.AbstractContextManager[None]:
+    def time(self, key: AppMetricKey, *parts: str) -> contextlib.AbstractContextManager[None]:
         """Return a context manager that measures wall-clock elapsed for *key*.
 
         Records ``time.monotonic()`` on enter; on exit accumulates elapsed
@@ -304,7 +302,7 @@ class MetricsCollector(Protocol):
 
     def step(
         self,
-        key:                MetricKey,
+        key:                AppMetricKey,
         *parts:             str,
         convergence_update: ConvergenceUpdate | None = None,
     ) -> None:
@@ -403,21 +401,21 @@ def _compute_convergence(
 # ---------------------------------------------------------------------------
 
 
-class NoOpMetricsCollector(MetricsCollector):
-    """Concrete no-op implementation of :class:`MetricsCollector`.
+class NoOpAppMetricsCollector(AppMetricsCollector):
+    """Concrete no-op implementation of :class:`AppMetricsCollector`.
 
     Inherits directly from the Protocol so the type checker verifies
     conformance at definition time.  Discards all data without performing
     any I/O.  Used in tests and ``api.py`` standalone callers.
     """
 
-    def time(self, key: MetricKey, *parts: str) -> contextlib.AbstractContextManager[None]:
+    def time(self, key: AppMetricKey, *parts: str) -> contextlib.AbstractContextManager[None]:
         """Return a no-op context manager (``contextlib.nullcontext``)."""
         return contextlib.nullcontext()
 
     def step(
         self,
-        key:                MetricKey,
+        key:                AppMetricKey,
         *parts:             str,
         convergence_update: ConvergenceUpdate | None = None,
     ) -> None:
@@ -516,8 +514,8 @@ def _compute_dotted_groups(store: MetricsStore) -> dict[str, DottedGroup]:
 # ---------------------------------------------------------------------------
 
 
-class YamlMetricsCollector(MetricsCollector):
-    """Concrete YAML-backed implementation of :class:`MetricsCollector`.
+class YamlAppMetricsCollector(AppMetricsCollector):
+    """Concrete YAML-backed implementation of :class:`AppMetricsCollector`.
 
     Accumulates wall-clock timing and quality convergence data throughout a
     pipeline run and persists them incrementally to ``metrics.yaml`` in the
@@ -607,10 +605,10 @@ class YamlMetricsCollector(MetricsCollector):
         logger.debug("Metrics: resumed from %s", metrics_file)
 
     # ------------------------------------------------------------------
-    # MetricsCollector interface
+    # AppMetricsCollector interface
     # ------------------------------------------------------------------
 
-    def time(self, key: MetricKey, *parts: str) -> contextlib.AbstractContextManager[None]:
+    def time(self, key: AppMetricKey, *parts: str) -> contextlib.AbstractContextManager[None]:
         """Return a context manager that accumulates elapsed seconds for *key*.
 
         Records ``time.monotonic()`` on enter; on exit accumulates elapsed into
@@ -621,11 +619,11 @@ class YamlMetricsCollector(MetricsCollector):
         return self._TimingContext(self, DOTTED_KEY_SEPARATOR.join((key, *parts)))
 
     class _TimingContext:
-        """Inner context manager used by :meth:`YamlMetricsCollector.time`."""
+        """Inner context manager used by :meth:`YamlAppMetricsCollector.time`."""
 
         __slots__ = ("_collector", "_key", "_t0")
 
-        def __init__(self, collector: YamlMetricsCollector, resolved_key: str) -> None:
+        def __init__(self, collector: YamlAppMetricsCollector, resolved_key: str) -> None:
             self._collector = collector
             self._key       = resolved_key
             self._t0:  float = 0.0
@@ -668,7 +666,7 @@ class YamlMetricsCollector(MetricsCollector):
 
     def step(
         self,
-        key:                MetricKey,
+        key:                AppMetricKey,
         *parts:             str,
         convergence_update: ConvergenceUpdate | None = None,
     ) -> None:

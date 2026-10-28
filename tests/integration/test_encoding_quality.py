@@ -5,8 +5,10 @@ from typing import cast
 
 import pytest
 
-from pyqenc.metrics import MetricKey, MetricsCollector
+from pyqenc.app_config import load_app_config
+from pyqenc.app_metrics import AppMetricKey, AppMetricsCollector
 from pyqenc.models import CleanupLevel, QualityTarget, Strategy
+from pyqenc.quality_metrics import MetricStatKey, MetricType, TargetedMetrics
 from pyqenc.stream_model import VideoStreamChunk
 from pyqenc.utils.visualization import QualityMeasurer
 from tests.fixtures.metric_fixtures import (
@@ -16,6 +18,18 @@ from tests.fixtures.metric_fixtures import (
     get_expected_vmaf_stats,
 )
 from tests.fixtures.video_fixtures import sample_video_exists
+
+_PLAN = load_app_config(default_only=True).build_encoding_plan(
+    optimize=True, measure=True,
+)
+
+
+def _tm(**pairs: float) -> TargetedMetrics:
+    """Build a targeted map from sidecar-form keys (``_tm(vmaf_min=96.0)``)."""
+    return TargetedMetrics({MetricStatKey.parse(key): value for key, value in pairs.items()})
+
+
+
 
 
 class TestEncodingQualityIntegration:
@@ -33,8 +47,8 @@ class TestEncodingQualityIntegration:
 
         # Define quality targets
         targets = [
-            QualityTarget(metric="vmaf", statistic="min",    value=94.0),
-            QualityTarget(metric="vmaf", statistic="median", value=95.0),
+            QualityTarget(identity=MetricStatKey.parse("vmaf-min"), value=94.0),
+            QualityTarget(identity=MetricStatKey.parse("vmaf-median"), value=95.0),
         ]
 
         # Note: This test uses mock files, so we can't actually run the evaluator
@@ -47,22 +61,22 @@ class TestEncodingQualityIntegration:
     def test_quality_target_judging(self):
         """Test quality target judging logic."""
         targets = [
-            QualityTarget(metric="vmaf", statistic="min",    value=95.0),
-            QualityTarget(metric="ssim", statistic="median", value=0.98),
+            QualityTarget(identity=MetricStatKey.parse("vmaf-min"), value=95.0),
+            QualityTarget(identity=MetricStatKey.parse("ssim-median"), value=0.98),
         ]
 
         # Simulate metrics that meet targets
         metrics_pass = {
-            "vmaf": {"min": 95.5, "median": 97.0},
-            "ssim": {"min": 0.97, "median": 0.985},
+            MetricType.VMAF: {"min": 95.5, "median": 97.0},
+            MetricType.SSIM: {"min": 0.97, "median": 0.985},
         }
 
         # Check all targets met
         all_met = True
         for target in targets:
-            metric_stats = metrics_pass.get(target.metric)
+            metric_stats = metrics_pass.get(target.identity.metric)
             if metric_stats:
-                actual = metric_stats.get(target.statistic)
+                actual = metric_stats.get(target.identity.statistic.value)
                 if actual is None or actual < target.value:
                     all_met = False
                     break
@@ -71,15 +85,15 @@ class TestEncodingQualityIntegration:
 
         # Simulate metrics that fail targets
         metrics_fail = {
-            "vmaf": {"min": 93.0, "median": 96.0},  # min below target
-            "ssim": {"min": 0.97, "median": 0.985},
+            MetricType.VMAF: {"min": 93.0, "median": 96.0},  # min below target
+            MetricType.SSIM: {"min": 0.97, "median": 0.985},
         }
 
         all_met = True
         for target in targets:
-            metric_stats = metrics_fail.get(target.metric)
+            metric_stats = metrics_fail.get(target.identity.metric)
             if metric_stats:
-                actual = metric_stats.get(target.statistic)
+                actual = metric_stats.get(target.identity.statistic.value)
                 if actual is None or actual < target.value:
                     all_met = False
                     break
@@ -190,7 +204,7 @@ class TestEncodeChunkQualitySearchV2Integration:
 
         strategy = self._make_strategy()
         chunk    = self._make_chunk(tmp_path)
-        target   = QualityTarget(metric="vmaf", statistic="min", value=95.0)
+        target   = QualityTarget(identity=MetricStatKey.parse("vmaf-min"), value=95.0)
 
         # Build a real AttemptMetadata so .quality is a proper Decimal.
         attempt_path = tmp_path / "chunk_001.q18.0.mkv"
@@ -204,12 +218,12 @@ class TestEncodeChunkQualitySearchV2Integration:
         )
 
         # Sidecar with vmaf_min within acceptance_delta → early acceptance on first record().
-        from pyqenc.quality import MetricType
+        from pyqenc.quality_metrics import MetricType
         vmaf_delta = MetricType.VMAF.info.acceptance_delta
         fake_sidecar = {
             "sampling":    10,
             "frame_count": 8,
-            "metrics":     {"vmaf_min": 95.0 + vmaf_delta * 0.5},
+            "metrics":     _tm(vmaf_min=95.0 + vmaf_delta * 0.5),
         }
 
         evaluator = MagicMock(spec=QualityMeasurer)
@@ -218,12 +232,13 @@ class TestEncodeChunkQualitySearchV2Integration:
         encoder = ChunkEncoder(
             quality_measurer  = evaluator,
             work_dir          = tmp_path,
-            collector         = MagicMock(spec=MetricsCollector),
+            plan              = _PLAN,
+            collector         = MagicMock(spec=AppMetricsCollector),
             crop_params       = None,
             cleanup_level     = CleanupLevel.NONE,
             visual_hash       = True,
             sampling           = 10,
-            metric_prefix     = MetricKey.ENCODING,
+            metric_prefix     = AppMetricKey.ENCODING,
             measure_attempts  = True,
         )
 
@@ -253,12 +268,13 @@ class TestEncodeChunkQualitySearchV2Integration:
 
         from pyqenc.models import QualityTarget
         from pyqenc.phases.encoding import ChunkEncoder
-        from pyqenc.quality import MetricType, QualityLogs, QualityMeasurement
+        from pyqenc.quality import QualityLogs, QualityMeasurement
+        from pyqenc.quality_metrics import MetricType
         from pyqenc.utils.visualization import QualityMeasurer
 
         strategy = self._make_strategy()
         chunk    = self._make_chunk(tmp_path)
-        target   = QualityTarget(metric="vmaf", statistic="min", value=95.0)
+        target   = QualityTarget(identity=MetricStatKey.parse("vmaf-min"), value=95.0)
 
         # Fake measurement result: passes with surplus within acceptance_delta → early acceptance.
         fake_measurement = MagicMock(spec=QualityMeasurement)
@@ -278,12 +294,13 @@ class TestEncodeChunkQualitySearchV2Integration:
         encoder = ChunkEncoder(
             quality_measurer  = evaluator,
             work_dir          = tmp_path,
-            collector         = MagicMock(spec=MetricsCollector),
+            plan              = _PLAN,
+            collector         = MagicMock(spec=AppMetricsCollector),
             crop_params       = None,
             cleanup_level     = CleanupLevel.NONE,
             visual_hash       = True,
             sampling          = 10,
-            metric_prefix     = MetricKey.ENCODING,
+            metric_prefix     = AppMetricKey.ENCODING,
             measure_attempts  = True,
         )
 

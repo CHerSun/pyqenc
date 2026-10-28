@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, TypeIs, assert_never
 
 from pydantic import BaseModel
 
+from pyqenc.app_metrics import AppMetricKey
 from pyqenc.constants import (
     CHAPTERS_FILENAME,
     EXTRACTED_DIR,
@@ -40,7 +41,6 @@ from pyqenc.constants import (
     TEMP_SUFFIX,
     TIMESTAMPS_FILENAME,
 )
-from pyqenc.metrics import MetricKey
 from pyqenc.models import PhaseOutcome, SizedFingerprintYaml
 from pyqenc.phase import (
     Artifact,
@@ -75,7 +75,7 @@ from pyqenc.utils.yaml_utils import load_model, save_model
 
 if TYPE_CHECKING:
     from pyqenc.app_config import AppConfig
-    from pyqenc.metrics import MetricsCollector
+    from pyqenc.app_metrics import AppMetricsCollector
 
 # ---------------------------------------------------------------------------
 # extraction.yaml — the stream inventory sidecar (re-homed, Req 21)
@@ -491,7 +491,7 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
     name:        str       = "extraction"
     SIDECAR_NAME = "extraction.yaml"
     DEPENDS_ON:  ClassVar[tuple[type[Phase], ...]] = (JobPhase,)
-    _METRIC_KEY: MetricKey = MetricKey.EXTRACTION
+    _METRIC_KEY: AppMetricKey = AppMetricKey.EXTRACTION
 
     def __init__(
         self,
@@ -500,7 +500,7 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
         *,
         video_required: bool              = True,
         materialize:    bool              = False,
-        collector:      MetricsCollector,
+        collector:      AppMetricsCollector,
     ) -> None:
         super().__init__(config, phases, collector=collector)
 

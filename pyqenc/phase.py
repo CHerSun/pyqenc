@@ -41,15 +41,15 @@ from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, Self
 
+from pyqenc.app_metrics import AppMetricKey
 from pyqenc.constants import FAILURE_SYMBOL_MINOR, SUCCESS_SYMBOL_MINOR, WARNING_SYMBOL
-from pyqenc.metrics import MetricKey
 from pyqenc.models import CleanupLevel, CropParams, PhaseOutcome, Strategy
 from pyqenc.state import ArtifactState
 from pyqenc.utils.log_format import emit_phase_banner, emit_phase_start, log_recovery_line
 
 if TYPE_CHECKING:
     from pyqenc.app_config import AppConfig
-    from pyqenc.metrics import MetricsCollector
+    from pyqenc.app_metrics import AppMetricsCollector
     from pyqenc.models import EncodingPlan
 
 __all__ = [
@@ -435,7 +435,7 @@ class Phase[ResultT: PhaseResult](ABC):
     name:              str       = "phase"
     DEPENDS_ON: ClassVar[tuple[type[Phase], ...]] = ()
     BANNER:            bool      = True
-    _METRIC_KEY:       MetricKey = MetricKey.RECOVERY  # overridden per phase
+    _METRIC_KEY:       AppMetricKey = AppMetricKey.RECOVERY  # overridden per phase
     _DRY_RUN_READONLY: bool      = False
 
     def __init__(
@@ -443,7 +443,7 @@ class Phase[ResultT: PhaseResult](ABC):
         config:  AppConfig,
         phases:  PhaseRegistry,
         *,
-        collector: MetricsCollector,
+        collector: AppMetricsCollector,
     ) -> None:
         """Store the shared constructor state and the registry link.
 
@@ -462,7 +462,7 @@ class Phase[ResultT: PhaseResult](ABC):
             collector: Metrics collector; the template owns all timing calls.
         """
         self._config:    AppConfig        = config
-        self._collector: MetricsCollector = collector
+        self._collector: AppMetricsCollector = collector
         self._phases:    PhaseRegistry    = phases
         self._deps:      PhaseDependencies = PhaseDependencies(phases, self)
         self.result:     ResultT | None  = None
@@ -529,7 +529,7 @@ class Phase[ResultT: PhaseResult](ABC):
         #    no state passes between the hooks in memory (spec 2026-10-07,
         #    Req 54; the load-bearing invariant of the split).
         try:
-            with self._collector.time(MetricKey.RECOVERY):
+            with self._collector.time(AppMetricKey.RECOVERY):
                 self._invalidate()
                 recovery = self._recover()
         except RecoveryError as exc:
@@ -873,7 +873,7 @@ def _build_registry(
     force:       bool,
     cleanup:     CleanupLevel,
     no_metrics:  bool,
-    collector:   MetricsCollector,
+    collector:   AppMetricsCollector,
     crop_params: CropParams | None = None,
     materialize: bool              = False,
     *,

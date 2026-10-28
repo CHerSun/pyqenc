@@ -4,15 +4,6 @@
 - Each items needs validation and design consideration before any implementation.
 - Items are to be deleted, once they go into the code (after spec is approved or after implementation if done without spec).
 
-## 6. Working with app metrics I/O errors
-
-- `_write_atomic` swallows `OSError` (`pyqenc/metrics.py:752-760`); `_try_resume` swallows load failures (`pyqenc/metrics.py:590-592`). Non-fatal by design — but a user can finish a multi-hour encode and silently end up with a stale or missing `metrics.yaml`.
-
-Human input: metrics are not what the user wants to get - he wants to get audio/video processed. So it's just an extra nice-to-have info.
-Warning is enough, but maybe make it log rarer, like exponential delay (first failure - ignore, happens; on second consecutive failure (2^1) - log warning; after another 4 consecutive failure (delta of 2^2 from previous) - log failure that still failing after N attempts; after another 8 failures (2^3 delta from previous; this is probably max reasonable step, which shouldn't increase further; even worse - might log on every failed consecutive attempt after that); on succesful write - reset the counter)
-
----
-
 ## 16. Measuring frames sampling is never disabled for few frames
 
 - Sampling applies unconditionally via `select='not(mod(n,{subsample}))'` (`pyqenc/quality.py:377,400`); the only validation is `metrics_sampling >= 1` (`pyqenc/phases/measure.py:933-934`). No dynamic chunk's frame-count guard anywhere; `merge.py:404-405` only logs that subsampling may miss outliers.
@@ -60,6 +51,13 @@ CRF above is when using H.265-anime at slow preset. One problem is how to estima
 But we can use built-in profile quality range limiting for running fixed-CRF encodes on chunks to get the quality measures.
 
 Another question is I want targets to favor retaining natural film grain, not favoring blurred results. h.265-anime is particularly tuned for this, so probably we should run 2 encodes at fixed CRFs - with plain h.265 and with h.265-anime variant at the same CRF values. And compare measured metrics to better understand the difference - where we could give more slack, where we should make things tighter (in favor of retention of original looks, but at sane quality levels).
+
+Another thought:
+
+- we have currently a separate `--targets` and a separate `--quality` (`-q`). And probably checks to avoid user giving both (probably not).
+- `-q` takes precedence, even if both are given.
+- what if we collapse targets and quality into a single key? Key accepting: fixed quality, target profile or targets (some order, but their format is different)
+  i.e. if user told `-q 18` - he wants fixed quality. if he gave `-q high` - he wants high targets preset (translates into explicit targets). if he gave `vmaf-med:97` - he wants explicit targets. This way we can't be contradictory.
 
 ---
 
@@ -411,7 +409,7 @@ With the CLI going intent-based, the phase-mirroring API becomes the odd one out
 
 ## 102. Evolutionary / anytime encoding — deficit-driven scheduler (idea)
 
-**Status:** idea (discussed 2026-10-05; NOT for right now — needs a full scheduler rework, or an alternative scheduler. Deliberately separate from §51: QualitySearchV4 stays the per-chunk next-attempt search, untouched by this)
+**Status:** idea (discussed 2026-10-05; extended 2026-10-28 with the size-targeting objective — see the rider section below; NOT for right now — needs a full scheduler rework, or an alternative scheduler. Deliberately separate from §51: QualitySearchV4 stays the per-chunk next-attempt search, untouched by this)
 
 Today the encoding phase finishes chunks one at a time — each chunk runs its whole CRF search before the pipeline moves on. The idea inverts the order: encode ALL chunks once at an initial quality (wave 1 → a complete, valid video immediately), measure, then iteratively re-encode the WORST chunks toward their targets — always improving the largest deficit — until convergence. The user can stop anytime and materialize as-is.
 
@@ -438,6 +436,32 @@ Research links (from the 2026-10-05 discussion):
 - VCA — Video Complexity Analyzer (per-frame SI/TI-style complexity without encoding; aimed at shot detection + per-title encoding): https://vca.itec.aau.at - EVCA — Extended Video Complexity Analyzer (ACM MMSys 2024) — complexity features for rate control and per-segment parameter selection: https://dl.acm.org/doi/10.1145/3625468.3652171
 - IVCA — Inter-relation-aware Video Complexity Analyzer: https://arxiv.org/html/2407.00280v1
 - "Video Encoding Complexity Characterization" (IEEE Access) — SI/TI vs encoding complexity; scene complexity ≠ encoding complexity: https://ieeexplore.ieee.org/document/9900917
+
+### Size-targeting objective — second rider on the same scheduler (2026-10-28 discussion)
+
+Chunking makes global 2-pass VBR impossible — splitting the total budget across chunks IS the per-title encoding problem (Netflix Dynamic Optimizer does it as a full-grid batch). Evolution is the closed-loop, sparse-update version: encode all chunks once at a fixed knob (wave 1), measure — we then know per-chunk metrics, per-chunk sizes, and the exact total — and re-encode outliers until the total converges on the target. Best effort, no guarantee — same posture as §51's unreachable targets: converge until a stop fires, then report achieved size vs target with the gap stated.
+
+Converged mechanics (rulings from the discussion):
+
+- **Water level = live winner-population medians** over the same pair set fixed-mode comparison uses (p10 + median × all four metrics). Outliers are detected against it, and it recomputes after every actively-accepted winner replacement — no stable external target. Median robustness makes the level a quasi-stable reference (it doesn't chase the peaks it trims); it migrates as winner mass settles.
+- **Two signals, two jobs:** the water level is only the fairness reference (who's mispriced); the exact size gap (total vs target) drives direction, stop, and the shrink→fill flip. Never mixed.
+- **Direction-gated acceptance:** over budget → only size-reducing winner replacements are accepted. Structurally kills ping-pong against the moving level.
+- **Priority = perceptually-adjusted worst-dimension deviation × raw size share.** Raw size is the leverage (how much the total moves); density (size per second) is the mispricing signal, frozen at wave 1 — later waves confound density with diverging knobs. Minimum-size threshold below which a chunk is never worth a re-encode. Two tolerances with different justifications: ROI (size-based — coarse steps where payoff is big) and perceptual (motion-based — deeper cuts where the eye won't notice).
+- **Worst dimension governs:** harvest is bounded by the chunk's smallest surplus across the pair set (per-stat floors veto); fill is driven by the deepest deficit. Outlier thresholds are relative to the run's own spread — raw deviations are incomparable across metrics (SSIM compressed near 100, PSNR in dB). Worst-of aggregation is already house vocabulary (`MetricMap.worst_of`).
+- **Motion tolerance = motion-weighted water level:** adjusted quality Q* = measured + motion bonus, water-fill on Q*. Grounded in temporal masking (VMAF carries a motion feature; ITU P.1203 models it). Grain trap: complexity ≠ motion — grain is expensive-but-static, so a density-based motion bonus sends grainy chunks to the harvest line first, exactly what VIF guards (§82); the free wave-1-density proxy conflates them, TI from the already-linked VCA/EVCA separates them, or VIF floors veto. VMAF already bakes masking in — our own factor stacked on VMAF double-counts; PSNR/SSIM/VIF are motion-blind and are where adjustment is principled.
+- **Attempts are the substrate:** every attempt stays keyed by its quality-embedded filename, so the loop consumes already-existing attempts for free before encoding anything new. Sparse updates vs the manual alternative (whole-movie CRF bisection re-encodes all chunks per iteration).
+- **Greedy and order-dependent:** with a live level, the priority rule IS the algorithm — different rules converge to different quality distributions at similar sizes.
+
+Rulings still open before any spec:
+
+- Quality floor on the shrink path — unbounded, the loop starves the easiest chunks (config-targets vocabulary exists; fixed runs currently ignore targets).
+- Which stats get the motion adjustment (and the VMAF double-count); the floor becomes a per-chunk band (motion-tolerance factor in config).
+- Termination set: within tolerance, best-so-far acceptance, min-expected-gain threshold (near convergence each re-encode buys little), unreachability exit (knob range/floors exhausted → stop, report).
+- Scope: single-strategy or the post-optimization winner — fixed-mode strategy comparison assumes nominally equal knobs, per-chunk deviation breaks that premise. Composes with §133 (massive reductions are downscale territory; knob evolution handles moderate deltas).
+- What "size" is: target file size − audio size (known upfront) − container overhead = the video budget the loop steers.
+- Measurement is implied by the mode (flag-semantics doctrine: measure iff consumed).
+
+---
 
 Adjacent but separate (same discussion, NOT folded into this item): intra-chunk quality refinement via x264/x265 `--zones` (per-frame-range `q=`/`b=`; x265 `crf=` zones silently don't work; SVT-AV1 has none — our segment+concat architecture IS its standard workaround) — a per-chunk post-convergence refinement idea, also not now. Zone mechanics docs: x264 manpage (https://manpages.debian.org — frame-based `<start>,<end>,q=|b=`); x265 docs (https://x265.readthedocs.io — `q=`/`b=` only).
 
@@ -522,47 +546,9 @@ running at all until the ffmpeg version question is settled.
 
 ---
 
-## 116. Metric+stat value class — retarget every stringly `"{metric}_{stat}"` / `"{metric}-{stat}"` site
-
-**Status update 2026-10-12:** the minimal identity type landed with the unified-quality-summaries spec (`MetricStatKey` in `pyqenc/quality.py`: closed sets, canonical `vmaf_median` sidecar form, `%`-form display, tolerant parse, pydantic dict-key alias; `QualityTarget.key()`). The remainder below is the full migration this item still owns.
-
-**Status:** needs thinking (user direction 2026-10-10; explicit-typing rule)
-
-Measured metrics flow through the system as `dict[str, float]` keyed by convention strings, flattened/selected/compared at every layer — and every site re-derives the key by hand: `f"{t.metric}_{t.statistic}"` in the attempt pick-up, the targeted-subset filter, `_score_attempt`, `failed_targets`, the winner-limiter tallies, optimization's synthetic ruler, merge's rendered-keys/presentation bar. Two vocabularies exist for the same identity: underscore (`vmaf_min` — sidecar keys, metric dicts) and dash (`vmaf-min` — CLI/config/`QualityTarget.parse` targets). Nothing type-checks that a key is well-formed; nothing owns the pair.
-
-Related uniformity gap (user, 2026-10-10): **the full measured set vs the targeted subset** — deriving one from the other is hand-rolled at several sites (`_winner_targeted_metrics`' mode-aware subset for winner sidecars, the pick-up's `targets_set_reused` filter, merge's `_summary_rendered_keys`, the search's target-key projection). ONE uniform method should own full→targeted (mode-aware: search = the targets' keys; fixed = the comparison stat set), expressed over the key class — every consumer asks it, nobody re-implements the filter.
-
-Direction: a value class for the metric+stat identity —
-
-- frozen, **hashable + comparable** → usable directly as the dict key of measured-metrics maps (replacing `dict[str, float]` with `dict[MetricStat, float]` or an annotated alias at the boundary);
-- **strict canonical serialization** (its yaml/storage form) and **tolerant parsing** (both vocabularies + display), the `CropYaml` pattern applied to a key type — pydantic dict keys need the annotated boundary (canonical string on disk, class in memory);
-- `QualityTarget` re-targeted onto it (fields `metric: str` + `statistic: str` fold into the class) and gains its own strict serialization / tolerant parse (`"vmaf-min:95"` config vocabulary included);
-- **parsing included** (user, 2026-10-10): each metric becomes its own class (PSNR / SSIM / VIF / VMAF — MetricInfo-shaped) that KNOWS how to parse its own logs (`.log` stats files, VMAF JSON), emitting explicitly typed results — replacing the generic file-type-keyed parser in the visualization/metrics plumbing. The metric identity itself is an enum-like STATIC thing (one instance, never re-instantiated per parsed line — today `MetricType(...).info` constructs on access), and the static identity is what the new metric-stat keying, the old `MetricInfo` and `QualityTarget` all attach to via explicit typing;
-- retarget sites: quality.py (`MetricType`/`flatten_metric_stats`/ search steering), encoding pick-up + winner targeting, optimization (synthetic targets, summaries), merge (rendered keys, replay bar), measure/visualization stats plumbing.
-
-Open design questions: naming (`MetricKey` is TAKEN — the perf-metrics timing enum in `pyqenc/metrics.py`); whether the stat half becomes its own typed set (today a free-form string — `min`/`p10`/`median`…); whether per-metric classes carry the MetricInfo descriptor data (normalize/deficit/comparison_range/acceptance_delta) or compose with it; interplay with §111's summary-table rendering (the dash vocabulary is its display form); sequencing vs the QualitySearch V4 spec (§78 rides that same refactor wave — do the record type and the key type together?).
-
-`FIXED_COMPARISON_STATS` should also become explicit targets?
-
-and need a distinction between full metrics set and targeted metrics set at typing level, so that we don't have to guess.
-
-
-Extra from human:
-
-- Metric vs Stat vs Metric-Stat pair vs Target (metric-stat-value) vs Targets (a set of Target)
-- Each owns its own mechanics, explicitly, (disowned functions are strongly discouraged). Naming. Targeted-set selection from full measured metrics, etc.
-- Anchor targets also belong here (targets)
-- Deltas / basic Scoring should be also based on those classes.
-- Ideally the last place where we see plain values - are the measurements logs or user inputs (both are inputs). Since then full path should be class-based.
-- Single instanciation where possible (i.e. user input targets are instanciated once and passed as that object ever since).
-
-Bycatch (2026-10-26): the display half already exists and is bypassed — `QualityTarget.__str__` (`models.py:643`) owns `vmaf-min≥95` and `parse` is already a classmethod (`models.py:581`), yet the three phase `Targets:` kv lines hand-roll `f"{t.metric}-{t.statistic}≥{t.value}"` (encoding.py:1942, optimization.py:432, merge.py:410). Pointing those at the class is immediately doable; the full class-ownership fold is this item's body.
-
----
-
 ## 117. Observability research — traces/metrics for a CLI-first tool; replace the app-metrics stub
 
-The current app-metrics (`metrics.yaml`, `MetricsCollector`) is a temporary stub, and it shows. Industry standard observability has three pillars — **traces, metrics, logs**. We have logs. Our metrics suck. We have no traces. And nothing is collectible externally (no Prometheus/OpenTelemetry export).
+The current app-metrics (`metrics.yaml`, `AppMetricsCollector`) is a temporary stub, and it shows. Industry standard observability has three pillars — **traces, metrics, logs**. We have logs. Our metrics suck. We have no traces. And nothing is collectible externally (no Prometheus/OpenTelemetry export).
 
 Constraint: pyqenc stays **CLI-first** (potential web UI later). Full OTel/Prometheus adoption is justified only if it ever becomes a service; while CLI, it must still be observable — with a local dump like today's `metrics.yaml`.
 
@@ -656,22 +642,6 @@ Blast radius (verified):
 - Downstream looks mostly untouched: per-strategy effective ranges already exist (`_effective_codec`), `EncodingPlan.fixed_quality` stays a plan-wide "all collapsed" bool (`models.py:685-729`), and merge's fixed provenance quality is already per-output from each strategy's codec (`merge.py:135-144, 264-273, 302-306`). Verify the optimization sidecar/replay re-derivation paths read per-strategy quality, not the CLI value.
 
 **Questions to think about:** is the need real enough to justify the CLI surface (alternate: per-profile fixed quality in config — the profile layer already owns ranges)? Error messages must teach the pairing rule (quality binds to the preceding selector).
-
----
-
-## 130. Review dependencies
-
-There are quite heavy dependencies, a total of almost 250 MB! Need a review, if we really need them or if they can be replaced by a more lightweight alternatives:
-
-  112.0 MiB ████      ▏/cv2
-   41.0 MiB █▌        ▏/pandas
-   26.4 MiB ▉         ▏/matplotlib
-   22.0 MiB ▊         ▏/numpy
-   20.2 MiB ▋         ▏/numpy.libs
-   14.6 MiB ▌         ▏/PIL
-   11.3 MiB ▍         ▏/fontTools
-
-See also: python 3.15, major dependencies bump.
 
 ---
 
@@ -940,7 +910,7 @@ https://www.structlog.org/en/stable/
 
 ---
 
-## 147. Long-job visibility — start lines + count-based progress bars for silent phases
+## 147. Long-job visibility — starting/finished lines + count-based progress bars for silent phases
 
 Evidence (user, full-movie auto run, 2026-10-10):
 
@@ -952,7 +922,15 @@ Evidence (user, full-movie auto run, 2026-10-10):
 - 5 minutes of extraction work with zero intermediate output: no per-artifact starting lines, no count-based progress bar — the user is kept blind during long jobs.
 - The count-based bar doctrine already exists (ONE advance per item finalization, weighted by the item's duration; duration-based is for fine-grained jobs like merge/measure) — extraction's artifact materialization fits the count-based shape exactly.
 - Layering with §60: §60 asks for DEBUG start/finish lines on every long job and external call (developer visibility); THIS item is the user-facing layer — INFO start lines for long jobs and progress bars over itemized work. Open design question: the mechanism home (phase hook vs. runner facility), not per-site ad-hoc logging.
-- Audit needed: which phases have no user-facing progress at all today (extraction confirmed; sweep the rest).
+- Confirmed silent so far: extraction + audio (2026-10-28); audit the rest.
+
+Direction fixed (user, 2026-10-28): replicate the encoding/optimization INFO shape in extraction and audio —
+
+- ONE phase-level starting line, emitted right before actual task processing begins (after recovery/plan previews): the model is `Starting encoding: %d pair(s) to encode, %d already complete` (`phases/encoding.py:2264`) and its optimization twin (`phases/optimization.py:868`).
+- Per-task finished lines stating exactly what finished, after each task — the model is encoding's winner line family (`fmt_chunk_final` call sites, e.g. `phases/encoding.py:1388`).
+- Why both phases qualify today: all per-item work is DEBUG-only — extraction materializes tracks (`phases/extraction.py:1124`), subtitles (`:1020`), attachments (`:1058`), chapters (`:1206`), timestamps (`:311`) silently; audio produces chains silently (`phases/audio.py:511`). The INFO surface is plan previews only — extraction's `Materialization plan:` (`phases/extraction.py:724`), audio's `Sources: %d (track, chain) output(s) to produce` (`phases/audio.py:499`) — then silence until the Phase.run closer (§108).
+
+**Questions to think about:** how the starting line layers with the existing pre-work tables (streams/tracks Want/Present, selector, materialization plan); does the count-based progress bar (the original ask above) still ride along once starting+finished lines exist, or do the lines suffice; the mechanism home (phase hook vs. runner facility) stays open.
 
 ---
 
@@ -981,7 +959,15 @@ Evidence (user, full-movie auto run, 2026-10-10):
 
 ---
 
-## Last known = 150
+## 151. Specs rearrangement
+
+- Move specs from `.kiro` into just a specs folder.
+- There are also some `plans` from zcode works, which didn't become full specs. They should probably also be moved into specs folder into properly named subfolders.
+- Reasses if some of specs should be archived already.
+
+---
+
+## Last known = 151
 
 Keep this updated, so we can keep continuous numbering even on last todo item deletion.
 Keep this the last entry for easy human updates.

@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from pyqenc.constants import (
     DEFAULT_SCREENSHOT_COUNT,
@@ -28,7 +28,13 @@ from pyqenc.models import CropParams, Resolution
 from pyqenc.phases.extraction import _probe_streams_json
 from pyqenc.phases.job import JobSidecar
 from pyqenc.phases.probe import ProbeSidecar
-from pyqenc.quality import MetricType, PerMetricStats, flatten_metric_stats
+from pyqenc.quality_metrics import (
+    MeasuredMetrics,
+    MeasuredMetricsYaml,
+    MetricStatKey,
+    MetricType,
+    StatisticType,
+)
 from pyqenc.stream_model import File, LongPathYaml, VideoStream, VideoStreamInfo
 from pyqenc.utils.alive import AdvanceState, BarAdvance, ProgressBar
 from pyqenc.utils.concurrency import run_bounded
@@ -49,11 +55,12 @@ class MeasureSidecar(BaseModel):
     screenshots.  Records source/distorted paths, durations, crop parameters,
     the frame subsampling factor, and per-metric statistics.
 
-    The ``metrics`` field uses the same flat ``{metric_stat: value}`` format
-    as ``AttemptSidecar`` (e.g. ``vmaf_min``, ``ssim_median``), with all
-    ten statistics: min, p05, p10, p25, median, p75, p90, p95, max, std.
-    The YAML key for the sampling factor is ``sampling``.
+    The ``metrics`` field is the full measured set (the role instance in
+    memory; canonical ``vmaf_min`` / ``ssim_median`` string keys on disk,
+    all ten statistics). The YAML key for the sampling factor is ``sampling``.
     """
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
     source_video:               LongPathYaml
     distorted_video:               LongPathYaml
@@ -62,7 +69,7 @@ class MeasureSidecar(BaseModel):
     source_duration_seconds:    float | None          = None
     distorted_duration_seconds:    float | None          = None
     effective_duration_seconds: float | None          = None
-    metrics:                    dict[str, float]      = Field(default_factory=dict)
+    metrics:                    MeasuredMetricsYaml = Field(default_factory=MeasuredMetrics)
 
 
 logger = logging.getLogger(__name__)
@@ -80,7 +87,7 @@ class DistortedMeasureResult:
     graph:           Path | None       # <distorted_stem>.png in measure_dir
     sidecar:         Path | None       # <distorted_stem>.yaml in measure_dir
     screenshots_dir: Path              # <distorted_stem>.screenshots/ in measure_dir
-    metrics:         PerMetricStats # parsed metric statistics
+    metrics:         MeasuredMetrics   # the full measured set
     failed:          bool = False      # measurement failed (contained; empty metrics)
 
 
@@ -366,11 +373,11 @@ async def _run_metrics(
     show_progress:    BarAdvance,
     duration_seconds: float,
     fps_value:        Fraction | None,
-) -> PerMetricStats:
+) -> MeasuredMetrics:
     """Run quality metric computation for one source/distorted pair.
 
     Delegates to ``QualityMeasurer.measure_chunk_async`` (measurement only —
-    the measurer takes no target set, Req 51-53); metric statistics are
+    the measurer takes no target set, Req 51-53); the flat measured set is
     returned. Progress feeds the caller's shared bar through *show_progress*
     (weighted ``PROGRESS`` ticks during the run).
 
@@ -388,7 +395,7 @@ async def _run_metrics(
         fps_value:        Average fps for plot x-axis conversion.
 
     Returns:
-        ``PerMetricStats`` mapping each ``MetricType`` to its key statistics.
+        The flat measured set.
     """
 
     measurer    = QualityMeasurer(metrics_dir)
@@ -585,7 +592,7 @@ def _write_sidecar(
     distorted_video:            Path,
     sampling:                   int,
     crop_params:                CropParams,
-    metrics:                    PerMetricStats,
+    metrics:                    MeasuredMetrics,
     source_duration_seconds:    float | None,
     distorted_duration_seconds: float | None,
     effective_duration_seconds: float | None,
@@ -593,10 +600,9 @@ def _write_sidecar(
     """Write a metrics sidecar YAML file using the ``.tmp``-then-rename protocol.
 
     Records source/distorted paths, durations, sampling factor, crop parameters,
-    and all computed metric statistics in the flat ``{metric_stat: value}``
-    format consistent with ``AttemptSidecar`` (e.g. ``vmaf_min``, ``ssim_median``).
-    On write failure logs a warning and returns without raising so that the
-    graph and screenshots are not lost.
+    and the full measured set (the role instance in memory; canonical
+    ``{metric_stat}`` string keys on disk). On write failure logs a warning
+    and returns without raising so that the graph and screenshots are not lost.
 
     Args:
         path:                       Destination path for the sidecar YAML.
@@ -604,9 +610,9 @@ def _write_sidecar(
         distorted_video:            The distorted (encoded) video path.
         sampling:                   Frame subsampling factor used during computation.
         crop_params:                Resolved crop parameters applied to the source.
-        metrics:                    Computed quality statistics per metric type.
-        source_duration_seconds:    Source video duration in seconds, or ``None``.
-        distorted_duration_seconds: Distorted video duration in seconds, or ``None``.
+        metrics:                    The full measured set.
+        source_duration_seconds:    Source duration in seconds, or ``None``.
+        distorted_duration_seconds: Distorted duration in seconds, or ``None``.
         effective_duration_seconds: ``min(source, distorted)`` duration, or ``None``.
     """
     crop_dict: dict[str, int] | None = {
@@ -616,8 +622,6 @@ def _write_sidecar(
         "right":  crop_params.right,
     }
 
-    flat_metrics = flatten_metric_stats(metrics)
-
     sidecar = MeasureSidecar(
         source_video               = source_video,
         distorted_video            = distorted_video,
@@ -626,7 +630,7 @@ def _write_sidecar(
         effective_duration_seconds = effective_duration_seconds,
         sampling                   = sampling,
         crop_params                = crop_dict,
-        metrics                    = flat_metrics,
+        metrics                    = metrics,
     )
     save_model(path, sidecar)
     logger.debug("Wrote metrics sidecar: %s", path)
@@ -874,10 +878,10 @@ def _log_measure_summary(distorted: list[DistortedMeasureResult]) -> None:
     all_metric_types: list[MetricType] = []
     seen: set[MetricType] = set()
     for t in distorted:
-        for mt in t.metrics:
-            if mt not in seen:
-                all_metric_types.append(mt)
-                seen.add(mt)
+        for key in t.metrics:
+            if key.metric not in seen:
+                all_metric_types.append(key.metric)
+                seen.add(key.metric)
 
     # Column widths
     STEM_WIDTH   = 30
@@ -904,9 +908,8 @@ def _log_measure_summary(distorted: list[DistortedMeasureResult]) -> None:
         size_str  = fmt_size_mb(t.distorted_video.stat().st_size) if t.distorted_video.exists() else "N/A"
         row_parts = [f"{stem:<{STEM_WIDTH}}", f"{size_str:>{SIZE_WIDTH}}"]
         for mt in all_metric_types:
-            stats = t.metrics.get(mt, {})
-            low   = stats.get("min")
-            med   = stats.get("median")
+            low = t.metrics.get(MetricStatKey(mt, StatisticType.MIN))
+            med = t.metrics.get(MetricStatKey(mt, StatisticType.MEDIAN))
             cell  = f"{fmt_metric_value(low)}…{fmt_metric_value(med)}" if low is not None and med is not None else "N/A"
             row_parts.append(f"{cell:>{METRIC_WIDTH}}")
         logger.info("   ".join(row_parts))
@@ -1192,7 +1195,7 @@ async def run_measure(
             # yields a failed result row, never an aborted run.
             eff_dur = effective_durations[video]
             logger.info("%s: measuring", label)
-            metrics: PerMetricStats = {}
+            metrics: MeasuredMetrics = MeasuredMetrics()
             failed  = False
             try:
                 metrics = await _run_metrics(

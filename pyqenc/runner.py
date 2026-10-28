@@ -28,7 +28,7 @@ import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from pyqenc.metrics import METRICS_YAML_FILENAME, MetricsCollector
+from pyqenc.app_metrics import METRICS_YAML_FILENAME, AppMetricsCollector
 from pyqenc.models import CleanupLevel, PhaseOutcome
 from pyqenc.phase import (
     FinalizeContext,
@@ -117,7 +117,7 @@ class Runner:
         self,
         registry:         PhaseRegistry,
         targets:          tuple[type[Phase], ...],
-        collector:        MetricsCollector,
+        collector:        AppMetricsCollector,
         *,
         work_dir:         Path,
         cleanup:          CleanupLevel,
@@ -125,7 +125,7 @@ class Runner:
     ) -> None:
         self._registry:   PhaseRegistry = registry
         self._targets:    tuple[type[Phase], ...]   = targets
-        self._collector:  MetricsCollector         = collector
+        self._collector:  AppMetricsCollector         = collector
         self._work_dir:   LongPath                 = LongPath(work_dir)
         self._cleanup:    CleanupLevel             = cleanup
         self._no_metrics: bool                     = no_metrics

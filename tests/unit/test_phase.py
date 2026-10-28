@@ -22,16 +22,16 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from pyqenc.app_config import AppConfig, load_app_config
+from pyqenc.app_metrics import (
+    AppMetricKey,
+    NoOpAppMetricsCollector,
+    YamlAppMetricsCollector,
+    _live_collectors,
+)
 from pyqenc.constants import (
     FAILURE_SYMBOL_MINOR,
     SUCCESS_SYMBOL_MINOR,
     WARNING_SYMBOL,
-)
-from pyqenc.metrics import (
-    MetricKey,
-    NoOpMetricsCollector,
-    YamlMetricsCollector,
-    _live_collectors,
 )
 from pyqenc.models import CleanupLevel, PhaseOutcome
 from pyqenc.phase import (
@@ -87,7 +87,7 @@ class _StubPhase(Phase):
     """Minimal concrete phase: canned recovery, recording execute, base result."""
 
     name = "stub"
-    _METRIC_KEY = MetricKey.PROBE  # any real member; PROBE is unused by stubs
+    _METRIC_KEY = AppMetricKey.PROBE  # any real member; PROBE is unused by stubs
 
     def __init__(
         self,
@@ -158,9 +158,9 @@ class TestDeclaredDependencies:
         construction is enough for the run to succeed.
         """
         registry: PhaseRegistry = {}
-        target = _DepStubPhase(NoOpMetricsCollector(), Recovery(pending=False), registry=registry)
+        target = _DepStubPhase(NoOpAppMetricsCollector(), Recovery(pending=False), registry=registry)
 
-        dep = _StubPhase(NoOpMetricsCollector(), Recovery(pending=False))
+        dep = _StubPhase(NoOpAppMetricsCollector(), Recovery(pending=False))
         dep.result = dep._make_result(PhaseOutcome.REUSED, [], "already run")
         registry[_StubPhase] = dep  # populated after target construction
 
@@ -171,7 +171,7 @@ class TestDeclaredDependencies:
     def test_missing_declared_dependency_raises_loudly(self) -> None:
         """A declared dependency absent from the registry is never dropped."""
         registry: PhaseRegistry = {}
-        target = _DepStubPhase(NoOpMetricsCollector(), Recovery(pending=False), registry=registry)
+        target = _DepStubPhase(NoOpAppMetricsCollector(), Recovery(pending=False), registry=registry)
         # registry stays empty — the declared dep is absent
 
         with pytest.raises(AssertionError, match="requires _StubPhase"):
@@ -179,9 +179,9 @@ class TestDeclaredDependencies:
 
 
 def _spy_collector() -> MagicMock:
-    from pyqenc.metrics import MetricsCollector
+    from pyqenc.app_metrics import AppMetricsCollector
 
-    collector = MagicMock(spec=MetricsCollector)
+    collector = MagicMock(spec=AppMetricsCollector)
     collector.time.return_value = __import__("contextlib").nullcontext()
     return collector
 
@@ -199,7 +199,7 @@ class TestMemoization:
     def test_second_run_returns_cached_result_without_rerunning_recovery(
         self, tmp_path: Path
     ) -> None:
-        phase = _StubPhase(NoOpMetricsCollector(), Recovery(pending=True))
+        phase = _StubPhase(NoOpAppMetricsCollector(), Recovery(pending=True))
         first = phase.run()
         assert first is phase.result
 
@@ -216,14 +216,14 @@ class TestMemoization:
 
 class TestBanner:
     def test_banner_emitted_once_when_enabled(self, caplog: pytest.LogCaptureFixture) -> None:
-        phase = _StubPhase(NoOpMetricsCollector(), Recovery(pending=True), banner=True)
+        phase = _StubPhase(NoOpAppMetricsCollector(), Recovery(pending=True), banner=True)
         with caplog.at_level(logging.INFO):
             phase.run()
         banners = [r for r in caplog.records if r.message == "STUB"]
         assert len(banners) == 1
 
     def test_no_banner_when_disabled(self, caplog: pytest.LogCaptureFixture) -> None:
-        phase = _StubPhase(NoOpMetricsCollector(), Recovery(pending=True), banner=False)
+        phase = _StubPhase(NoOpAppMetricsCollector(), Recovery(pending=True), banner=False)
         with caplog.at_level(logging.INFO):
             phase.run()
         assert not any(r.message == "STUB" for r in caplog.records)
@@ -276,7 +276,7 @@ class TestRecovery:
         with no separator at all — its lines visually merged into the previous
         phase's section and read as that phase logging twice."""
         phase = _StubPhase(
-            NoOpMetricsCollector(),
+            NoOpAppMetricsCollector(),
             Recovery.from_artifacts([_art(ArtifactState.COMPLETE)]),
             banner=False,
         )
@@ -305,7 +305,7 @@ class TestRecovery:
             _art(ArtifactState.COMPLETE),
             _art(ArtifactState.COMPLETE, wanted=False),
         ]
-        phase = _StubPhase(NoOpMetricsCollector(), Recovery.from_artifacts(artifacts))
+        phase = _StubPhase(NoOpAppMetricsCollector(), Recovery.from_artifacts(artifacts))
         with caplog.at_level(logging.INFO):
             phase.run()
 
@@ -322,7 +322,7 @@ class TestRecovery:
         resume-flavored suffix — no work exists to resume; every wanted row
         must be produced."""
         phase = _StubPhase(
-            NoOpMetricsCollector(),
+            NoOpAppMetricsCollector(),
             Recovery.from_artifacts([_art(ArtifactState.ABSENT)]),
         )
         with caplog.at_level(logging.INFO):
@@ -336,7 +336,7 @@ class TestRecovery:
 
     def test_recovery_error_becomes_failed_result(self) -> None:
         phase = _StubPhase(
-            NoOpMetricsCollector(),
+            NoOpAppMetricsCollector(),
             Recovery(pending=True),
             recover_error=RecoveryError("fatal mismatch"),
         )
@@ -370,7 +370,7 @@ class TestOutcomeCloser:
     @staticmethod
     def _executed(outcome: PhaseOutcome, message: str) -> _StubPhase:
         return _StubPhase(
-            NoOpMetricsCollector(), Recovery(pending=True),
+            NoOpAppMetricsCollector(), Recovery(pending=True),
             execute_result=_StubResult(outcome=outcome, message=message, rows=[]),
         )
 
@@ -410,7 +410,7 @@ class TestOutcomeCloser:
         """The recovery line closes reuse runs — a second status line one
         row after "— all reused" would be noise."""
         phase = _StubPhase(
-            NoOpMetricsCollector(),
+            NoOpAppMetricsCollector(),
             Recovery.from_artifacts([_art(ArtifactState.COMPLETE)]),
         )
         with caplog.at_level(logging.INFO):
@@ -420,7 +420,7 @@ class TestOutcomeCloser:
         assert messages[-1].startswith("Recovery:")
 
     def test_dry_run_has_no_closer(self, caplog: pytest.LogCaptureFixture) -> None:
-        phase = _StubPhase(NoOpMetricsCollector(), Recovery(pending=True))
+        phase = _StubPhase(NoOpAppMetricsCollector(), Recovery(pending=True))
         with caplog.at_level(logging.INFO):
             phase.run(dry_run=True)
         assert not any(
@@ -469,14 +469,14 @@ class TestOutcomeCloser:
 
 class TestBranches:
     def test_dry_run_with_pending_returns_pending_without_executing(self) -> None:
-        phase = _StubPhase(NoOpMetricsCollector(), Recovery(pending=True))
+        phase = _StubPhase(NoOpAppMetricsCollector(), Recovery(pending=True))
         result = phase.run(dry_run=True)
         assert result.outcome is PhaseOutcome.PENDING
         assert phase.execute_calls == 0
 
     def test_dry_run_without_pending_returns_reused(self) -> None:
         phase = _StubPhase(
-            NoOpMetricsCollector(), Recovery(pending=False), banner=True
+            NoOpAppMetricsCollector(), Recovery(pending=False), banner=True
         )
         result = phase.run(dry_run=True)
         assert result.outcome is PhaseOutcome.REUSED
@@ -484,7 +484,7 @@ class TestBranches:
         assert phase.execute_calls == 0
 
     def test_execute_run_reuses_when_nothing_pending(self) -> None:
-        phase = _StubPhase(NoOpMetricsCollector(), Recovery(pending=False))
+        phase = _StubPhase(NoOpAppMetricsCollector(), Recovery(pending=False))
         result = phase.run(dry_run=False)
         assert result.outcome is PhaseOutcome.REUSED
         assert phase.execute_calls == 0
@@ -591,7 +591,7 @@ class TestMultiTerminalRuns:
         )
 
     def test_shared_dependency_runs_once_and_both_terminals_execute(self) -> None:
-        collector = NoOpMetricsCollector()
+        collector = NoOpAppMetricsCollector()
         registry, shared, terminal_a, terminal_b = self._wired(collector)
 
         result = self._runner(registry, collector).run()
@@ -605,7 +605,7 @@ class TestMultiTerminalRuns:
         assert result.phases_executed == ["stub", "terminal_a", "terminal_b"]
 
     def test_failed_terminal_stops_later_terminals(self) -> None:
-        collector = NoOpMetricsCollector()
+        collector = NoOpAppMetricsCollector()
         registry, _shared, terminal_a, terminal_b = self._wired(collector)
         terminal_a._execute_result = _StubResult(
             outcome=PhaseOutcome.FAILED, message="boom", rows=[],
@@ -618,7 +618,7 @@ class TestMultiTerminalRuns:
         assert terminal_b.execute_calls == 0
 
     def test_dry_run_walks_all_terminals_as_preview(self) -> None:
-        collector = NoOpMetricsCollector()
+        collector = NoOpAppMetricsCollector()
         registry, _shared, terminal_a, terminal_b = self._wired(collector)
 
         result = self._runner(registry, collector).run(dry_run=True)
@@ -682,7 +682,7 @@ class TestRunnerContractAssertion:
         """Bug guarded: a contract-violating run losing its metrics — the
         metrics.yaml written by the runner's flush is the debug evidence for
         the crash report, so it must exist even on the violation path."""
-        collector = YamlMetricsCollector(work_dir=tmp_path, force_wipe=True)
+        collector = YamlAppMetricsCollector(work_dir=tmp_path, force_wipe=True)
         target = _PendingStub(collector, Recovery(pending=True))
         runner = _runner_with(target, collector, work_dir=tmp_path)
 

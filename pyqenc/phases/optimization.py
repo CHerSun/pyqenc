@@ -27,12 +27,12 @@ from typing import TYPE_CHECKING, Annotated, ClassVar, Literal
 
 from pydantic import BaseModel, Field, TypeAdapter
 
+from pyqenc.app_metrics import AppMetricKey
 from pyqenc.constants import (
     ENCODED_OUTPUT_DIR,
     ENCODING_WORKSPACE_DIR,
     WARNING_SYMBOL,
 )
-from pyqenc.metrics import MetricKey
 from pyqenc.models import (
     CleanupLevel,
     CropParams,
@@ -57,14 +57,13 @@ from pyqenc.phase import (
 from pyqenc.phases.chunking import ChunkingPhase
 from pyqenc.phases.job import JobPhase
 from pyqenc.phases.probe import ProbePhase
+from pyqenc.quality_metrics import FIXED_COMPARISON_PAIRS, MetricMap, TargetedMetrics
 from pyqenc.state import ArtifactState, ProbeFacet
 from pyqenc.stream_model import DecimalYaml, EncodedChunk, VideoStreamChunk
 from pyqenc.stream_model import File as StreamFile
 from pyqenc.summary_tables import (
-    COMPARISON_STATS,
     ComparisonTable,
     Mark,
-    MetricStatMap,
     StrategyRow,
     render_comparison_table,
 )
@@ -76,7 +75,7 @@ from pyqenc.utils.yaml_utils import load_model, save_model
 
 if TYPE_CHECKING:
     from pyqenc.app_config import AppConfig, TestBasisConfig
-    from pyqenc.metrics import MetricsCollector
+    from pyqenc.app_metrics import AppMetricsCollector
     from pyqenc.phases.encoding import ChunkEncoder
 
 logger = logging.getLogger(__name__)
@@ -198,22 +197,6 @@ def current_optimization_sidecar(
     )
 
 
-def _comparison_metrics(metrics: MetricStatMap) -> MetricStatMap:
-    """Project measured metrics onto the fixed-mode comparison stat set.
-
-    Args:
-        metrics: The worst-chunk aggregated measurement (pair-keyed).
-
-    Returns:
-        The subset restricted to the comparison statistics.
-    """
-    return {
-        key: value for key, value in metrics.items()
-        if key.statistic in COMPARISON_STATS
-    }
-
-
-
 # ---------------------------------------------------------------------------
 # OptimizationPhaseResult
 # ---------------------------------------------------------------------------
@@ -278,14 +261,14 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
     name:        str       = "optimization"
     SIDECAR_NAME = "optimization.yaml"
     DEPENDS_ON:  ClassVar[tuple[type[Phase], ...]] = (JobPhase, ProbePhase, ChunkingPhase)
-    _METRIC_KEY: MetricKey = MetricKey.OPTIMIZATION
+    _METRIC_KEY: AppMetricKey = AppMetricKey.OPTIMIZATION
 
     def __init__(
         self,
         config:    AppConfig,
         phases:    PhaseRegistry,
         *,
-        collector: MetricsCollector,
+        collector: AppMetricsCollector,
     ) -> None:
         super().__init__(config, phases, collector=collector)
 
@@ -429,7 +412,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
             kv["Quality:"]    = [f"{strategy.codec.quality_label}={strategy.codec.quality_range[0]} for {strategy.display_name()}" for strategy in plan.strategies]
         else:
             kv["Strategies:"] = [s.display_name() for s in plan.strategies]
-            kv["Targets:"]    = [f"{t.metric}-{t.statistic}≥{t.value}" for t in plan.targets]
+            kv["Targets:"]    = [str(t) for t in plan.targets]
 
         fmt_key_value_table(kv)
 
@@ -858,12 +841,13 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         if strategies_to_test:
             encoder = _make_encoder(
                 work_dir         = work_dir,
+                plan             = plan,
                 collector        = self._collector,
                 crop_params      = crop,
                 visual_hash      = self._config.encoding.visual_hash,
                 sampling = self._config.measurement.sampling,
                 cleanup_level    = job_result.cleanup,
-                metric_prefix    = MetricKey.OPTIMIZATION,
+                metric_prefix    = AppMetricKey.OPTIMIZATION,
             )
             # Duration-weighted bar (Σ test-chunk durations × strategies),
             # advanced once per completed pair by that pair's duration.
@@ -908,7 +892,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
                         collector         = self._collector,
                         phase_recovery    = phase_recovery,
                         advance           = advance,
-                        metric_prefix     = MetricKey.OPTIMIZATION,
+                        metric_prefix     = AppMetricKey.OPTIMIZATION,
                     )
                 )
                 advance(0, AdvanceState.COMPLETE)
@@ -1199,11 +1183,11 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         equal size, domination needs strict superiority on EVERY compared
         statistic — near-equal ±stats duplicates coexist. The size tiebreak
         makes the relation antisymmetric (mutual near-ties would otherwise
-        prune both). Evaluated over the fixed-mode comparison statistics
+        prune both). Evaluated over the fixed comparison pairs
         only; identical non-empty compared key sets required.
         """
-        a_metrics = _comparison_metrics(a.metrics)
-        b_metrics = _comparison_metrics(b.metrics)
+        a_metrics = a.metrics.narrowed_to(FIXED_COMPARISON_PAIRS)
+        b_metrics = b.metrics.narrowed_to(FIXED_COMPARISON_PAIRS)
         if not a_metrics or set(a_metrics) != set(b_metrics):
             return False
         if a.size_bytes > b.size_bytes * (1.0 + tolerance_pct / 100.0):
@@ -1270,7 +1254,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         order = {name: i for i, name in enumerate(resolved_names)}
         eligible = [
             r for r in results
-            if r.strategy in survivors and _comparison_metrics(r.metrics)
+            if r.strategy in survivors and r.metrics.narrowed_to(FIXED_COMPARISON_PAIRS)
         ]
         if not eligible:
             return None
@@ -1283,12 +1267,11 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
     def _anchor_targets_from(anchor: StrategyRow | None) -> list[QualityTarget]:
         """The anchor's aggregated metrics as the anchor target set.
 
-        Restricted to the fixed-mode comparison statistics — the anchor
-        targets pipe straight into the presentation machinery, so their
-        breadth also bounds the chunk log lines and the winner-limiter
-        table. Worst-chunk values match search-mode per-chunk strictness.
-        Presentation data only — never search goals, pass/fail gates, or
-        selection thresholds.
+        Restricted to the fixed comparison pairs — the anchor targets pipe
+        straight into the presentation machinery, so their breadth also
+        bounds the chunk log lines and the winner-limiter table. Worst-chunk
+        values match search-mode per-chunk strictness. Presentation data
+        only — never search goals, pass/fail gates, or selection thresholds.
 
         Args:
             anchor: The anchor's test result, or ``None`` (empty set).
@@ -1298,16 +1281,11 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         """
         if anchor is None:
             return []
-        compared = _comparison_metrics(anchor.metrics)
-        stat_rank = {statistic: index for index, statistic in enumerate(COMPARISON_STATS)}
+        compared = anchor.metrics.narrowed_to(FIXED_COMPARISON_PAIRS)
         return [
-            QualityTarget(
-                metric=key.metric.value, statistic=key.statistic.value, value=float(value),
-            )
-            for key, value in sorted(
-                compared.items(),
-                key=lambda kv: (kv[0].metric.value, stat_rank[kv[0].statistic]),
-            )
+            QualityTarget(identity=key, value=compared[key])
+            for key in FIXED_COMPARISON_PAIRS
+            if key in compared
         ]
 
     def _build_strategy_row(
@@ -1346,16 +1324,15 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         work_dir:   Path,
         test_chunks: list[VideoStreamChunk],
         strategy:   Strategy,
-        winners:    list[EncodedChunk],
-    ) -> MetricStatMap:
+        winners:     list[EncodedChunk],
+    ) -> TargetedMetrics:
         """Worst-chunk-aggregate a strategy's measured metrics across its test winners.
 
         Reads each winner's result sidecar in ``encoded/<strategy>/`` — the
         same data the sidecars persist for the winning attempts. Missing
-        winners or sidecars simply contribute nothing; a key present on some
-        chunks still aggregates over those chunks. Sidecar keys parse
-        through the pair type — the sanctioned stringly→typed conversion at
-        table assembly (Req 7.5).
+        winners or sidecars simply contribute nothing; a pair present on some
+        chunks still aggregates over those chunks. The winner sidecar's
+        typed map is consumed as-is (it was narrowed at write time).
 
         Args:
             work_dir:    Pipeline working directory.
@@ -1364,13 +1341,12 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
             winners:     The strategy's winner payloads.
 
         Returns:
-            Worst-chunk values keyed by the metric-statistic pair type.
+            Worst-chunk values as the targeted role.
         """
         from pyqenc.phases.encoding import read_winner_sidecar
-        from pyqenc.quality import MetricStatKey as _Key
 
         winners_by_chunk = {w.chunk.safe_name(): w for w in winners}
-        mins: MetricStatMap = {}
+        per_chunk: list[TargetedMetrics] = []
         for chunk in test_chunks:
             winner = winners_by_chunk.get(chunk.safe_name())
             if winner is None:
@@ -1378,10 +1354,8 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
             sidecar = read_winner_sidecar(work_dir, winner)
             if sidecar is None:
                 continue
-            for key, measured in sidecar.metrics.items():
-                parsed = _Key.parse(key)
-                mins[parsed] = min(mins[parsed], measured) if parsed in mins else measured
-        return mins
+            per_chunk.append(sidecar.metrics)
+        return MetricMap.worst_of(per_chunk)
 
     def _log_comparison(
         self,
@@ -1580,12 +1554,13 @@ def _orphan_strategy_rows(work_dir: Path, strategies: list[Strategy]) -> list[Ar
 
 def _make_encoder(
     work_dir:         Path,
-    collector:        MetricsCollector,
+    plan:             EncodingPlan,
+    collector:        AppMetricsCollector,
     crop_params:      CropParams | None,
     visual_hash:      bool,
     sampling:        int,
     cleanup_level:    CleanupLevel,
-    metric_prefix:    MetricKey,
+    metric_prefix:    AppMetricKey,
 ) -> ChunkEncoder:
     """Construct a ``ChunkEncoder`` for test encodes.
 
@@ -1599,9 +1574,12 @@ def _make_encoder(
 
     Args:
         work_dir:         Pipeline working directory.
+        plan:             The run's encoding plan (the winner-write
+                          narrowing front).
+        collector:        Metrics collector for per-attempt timing.
         crop_params:      Crop parameters to apply.
         visual_hash:      Whether to prepend emoji hash to chunk log lines.
-        sampling:        Frame subsampling factor for quality metric generation.
+        sampling:         Frame subsampling factor for quality metric generation.
         cleanup_level:    Run cleanup level for rolling attempt cleanup.
         metric_prefix:    Top-level key prefixing the encoder's dotted keys.
 
@@ -1612,6 +1590,7 @@ def _make_encoder(
     return ChunkEncoder(
         quality_measurer = QualityMeasurer(work_dir),
         work_dir          = work_dir,
+        plan              = plan,
         collector         = collector,
         crop_params       = crop_params,
         cleanup_level     = cleanup_level,

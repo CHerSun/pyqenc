@@ -8,20 +8,17 @@ algorithms for iterative encoding optimization.
 
 import logging
 from abc import ABC, abstractmethod
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable
 from dataclasses import dataclass
 from decimal import ROUND_HALF_EVEN, Decimal
-from enum import Enum
 from pathlib import Path
-from typing import (
-    Annotated,
-    TypedDict,
-    cast,
+
+from pyqenc.models import CropParams, QualityTarget
+from pyqenc.quality_metrics import (
+    MeasuredMetrics,
+    MetricType,
+    TargetedMetrics,
 )
-
-import pandas as pd
-from pydantic import BeforeValidator, PlainSerializer
-
 from pyqenc.utils.ffmpeg_runner import (
     FFmpegInput,
     FFmpegRequest,
@@ -30,417 +27,7 @@ from pyqenc.utils.ffmpeg_runner import (
     run_ffmpeg_async,
 )
 
-from .models import CropParams, QualityTarget
-
 logger = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------------
-# Metric descriptor
-# ---------------------------------------------------------------------------
-
-@dataclass(frozen=True)
-class MetricInfo:
-    """Descriptor carrying all metric-specific properties.
-
-    Single source of truth for normalization, display, and quality search behaviour.
-    Accessed via ``MetricType.PSNR.info``, etc.
-
-    Attributes:
-        name:              Human-readable display name (e.g. ``"PSNR"``).
-        id:                Lowercase string key matching ``MetricType.value``
-                           (e.g. ``"psnr"``).  Used for dict keys and filenames.
-        higher_is_better:  ``True`` when a higher normalized value is better
-                           (VMAF, SSIM, PSNR, VIF after normalization).
-        _offset:           Additive offset applied before scaling in the
-                           normalization formula: ``normalized = _offset + raw * _scale_factor``.
-                           VIF uses ``100.0`` (inverts the scale); all others use ``0.0``.
-        _scale_factor:     Multiply the raw value by this after adding ``_offset``.
-                           SSIM raw range is 0–1, so ``_scale_factor=100.0``.
-                           VIF uses ``-1.0`` to invert. All others use ``1.0``.
-        _clip_upper:       After applying the formula, clip values above this threshold.
-                           ``None`` means no upper clipping.
-                           PSNR: ``100.0`` (caps ∞ dB).
-        _clip_lower:       After applying the formula, clip values below this threshold.
-                           ``None`` means no lower clipping.
-                           VIF: ``0.0`` (prevents negative normalized values).
-        lossless_value:    Normalized value that represents lossless quality
-                           (``100.0`` for all current metrics after normalization).
-        lossless_raw_repr: Human-readable string for the raw lossless value
-                           (e.g. ``"∞ dB"`` for PSNR, ``"100.0"`` for SSIM/VMAF/VIF).
-        display_unit:      Unit suffix for display (e.g. ``" dB"``, ``"%"``).
-        plot_y_min:        Lower bound for the Y-axis in plots (normalized scale).
-        plot_y_max:        Upper bound for the Y-axis in plots (normalized scale).
-                           Slightly above ``lossless_value`` to leave headroom.
-        comparison_range:  Practical value span used *only* for normalizing
-                           cross-metric deficit comparisons (``_score_failing_attempt``).
-                           Not the theoretical lossless ceiling — the realistic range
-                           where quality targets are set and misses occur.
-                           VMAF ≈ 20 (targets typically 80–100), SSIM ≈ 10 (90–100),
-                           PSNR ≈ 30 (40–70 dB), VIF ≈ 5 (empirical; limited data).
-        acceptance_delta:  Per-metric threshold for early acceptance during the quality search.
-                           When all targets pass and the least-proficit target's surplus
-                           (smallest surplus across all passing targets) is within this
-                           delta, the current quality value is accepted as final without
-                           further search — saves an extra encoding pass when the binding
-                           constraint is already close enough.  Values are in normalized
-                           metric units (post-scale_factor).
-        subsample_via_filter: When ``True``, the metric uses a stream-level
-                           ``select='not(mod(n,factor))'`` filter on its branch in the
-                           combined ffmpeg pass (PSNR, SSIM).  When ``False``,
-                           subsampling is handled internally by the filter itself
-                           (VMAF via ``n_subsample``) or is not applicable (VIF).
-    """
-
-    name:                 str
-    higher_is_better:     bool
-    _offset:              float
-    _scale_factor:        float
-    _clip_upper:          float | None
-    _clip_lower:          float | None
-    lossless_value:       float
-    lossless_raw_repr:    str
-    display_unit:         str
-    plot_y_min:           float
-    plot_y_max:           float
-    comparison_range:     float
-    acceptance_delta:     float
-    subsample_via_filter: bool
-
-    def normalize(self, value: float | pd.Series) -> float | pd.Series:
-        """Normalize a raw metric value (or Series) to the display scale.
-
-        Applies ``scale_factor``, then ``clip_lower``, then ``clip_upper``
-        in that order.  Handles ``float("inf")`` by treating it as
-        ``clip_upper`` (or ``lossless_value`` when no upper clip is set).
-
-        Args:
-            value: Raw scalar or ``pd.Series`` from the metric log file.
-
-        Returns:
-            Normalized scalar or ``pd.Series`` on the display scale.
-        """
-        if isinstance(value, pd.Series):
-            result = self._offset + value * self._scale_factor
-            if self._clip_lower is not None:
-                result = result.clip(lower=self._clip_lower)
-            if self._clip_upper is not None:
-                result = result.clip(upper=self._clip_upper)
-            return result
-        else:
-            # scalar path — handle inf explicitly
-            result_f = self._offset + value * self._scale_factor
-            if self._clip_lower is not None:
-                result_f = max(result_f, self._clip_lower)
-            if self._clip_upper is not None:
-                result_f = min(result_f, self._clip_upper)
-            return result_f
-
-    def passes(self, actual: float, target: float) -> bool:
-        """Return ``True`` when *actual* satisfies *target* for this metric.
-
-        For ``higher_is_better`` metrics: ``actual >= target``.
-        For inverted metrics (e.g. VIF): ``actual <= target``.
-
-        Args:
-            actual: Normalized measured value.
-            target: Normalized target threshold.
-        """
-        return actual >= target if self.higher_is_better else actual <= target
-
-    def deficit(self, actual: float, target: float) -> float:
-        """Signed distance from target; negative means the target is not met.
-
-        For ``higher_is_better``: ``actual - target`` (positive = surplus).
-        For inverted: ``target - actual`` (positive = surplus, i.e. actual is
-        lower than target which is good).
-
-        Args:
-            actual: Normalized measured value.
-            target: Normalized target threshold.
-        """
-        return (actual - target) if self.higher_is_better else (target - actual)
-
-
-# ---------------------------------------------------------------------------
-# Metric types
-# ---------------------------------------------------------------------------
-
-class MetricType(Enum):
-    """Supported video quality metrics.
-
-    Each member's ``.value`` is the lowercase string id used in filenames,
-    dict keys, and ffmpeg filter names.  Use ``.info`` to access the full
-    ``MetricInfo`` descriptor for normalization, display, and quality search.
-    """
-
-    VMAF = "vmaf"
-    SSIM = "ssim"
-    PSNR = "psnr"
-    VIF  = "vif"
-
-    @property
-    def info(self) -> MetricInfo:
-        """Return the ``MetricInfo`` descriptor for this metric type."""
-        return _METRIC_INFO[self]
-
-
-_METRIC_INFO: dict[MetricType, MetricInfo] = {
-    MetricType.VMAF: MetricInfo(
-        name              = "VMAF",
-        higher_is_better  = True,
-        _offset           = 0.0,
-        _scale_factor     = 1.0,
-        _clip_upper       = None,
-        _clip_lower       = None,
-        lossless_value    = 100.0,
-        lossless_raw_repr = "100.0",
-        display_unit      = "",
-        plot_y_min        = 0.0,
-        plot_y_max        = 103.0,
-        comparison_range  = 15.0,  # practical target range ~85-100
-        acceptance_delta  = 0.15,  # 0.15% surplus should be negligible
-        subsample_via_filter = False,  # VMAF uses n_subsample internally
-    ),
-    MetricType.SSIM: MetricInfo(
-        name              = "SSIM",
-        higher_is_better  = True,
-        _offset           = 0.0,
-        _scale_factor     = 100.0,
-        _clip_upper       = None,
-        _clip_lower       = None,
-        lossless_value    = 100.0,
-        lossless_raw_repr = "100.0",
-        display_unit      = "",
-        plot_y_min        = 0.0,
-        plot_y_max        = 103.0,
-        comparison_range  = 5.0,   # practical target range ~95-100
-        acceptance_delta  = 0.05,  # 0.05% after scaling (0.0005 raw). Metric is quite compressed towards 100, so we have to use a low value.
-        subsample_via_filter = True,   # uses select='not(mod(n,factor))' on its branch
-    ),
-    MetricType.PSNR: MetricInfo(
-        name              = "PSNR",
-        higher_is_better  = True,
-        _offset           = 0.0,
-        _scale_factor     = 1.0,
-        _clip_upper       = 100.0,
-        _clip_lower       = None,
-        lossless_value    = 100.0,
-        lossless_raw_repr = "inf dB",
-        display_unit      = " dB",
-        plot_y_min        = 0.0,
-        plot_y_max        = 103.0,
-        comparison_range  = 20.0,  # practical target range ~40-60 dB
-        acceptance_delta  = 0.3,   # 0.3 dB surplus should be negligible
-        subsample_via_filter = True,   # uses select='not(mod(n,factor))' on its branch
-    ),
-    MetricType.VIF: MetricInfo(
-        name              = "VIF",
-        higher_is_better  = True,
-        _offset           = 0.0,
-        _scale_factor     = 100.0,
-        _clip_upper       = 100.0,
-        _clip_lower       = 0.0,
-        lossless_value    = 100.0,
-        lossless_raw_repr = "100.0",
-        display_unit      = "",
-        plot_y_min        = 0.0,
-        plot_y_max        = 103.0,
-        comparison_range  = 20.0,  # Practical target range being ~80-100
-        acceptance_delta  = 0.15,  # 0.15 after scaling should be good. VIF scales nicely with ~92 being quite good.
-        subsample_via_filter = False,  # VIF has no independent branch; embedded in VMAF
-    ),
-}
-
-
-class MetricStats(TypedDict):
-    """Key statistics for a single metric.
-
-    Subset of :class:`FullMetricStatistics` stored in sidecars and used for
-    targeting. Includes the same percentile selection used by the
-    visualization plots: min, p05, p10, p25, median (p50), p75, p90, p95,
-    max, std.
-    """
-
-    min:    float
-    p05:    float
-    p10:    float
-    p25:    float
-    median: float
-    p75:    float
-    p90:    float
-    p95:    float
-    max:    float
-    std:    float
-
-PerMetricStats = dict[MetricType, MetricStats]
-"""Measured statistics per metric (one measurement's full nested form)."""
-
-
-# ---------------------------------------------------------------------------
-# Metric-statistic identity (Req 7, unified-quality-summaries spec)
-# ---------------------------------------------------------------------------
-
-class StatisticType(Enum):
-    """The closed set of measured statistics.
-
-    Member values are the canonical sidecar tokens — the single spelling
-    inside ``{metric}_{statistic}`` keys. The display vocabulary (the plot
-    labels: ``Min, 5%, 10%, …, 95%, Max, Std``) lives on :attr:`display`.
-    Declaration order is the closed set's order (headers list a metric's
-    compared statistics in it).
-    """
-
-    MIN    = "min"
-    P05    = "p05"
-    P10    = "p10"
-    P25    = "p25"
-    MEDIAN = "median"
-    P75    = "p75"
-    P90    = "p90"
-    P95    = "p95"
-    MAX    = "max"
-    STD    = "std"
-
-    @property
-    def display(self) -> str:
-        """The plot-vocabulary label: percentiles as percents, min/max/std as words."""
-        return _STATISTIC_DISPLAY[self]
-
-
-_STATISTIC_DISPLAY: dict[StatisticType, str] = {
-    StatisticType.MIN:    "Min",
-    StatisticType.P05:    "5%",
-    StatisticType.P10:    "10%",
-    StatisticType.P25:    "25%",
-    StatisticType.MEDIAN: "50%",
-    StatisticType.P75:    "75%",
-    StatisticType.P90:    "90%",
-    StatisticType.P95:    "95%",
-    StatisticType.MAX:    "Max",
-    StatisticType.STD:    "Std",
-}
-
-_STATISTIC_ALIASES: dict[str, str] = {
-    "med": "median",
-}
-
-
-@dataclass(frozen=True)
-class MetricStatKey:
-    """The identity of one measured value: a metric paired with a statistic.
-
-    The single naming authority for metric-statistic keys: ``sidecar_key``
-    is THE canonical persistence form (``vmaf_median``), ``display`` is THE
-    display form (``VMAF 50%``), and ``parse`` accepts the tolerant input
-    vocabulary (dash or underscore separators, the ``med`` alias,
-    case-insensitive). Frozen and hashable — usable directly as the key of
-    measured-metrics maps.
-
-    Attributes:
-        metric:    The measured metric.
-        statistic: The measured statistic.
-    """
-
-    metric:    MetricType
-    statistic: StatisticType
-
-    def sidecar_key(self) -> str:
-        """Return the canonical persistence form, e.g. ``vmaf_median``."""
-        return f"{self.metric.value}_{self.statistic.value}"
-
-    def display(self) -> str:
-        """Return the display form, e.g. ``VMAF 50%`` (plot vocabulary)."""
-        return f"{self.metric.info.name} {self.statistic.display}"
-
-    @classmethod
-    def parse(cls, text: str) -> MetricStatKey:
-        """Parse a metric-statistic key from tolerant input.
-
-        Args:
-            text: Key text with a dash or underscore separator and optional
-                case variation, e.g. ``vmaf-median`` or ``VMAF_MEDIAN``.
-
-        Returns:
-            The typed key.
-
-        Raises:
-            ValueError: No separator, unknown metric, or unknown statistic —
-                loud, never a silent round-trip.
-        """
-        normalized = text.strip().lower().replace("-", "_")
-        metric_token, sep, statistic_token = normalized.partition("_")
-        if not sep or not statistic_token:
-            raise ValueError(
-                f"Invalid metric-statistic key '{text}': "
-                f"expected 'metric-statistic' (e.g. 'vmaf-median')"
-            )
-        try:
-            metric = MetricType(metric_token)
-        except ValueError:
-            valid = sorted(m.value for m in MetricType)
-            raise ValueError(
-                f"Invalid metric '{metric_token}' in '{text}'. Must be one of: {valid}"
-            ) from None
-        try:
-            statistic = StatisticType(_STATISTIC_ALIASES.get(statistic_token, statistic_token))
-        except ValueError:
-            valid = sorted(s.value for s in StatisticType)
-            raise ValueError(
-                f"Invalid statistic '{statistic_token}' in '{text}'. Must be one of: {valid}"
-            ) from None
-        return cls(metric=metric, statistic=statistic)
-
-
-def _parse_metric_stat_map(raw: object) -> object:
-    """BeforeValidator for :data:`MetricStatMap`: string keys become typed keys."""
-    if isinstance(raw, Mapping):
-        return {
-            MetricStatKey.parse(key) if isinstance(key, str) else key: value
-            for key, value in raw.items()
-        }
-    return raw
-
-
-def _dump_metric_stat_map(mapping: Mapping[MetricStatKey, float]) -> dict[str, float]:
-    """PlainSerializer for :data:`MetricStatMap`: typed keys become canonical strings."""
-    return {key.sidecar_key(): value for key, value in mapping.items()}
-
-
-MetricStatMap = Annotated[
-    dict[MetricStatKey, float],
-    BeforeValidator(_parse_metric_stat_map),
-    PlainSerializer(_dump_metric_stat_map),
-]
-"""Measured-metrics map: typed keys in memory, canonical strings on disk."""
-
-
-def flatten_metric_stats(metrics: PerMetricStats) -> dict[str, float]:
-    """Flatten per-metric statistics into ``{metric_stat: value}`` keys.
-
-    Owns the single cast over the ``MetricStats`` TypedDict (its ``.items()``
-    values type as object to ty) and the single definition of the
-    ``{metric}_{stat}`` key format shared by sidecars and target lookups.
-    """
-    return {
-        f"{metric.value}_{stat}": value
-        for metric, stats in metrics.items()
-        for stat, value in cast(dict[str, float], stats).items()
-    }
-
-
-class FullMetricStatistics(TypedDict):
-    """Full percentile statistics (computed by the visualization layer)."""
-
-    min: float
-    p5:  float
-    p10: float
-    p25: float
-    p50: float
-    p75: float
-    p90: float
-    p95: float
-    max: float
-    std: float
 
 
 async def run_metrics(
@@ -499,8 +86,9 @@ async def run_metrics(
                            of what the containers declare (mkvmerge-written
                            finals have been observed declaring 500/21 for a
                            24000/1001 stream). ``None`` falls back to each
-                           input's self-declared ``FRAME_RATE``.  When ``None``, defaults are
-                           used (``.log`` for PSNR/SSIM, ``.json`` for VMAF).
+                           input's self-declared ``FRAME_RATE``.  When ``None``, each
+                           branch's metric output takes the metric's own
+                           ``log_extension``.
 
     Returns:
         ``FFmpegRunResult`` with returncode, success, stderr_lines, and frame_count.
@@ -582,18 +170,18 @@ async def run_metrics(
             options: str = "" if use_gpu else "n_threads=4:"
             if sampling > 1:
                 options += f"n_subsample={sampling}:"
-            ext = output_extension if output_extension is not None else ".json"
+            ext = output_extension if output_extension is not None else branch.info.log_extension
             metric_filters.append(
                 f"[{ld}][{lr}]{lib}={options}"
                 f"log_path={output_prefix}{branch.value}{ext}:log_fmt=json:feature=name=vif"
             )
         elif branch == MetricType.SSIM:
-            ext = output_extension if output_extension is not None else ".log"
+            ext = output_extension if output_extension is not None else branch.info.log_extension
             metric_filters.append(
                 f"[{ld}][{lr}]ssim=stats_file={output_prefix}{branch.value}{ext}"
             )
         elif branch == MetricType.PSNR:
-            ext = output_extension if output_extension is not None else ".log"
+            ext = output_extension if output_extension is not None else branch.info.log_extension
             metric_filters.append(
                 f"[{ld}][{lr}]psnr=stats_file={output_prefix}{branch.value}{ext}"
             )
@@ -640,7 +228,9 @@ class QualityMeasurement:
     nothing here compares against foreign state.
 
     Attributes:
-        metrics:     Parsed quality metrics with statistics.
+        metrics:     The full measured set — one flat map over the
+                     metric-statistic pairs (the measurer's shared quantile
+                     step produces it from the per-frame values).
         logs:        The transient metric logs/paths (``QualityLogs``).
         frame_count: Frames of the measured (encoded) file, from the measure
                      run's own progress — the file's count observed by its
@@ -649,7 +239,7 @@ class QualityMeasurement:
                      this is exact; ``0`` = not determined by this run.
     """
 
-    metrics:     PerMetricStats
+    metrics:     MeasuredMetrics
     logs:        QualityLogs
     frame_count: int
 
@@ -659,7 +249,7 @@ class QualityMeasurement:
 # ---------------------------------------------------------------------------
 
 def _score_attempt(
-    metrics:         dict[str, float],
+    metrics:         TargetedMetrics,
     quality_targets: list[QualityTarget],
 ) -> float:
     """Compute a signed composite score for an encoding attempt.
@@ -680,23 +270,21 @@ def _score_attempt(
     ``abs(score)`` measures distance from the sweet spot — closest to zero = best attempt.
 
     Args:
-        metrics:         Measured quality metrics keyed as ``"<metric>_<stat>"``,
-                         already normalized.
+        metrics:         The targeted metric subset, already normalized.
         quality_targets: Quality targets to evaluate against.
 
     Returns:
         Signed float score.
 
     Raises:
-        ValueError: If any target key is absent from ``metrics``.
+        ValueError: If any target identity is absent from *metrics*.
     """
     # Validate all keys are present up front.
     for target in quality_targets:
-        key = f"{target.metric}_{target.statistic}"
-        if key not in metrics:
+        if target.identity not in metrics:
             raise ValueError(
-                f"Missing metric key '{key}' in metrics dict. "
-                f"Available keys: {list(metrics.keys())}"
+                f"Missing metric key '{target.identity.sidecar_key()}' in metrics. "
+                f"Available keys: {[key.sidecar_key() for key in metrics]}"
             )
 
     fail_score        = 0.0
@@ -706,16 +294,15 @@ def _score_attempt(
     min_surplus_delta = 0.0            # acceptance_delta for the least-proficit target
 
     for target in quality_targets:
-        key    = f"{target.metric}_{target.statistic}"
-        actual = metrics[key]
-        info   = MetricType(target.metric).info
+        actual = metrics[target.identity]
+        info   = target.identity.metric.info
 
         deficit    = info.deficit(actual, target.value)
         normalized = deficit / info.comparison_range
 
         logger.debug(
-            "_score_attempt: %s_%s actual=%.4f target=%.4f deficit=%.4f normalized=%.6f",
-            target.metric, target.statistic, actual, target.value, deficit, normalized,
+            "_score_attempt: %s actual=%.4f target=%.4f deficit=%.4f normalized=%.6f",
+            target.identity.sidecar_key(), actual, target.value, deficit, normalized,
         )
 
         if deficit < 0.0:
@@ -746,12 +333,12 @@ class QualityPoint:
         q:       Quality value of this point.
         score:   Composite score. 0 = winner (targets met within delta) or sentinel.
                  Positive = pass (targets met, surplus > delta). Negative = fail.
-        metrics: Metrics dict, or ``None`` for sentinel points.
+        metrics: The targeted metric subset, or ``None`` for sentinel points.
     """
 
     q:       Decimal
     score:   float
-    metrics: dict[str, float] | None
+    metrics: TargetedMetrics | None
 
     @property
     def is_sentinel(self) -> bool:
@@ -823,18 +410,17 @@ def _compute_proportional_candidate(
         return None    # sentinel boundary — an untested side
 
     # Get actual metric values.
-    key      = f"{target.metric}_{target.statistic}"
-    pass_val = pass_metrics.get(key)
-    fail_val = fail_metrics.get(key)
+    pass_val = pass_metrics.get(target.identity)
+    fail_val = fail_metrics.get(target.identity)
     if pass_val is None or fail_val is None:
         logger.warning(
             "QualitySearch: missing metric %s for pass=%s fail=%s.",
-            key, pass_point.q, fail_point.q,
+            target.identity.sidecar_key(), pass_point.q, fail_point.q,
         )
         return None
 
     # Compute interpolation fraction.
-    info   = MetricType(target.metric).info
+    info   = target.identity.metric.info
     d_pass = info.deficit(pass_val, target.value)
     d_fail = info.deficit(fail_val, target.value)
     span   = d_pass - d_fail
@@ -911,8 +497,8 @@ class QualitySearchBase(ABC):
 
     @property
     @abstractmethod
-    def best_metrics(self) -> dict[str, float] | None:
-        """Full metrics dict associated with ``best_quality``.
+    def best_metrics(self) -> TargetedMetrics | None:
+        """Targeted metrics associated with ``best_quality``.
         ``None`` before any ``record()`` call.
         """
         ...
@@ -924,7 +510,7 @@ class QualitySearchBase(ABC):
         ...
 
     @abstractmethod
-    def record(self, quality: Decimal, metrics: dict[str, float]) -> Decimal | None:
+    def record(self, quality: Decimal, metrics: TargetedMetrics) -> Decimal | None:
         """Record one attempt result and return the next quality value to try.
 
         Updates internal state with the result of encoding at *quality*.
@@ -935,8 +521,8 @@ class QualitySearchBase(ABC):
         without mutating state.
 
         Args:
-            quality:         Quality value used for this attempt.
-            metrics: Measured values keyed as ``"<metric>_<stat>"``.
+            quality: Quality value used for this attempt.
+            metrics: The attempt's targeted metric subset.
 
         Returns:
             Next quality value (quantized ``Decimal``), or ``None``.
@@ -947,25 +533,25 @@ class QualitySearchBase(ABC):
     # Protected helpers — available to all subclasses
     # ------------------------------------------------------------------
 
-    def _score(self, metrics: dict[str, float]) -> float:
+    def _score(self, metrics: TargetedMetrics) -> float:
         """Compute a signed composite score for an attempt.
 
         Delegates to the module-level ``_score_attempt`` with ``self._quality_targets``.
 
         Args:
-            metrics: Measured values keyed as ``"<metric>_<stat>"``.
+            metrics: The attempt's targeted metric subset.
 
         Returns:
             Signed float score (0 = winner, positive = pass, negative = fail).
 
         Raises:
-            ValueError: If any target key is absent from ``metrics``.
+            ValueError: If any target identity is absent from *metrics*.
         """
         return _score_attempt(metrics, self._quality_targets)
 
     @staticmethod
     def find_worst_target(
-        metrics:         dict[str, float],
+        metrics:         TargetedMetrics,
         quality_targets: list[QualityTarget],
     ) -> tuple[QualityTarget, float, float] | None:
         """Find the worst-performing target and return it with its deficit and actual value.
@@ -974,7 +560,7 @@ class QualitySearchBase(ABC):
         target with the least surplus (or largest deficit).
 
         Args:
-            metrics:         Measured quality metrics keyed by ``"<metric>_<statistic>"``.
+            metrics:         The attempt's targeted metric subset.
             quality_targets: The targets the metrics are judged against.
 
         Returns:
@@ -986,11 +572,10 @@ class QualitySearchBase(ABC):
         worst_actual:  float               = 0.0
 
         for target in quality_targets:
-            metric_key = f"{target.metric}_{target.statistic}"
-            actual     = metrics.get(metric_key)
+            actual = metrics.get(target.identity)
             if actual is None:
                 continue
-            info    = MetricType(target.metric).info
+            info    = target.identity.metric.info
             deficit = info.deficit(actual, target.value)
             if deficit < worst_deficit:
                 worst_deficit = deficit
@@ -1003,20 +588,19 @@ class QualitySearchBase(ABC):
 
     @staticmethod
     def failed_targets(
-        metrics:         dict[str, float],
+        metrics:         MeasuredMetrics,
         quality_targets: list[QualityTarget],
     ) -> list[QualityTarget]:
         """The pure verdict function: which targets the measured stats fail.
 
         Measurement and verdict are separate steps (spec 2026-10-07,
         Req 52-53): the measurer measures; callers apply this function (or
-        their own reference) to the measured facts. A target whose metric or
-        statistic is missing from *metrics* counts as failed (never silently
+        their own reference) to the measured facts. A target whose identity
+        is missing from *metrics* counts as failed (never silently
         passed).
 
         Args:
-            metrics:         Measured quality metrics keyed by
-                             ``"<metric>_<statistic>"``.
+            metrics:         The full measured set.
             quality_targets: The targets to judge against.
 
         Returns:
@@ -1024,11 +608,11 @@ class QualitySearchBase(ABC):
         """
         failed: list[QualityTarget] = []
         for target in quality_targets:
-            actual = metrics.get(f"{target.metric}_{target.statistic}")
+            actual = metrics.get(target.identity)
             if actual is None:
                 failed.append(target)
                 continue
-            if not MetricType(target.metric).info.passes(actual, target.value):
+            if not target.identity.metric.info.passes(actual, target.value):
                 failed.append(target)
         return failed
 
@@ -1140,12 +724,12 @@ class QualitySearchBase(ABC):
         if worst_target is not None:
             candidates.append((
                 _compute_proportional_candidate(worst_target, better_point, worse_point, clamp_range=False),
-                f"primary worst={worst_target.metric}_{worst_target.statistic}",
+                f"primary worst={worst_target.identity.sidecar_key()}",
             ))
         if opp_target is not None:
             candidates.append((
                 _compute_proportional_candidate(opp_target, better_point, worse_point, clamp_range=False),
-                f"reverse worst={opp_target.metric}_{opp_target.statistic}",
+                f"reverse worst={opp_target.identity.sidecar_key()}",
             ))
         candidates.append((0.5, "binary"))
 
@@ -1236,8 +820,8 @@ class QualitySearch(QualitySearchBase):
         return None
 
     @property
-    def best_metrics(self) -> dict[str, float] | None:
-        """Metrics dict associated with ``best_quality``."""
+    def best_metrics(self) -> TargetedMetrics | None:
+        """Targeted metrics associated with ``best_quality``."""
         if not self._better_point.is_sentinel:
             return self._better_point.metrics
         if self._best_point is not None:
@@ -1253,12 +837,12 @@ class QualitySearch(QualitySearchBase):
     # record()
     # ------------------------------------------------------------------
 
-    def record(self, quality: Decimal, metrics: dict[str, float]) -> Decimal | None:
+    def record(self, quality: Decimal, metrics: TargetedMetrics) -> Decimal | None:
         """Record one attempt and return the next quality value to try.
 
         Args:
             quality:         Quality value used for this attempt.
-            metrics: Measured values keyed as ``"<metric>_<stat>"``.
+            metrics: The attempt's targeted metric subset.
 
         Returns:
             Next quality value (quantized ``Decimal``), or ``None`` when exhausted.
@@ -1402,8 +986,8 @@ class QualitySearchV2(QualitySearchBase):
         return None
 
     @property
-    def best_metrics(self) -> dict[str, float] | None:
-        """Metrics dict associated with ``best_quality``."""
+    def best_metrics(self) -> TargetedMetrics | None:
+        """Targeted metrics associated with ``best_quality``."""
         if self._best_score_point:
             return self._best_score_point.metrics
         return None
@@ -1417,7 +1001,7 @@ class QualitySearchV2(QualitySearchBase):
     # record()
     # ------------------------------------------------------------------
 
-    def record(self, quality: Decimal, metrics: dict[str, float]) -> Decimal | None:
+    def record(self, quality: Decimal, metrics: TargetedMetrics) -> Decimal | None:
         """Record one attempt and return the next quality value to try.
 
         Implements the 3-point sweet-spot state machine.  Returns ``None``
@@ -1425,7 +1009,7 @@ class QualitySearchV2(QualitySearchBase):
 
         Args:
             quality:         Quality value used for this attempt.
-            metrics: Measured values keyed as ``"<metric>_<stat>"``.
+            metrics: The attempt's targeted metric subset.
 
         Returns:
             Next quality value (quantized ``Decimal``), or ``None`` when exhausted.
@@ -1619,8 +1203,8 @@ class QualitySearchV3(QualitySearchBase):
         return None
 
     @property
-    def best_metrics(self) -> dict[str, float] | None:
-        """Metrics dict associated with ``best_quality``."""
+    def best_metrics(self) -> TargetedMetrics | None:
+        """Targeted metrics associated with ``best_quality``."""
         if self._best_score_point is not None:
             return self._best_score_point.metrics
         return None
@@ -1634,7 +1218,7 @@ class QualitySearchV3(QualitySearchBase):
     # record()
     # ------------------------------------------------------------------
 
-    def record(self, quality: Decimal, metrics: dict[str, float]) -> Decimal | None:
+    def record(self, quality: Decimal, metrics: TargetedMetrics) -> Decimal | None:
         """Record one attempt and return the next quality value to try.
 
         Implements the linear-extrapolation state machine with midpoint-probe
@@ -1643,7 +1227,7 @@ class QualitySearchV3(QualitySearchBase):
 
         Args:
             quality:         Quality value used for this attempt.
-            metrics: Measured values keyed as ``"<metric>_<stat>"``.
+            metrics: The attempt's targeted metric subset.
 
         Returns:
             Next quality value (quantized ``Decimal``), or ``None`` when exhausted.

@@ -4,7 +4,8 @@ from decimal import Decimal
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from pyqenc.metrics import MetricKey
+from pyqenc.app_config import load_app_config
+from pyqenc.app_metrics import AppMetricKey
 from pyqenc.models import CleanupLevel, CodecConfig, CropParams, Strategy
 from pyqenc.phases.encoding import ChunkEncoder
 from pyqenc.stream_model import (
@@ -28,18 +29,24 @@ from pyqenc.utils.ffmpeg_runner import (
 # Fixtures
 # ---------------------------------------------------------------------------
 
+_PLAN = load_app_config(default_only=True).build_encoding_plan(
+    optimize=True, measure=True,
+)
+
+
 def _make_encoder(crop_params: CropParams | None = None) -> ChunkEncoder:
     """Build a minimal ChunkEncoder with mocked dependencies."""
-    from pyqenc.metrics import NoOpMetricsCollector
+    from pyqenc.app_metrics import NoOpAppMetricsCollector
     return ChunkEncoder(
         quality_measurer=MagicMock(),
         work_dir=Path("/tmp/work"),
-        collector=NoOpMetricsCollector(),
+        plan=_PLAN,
+        collector=NoOpAppMetricsCollector(),
         crop_params=crop_params,
         cleanup_level=CleanupLevel.NONE,
         visual_hash=False,
         sampling=1,
-        metric_prefix=MetricKey.ENCODING,
+        metric_prefix=AppMetricKey.ENCODING,
         measure_attempts=True,
     )
 

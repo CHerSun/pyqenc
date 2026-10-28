@@ -2,11 +2,10 @@
 # CHerSun 2026
 
 import asyncio
-import json
 import logging
 import uuid
 import warnings
-from collections.abc import Callable
+from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal
 from fractions import Fraction
@@ -21,13 +20,16 @@ from pyqenc.constants import (
 )
 from pyqenc.models import CropParams
 from pyqenc.quality import (
-    FullMetricStatistics,
-    MetricStats,
-    MetricType,
-    PerMetricStats,
     QualityLogs,
     QualityMeasurement,
     run_metrics,
+)
+from pyqenc.quality_metrics import (
+    MeasuredMetrics,
+    MetricInfo,
+    MetricStatKey,
+    MetricType,
+    StatisticType,
 )
 from pyqenc.utils.alive import AdvanceState, BarAdvance, ProgressBar
 from pyqenc.utils.ffmpeg_runner import FFmpegInput
@@ -129,251 +131,65 @@ _VIF_FILL_COLOR: str = "#C084D4"   # light purple (range fill)
 
 
 # ---------------------------------------------------------------------------
-# Parsers
+# Statistics (the measurer-owned shared quantile step)
 # ---------------------------------------------------------------------------
 
-def _parse_psnr_line(line: str) -> dict[str, float] | None:
-    """Parse one line from a PSNR log file."""
-    try:
-        parts  = line.split()
-        parsed: dict[str, int | float] = {}
-        for part in parts:
-            if ":" in part:
-                key, value = part.split(":", 1)
-                parsed[key] = int(value) if key == "n" else float(value)
-        if "n" in parsed and "psnr_avg" in parsed:
-            return {"n": parsed["n"], MetricType.PSNR.value: parsed["psnr_avg"]}
-        return None
-    except ValueError, IndexError:
-        return None
+_QUANTILE_STATS: tuple[tuple[StatisticType, float], ...] = (
+    (StatisticType.MIN,  0.00),
+    (StatisticType.P05,  0.05),
+    (StatisticType.P10,  0.10),
+    (StatisticType.P25,  0.25),
+    (StatisticType.MEDIAN, 0.50),
+    (StatisticType.P75,  0.75),
+    (StatisticType.P90,  0.90),
+    (StatisticType.P95,  0.95),
+)
 
+def _quantile_statistics(
+    values:         pd.Series,
+    std_cutoff_max: float | None = None,
+) -> dict[StatisticType, float]:
+    """Compute the closed set's quantile statistics for a numeric series.
 
-def _parse_ssim_line(line: str) -> dict[str, float] | None:
-    """Parse one line from an SSIM log file."""
-    try:
-        parts  = line.split()
-        parsed: dict[str, int | float] = {}
-        for part in parts:
-            if ":" in part:
-                key, value = part.split(":", 1)
-                parsed[key] = int(value) if key == "n" else float(value)
-        if "n" in parsed and "All" in parsed:
-            return {"n": parsed["n"], MetricType.SSIM.value: parsed["All"]}
-        return None
-    except ValueError, IndexError:
-        return None
-
-
-def parse_psnr_file(file_path: Path, factor: int = 1) -> pd.DataFrame:
-    """Parse a PSNR log file into a frame-indexed DataFrame.
-
-    PSNR logs count from n=1, so ``frameNum = (n - 1) * factor``.
+    The quantile machinery behind the measurer's shared statistics step —
+    pandas stays here. Values are expected to already be on the display
+    scale.
 
     Args:
-        file_path: Path to the PSNR log file.
-        factor:    Frame sampling factor used during metric generation.
+        values:         The series (already normalized).
+        std_cutoff_max: Exclude values above this threshold from std
+                        (``None`` = every value).
 
     Returns:
-        DataFrame indexed by ``frameNum`` with a single ``psnr`` column.
-
-    Raises:
-        ValueError: If the file is not a valid PSNR log.
+        Every closed-set statistic for the series.
     """
-    data: list[dict[str, float]] = []
-    is_psnr = False
-    with file_path.open("r") as fh:
-        for line in fh:
-            if parsed := _parse_psnr_line(line):
-                data.append({
-                    _KEY_FRAME_NUM:      (parsed["n"] - 1) * factor,
-                    MetricType.PSNR.value: parsed[MetricType.PSNR.value],
-                })
-                is_psnr = True
-            elif not is_psnr:
-                break
-    if not data:
-        raise ValueError(f"Not a PSNR log file: {file_path}")
-    df = pd.DataFrame(data)
-    df.set_index(_KEY_FRAME_NUM, inplace=True)
-    return df
+    stats = {stat: float(values.quantile(q)) for stat, q in _QUANTILE_STATS}
+    stats[StatisticType.MAX] = float(values.max())
+    std_values = values if std_cutoff_max is None else values[values <= std_cutoff_max]
+    stats[StatisticType.STD] = float(std_values.std())
+    return stats
 
 
-def parse_ssim_file(file_path: Path, factor: int = 1) -> pd.DataFrame:
-    """Parse an SSIM log file into a frame-indexed DataFrame.
+def _metric_statistics(
+    values: pd.Series,
+    info:    MetricInfo,
+) -> dict[StatisticType, float]:
+    """Compute the quantile-based statistics for one metric's normalized series.
 
-    SSIM logs count from n=1, so ``frameNum = (n - 1) * factor``.
+    The shared statistics step (Req 10.2) — owned by the measurer; the
+    per-metric classes never duplicate it. The metric's descriptor carries
+    its std cutoff.
 
     Args:
-        file_path: Path to the SSIM log file.
-        factor:    Frame sampling factor used during metric generation.
+        values: Normalized per-frame values.
+        info:   The metric's descriptor.
 
     Returns:
-        DataFrame indexed by ``frameNum`` with a single ``ssim`` column.
-
-    Raises:
-        ValueError: If the file is not a valid SSIM log.
+        Every closed-set statistic for the metric.
     """
-    data: list[dict[str, float]] = []
-    is_ssim = False
-    with file_path.open("r") as fh:
-        for line in fh:
-            if parsed := _parse_ssim_line(line):
-                data.append({
-                    _KEY_FRAME_NUM:      (parsed["n"] - 1) * factor,
-                    MetricType.SSIM.value: parsed[MetricType.SSIM.value],
-                })
-                is_ssim = True
-            elif not is_ssim:
-                break
-    if not data:
-        raise ValueError(f"Not a SSIM log file: {file_path}")
-    df = pd.DataFrame(data)
-    df.set_index(_KEY_FRAME_NUM, inplace=True)
-    return df
+    return _quantile_statistics(values, info.std_cutoff_max)
 
 
-def parse_vmaf_file(file_path: Path, factor: int = 1) -> pd.DataFrame:
-    """Parse a VMAF JSON file into a frame-indexed DataFrame.
-
-    VMAF reports actual frame numbers starting from 0; no alignment adjustment
-    is needed.  The ``factor`` parameter is accepted for API consistency.
-
-    Args:
-        file_path: Path to the VMAF JSON file.
-        factor:    Frame sampling factor (accepted for consistency, unused).
-
-    Returns:
-        DataFrame indexed by ``frameNum`` with a single ``vmaf`` column.
-
-    Raises:
-        ValueError: If the file is not a valid VMAF JSON.
-        TypeError: If the VMAF JSON structure has wrong types (``frames`` is
-                   not an array, or a frame entry is not an object).
-    """
-    try:
-        with file_path.open("r") as fh:
-            vmaf_data = json.load(fh)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"Invalid JSON in VMAF file {file_path}: {exc}") from exc
-
-    frames = vmaf_data.get("frames")
-    if not isinstance(frames, list):
-        raise TypeError(f"VMAF 'frames' is not an array: {file_path}")
-    if not frames:
-        raise ValueError(f"VMAF 'frames' array is empty: {file_path}")
-
-    data: list[dict[str, float | int]] = []
-    for frame in frames:
-        if not isinstance(frame, dict):
-            raise TypeError(f"VMAF frame is not a dictionary: {file_path}")
-        n    = frame.get("frameNum")
-        vmaf = frame.get("metrics", {}).get("vmaf")
-        if n is not None and vmaf is not None:
-            data.append({_KEY_FRAME_NUM: n, MetricType.VMAF.value: vmaf})
-        else:
-            raise ValueError(f"NOT a VMAF file: {file_path}")
-
-    df = pd.DataFrame(data)
-    df.set_index(_KEY_FRAME_NUM, inplace=True)
-    return df
-
-
-def parse_vif_file(file_path: Path, factor: int = 1) -> pd.DataFrame:
-    """Parse VIF per-frame scores from a VMAF JSON file.
-
-    VIF data is embedded in the VMAF JSON when libvmaf is run with
-    ``feature=name=vif``.  Each frame contains ``integer_vif_scale0``
-    through ``integer_vif_scale3`` (range 0–1, where 1.0 = lossless).
-    The combined VIF score is the average of the four scales.
-
-    Args:
-        file_path: Path to the VMAF JSON file (same file as ``parse_vmaf_file``).
-        factor:    Frame sampling factor used during metric generation.
-
-    Returns:
-        DataFrame indexed by ``frameNum`` with a single ``vif`` column
-        containing the combined VIF score per frame (range 0–1).
-
-    Raises:
-        ValueError: If the file is not a valid VMAF JSON or contains no VIF data.
-    """
-    try:
-        with file_path.open("r") as fh:
-            vmaf_data = json.load(fh)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"Invalid JSON in VIF/VMAF file {file_path}: {exc}") from exc
-
-    frames = vmaf_data.get("frames")
-    if not isinstance(frames, list) or not frames:
-        raise ValueError(f"No frames found in VIF/VMAF file: {file_path}")
-
-    _VIF_SCALES = (
-        "integer_vif_scale0",
-        "integer_vif_scale1",
-        "integer_vif_scale2",
-        "integer_vif_scale3",
-    )
-
-    data: list[dict[str, float | int]] = []
-    for frame in frames:
-        metrics = frame.get("metrics", {})
-        scales  = [metrics.get(s) for s in _VIF_SCALES]
-        if any(v is None for v in scales):
-            raise ValueError(
-                f"VIF scale data missing from frame {frame.get('frameNum')} in {file_path}. "
-                f"Ensure libvmaf was run with feature=name=vif."
-            )
-        combined = sum(scales) / len(scales)
-        data.append({
-            _KEY_FRAME_NUM:       frame["frameNum"],
-            MetricType.VIF.value: combined,
-        })
-
-    if not data:
-        raise ValueError(f"No VIF data found in: {file_path}")
-
-    df = pd.DataFrame(data)
-    df.set_index(_KEY_FRAME_NUM, inplace=True)
-    return df
-
-
-# ---------------------------------------------------------------------------
-# Statistics
-# ---------------------------------------------------------------------------
-
-def compute_statistics(
-    values:          pd.Series,
-    std_cutoff_max:  float | None = None,
-    std_cutoff_min:  float | None = None,
-) -> FullMetricStatistics:
-    """Compute quantile-based statistics for any numeric metric series.
-
-    Values are expected to already be on the display scale (normalized).
-    No additional clipping is applied here.
-
-    Args:
-        values:         Series of metric values (already normalized).
-        std_cutoff_max: Exclude values above this threshold from std calculation.
-        std_cutoff_min: Exclude values below this threshold from std calculation.
-
-    Returns:
-        Dictionary with ``min``, ``p5``–``p95``, ``max``, and ``std``.
-    """
-    levels = [0.00, 0.05, 0.10, 0.25, 0.50, 0.75, 0.90, 0.95]
-    keys   = ["min", "p5", "p10", "p25", "p50", "p75", "p90", "p95", "max", "std"]
-
-    stats: list[float] = [float(v) for v in values.quantile(levels)]
-    stats.append(float(values.max()))
-
-    std_values = values
-    if std_cutoff_max is not None:
-        std_values = std_values[std_values <= std_cutoff_max]
-    if std_cutoff_min is not None:
-        std_values = std_values[std_values >= std_cutoff_min]
-    stats.append(float(std_values.std()))
-
-    # keys/stats are parallel constants covering exactly FullMetricStatistics
-    return cast(FullMetricStatistics, dict(zip(keys, stats)))
 
 
 # ---------------------------------------------------------------------------
@@ -443,14 +259,15 @@ DEFAULT_METRIC_STYLES: dict[MetricType, MetricVisualStyle] = {
 # ---------------------------------------------------------------------------
 
 def create_unified_plot(
-    df_norm:             pd.DataFrame,
+    series_norm:         dict[MetricType, pd.Series],
+    stats:               Mapping[MetricType, Mapping[StatisticType, float]],
     factor:              int,
     output_path:         Path,
     title:               str                                  = "Video Quality Metrics Analysis",
     styles:              dict[MetricType, MetricVisualStyle] | None = None,
     fps:                 Fraction | None                      = None,
     chunk_start_seconds: float                               = 0.0,
-) -> dict[MetricType, FullMetricStatistics]:
+) -> None:
     """Create a unified quality-metrics plot and save it to disk.
 
     Generates a figure with:
@@ -459,9 +276,10 @@ def create_unified_plot(
     - Per-metric statistics bar subplots below the main plot.
 
     Args:
-        df_norm:             Normalized DataFrame (output of ``normalize_metrics``),
-                             indexed by ``frameNum`` with one column per metric
-                             (column names are ``MetricType.value`` strings).
+        series_norm:         Normalized per-metric series (one per measured
+                             metric, indexed by frame number).
+        stats:               The statistics to display — one closed-set map
+                             per metric (the measurer's shared step output).
         factor:              Frame sampling factor used during metric generation.
         output_path:         Destination path for the saved PNG.
         title:               Plot title.
@@ -476,25 +294,15 @@ def create_unified_plot(
                              actual position in the source video rather than starting
                              from 0.
 
-    Returns:
-        Mapping of ``MetricType`` to full ``FullMetricStatistics``.
-
     Raises:
-        ValueError: If ``df_norm`` contains no recognized metric columns.
+        ValueError: If ``series_norm`` is empty.
     """
     # Callers pass the exact rational ``fps_fraction`` — coerce to float here
     # so every x-axis arithmetic stays float (Fraction + float index would
     # produce object-dtype arrays matplotlib cannot plot).
     fps_val: float | None = float(fps) if fps is not None else None
 
-    # Derive per-metric Series from DataFrame columns
-    metrics: dict[MetricType, pd.Series] = {}
-    for col in df_norm.columns:
-        try:
-            mt = MetricType(col)
-        except ValueError:
-            continue
-        metrics[mt] = df_norm[col]
+    metrics: dict[MetricType, pd.Series] = dict(series_norm)
 
     if not metrics:
         raise ValueError("No valid metrics provided for visualization")
@@ -656,12 +464,6 @@ def create_unified_plot(
         lines.append(line)
         labels.append(style.label)
 
-    # Compute full statistics from scaled values
-    stats: dict[MetricType, FullMetricStatistics] = {
-        mt: compute_statistics(scaled_values[mt])
-        for mt in scaled_values
-    }
-
     # Collect summary box payloads — placed after tight_layout by MEASURED text
     # width (lossless counts and value digits vary the rendered box width run
     # to run; a fixed advance step overlaps on wide boxes).
@@ -685,23 +487,12 @@ def create_unified_plot(
 
         lossless_count = int((vals >= 100.0).sum())
 
-        display_stats: dict[str, float] = cast(dict[str, float], metric_stats)
-
-        max_label: str   = "Max"
-        max_value: float = display_stats["max"]
-        if metric_type == MetricType.PSNR and np.isinf(max_value):
-            for pkey, plabel in [("p95", "95%"), ("p90", "90%"), ("p75", "75%"), ("p50", "50%")]:
-                if not np.isinf(display_stats[pkey]):
-                    max_label = plabel
-                    max_value = display_stats[pkey]
-                    break
-
         summary_text = (
             f"{metric_type.value.upper()}:\n"
-            f"  Min: {display_stats['min']:>6.2f}{style.unit}\n"
-            f"  Med: {display_stats['p50']:>6.2f}{style.unit}\n"
-            f"  {max_label}: {max_value:>6.2f}{style.unit}\n"
-            f"  Std: {display_stats['std']:>6.2f}{style.unit}\n"
+            f"  Min: {metric_stats[StatisticType.MIN]:>6.2f}{style.unit}\n"
+            f"  Med: {metric_stats[StatisticType.MEDIAN]:>6.2f}{style.unit}\n"
+            f"  Max: {metric_stats[StatisticType.MAX]:>6.2f}{style.unit}\n"
+            f"  Std: {metric_stats[StatisticType.STD]:>6.2f}{style.unit}\n"
             f"  Lossless: {lossless_count} ({style.lossless_label})"
         )
         _summary_boxes.append((
@@ -712,8 +503,10 @@ def create_unified_plot(
     ax_main.legend(lines, labels, loc="lower right", fontsize=_FONT_LEGEND, framealpha=_LEGEND_ALPHA)
 
     # Statistics bar subplots
-    bar_labels = ["Min", "5%", "10%", "25%", "50%", "75%", "90%", "95%", "Max"]
-    stat_keys  = ["min", "p5", "p10", "p25", "p50", "p75", "p90", "p95", "max"]
+    bar_stats: tuple[StatisticType, ...] = (
+        *[stat for stat, _ in _QUANTILE_STATS],
+        StatisticType.MAX,
+    )
     subplot_idx = 0
 
     for metric_type in metrics:
@@ -724,8 +517,8 @@ def create_unified_plot(
         ax_stats     = fig.add_subplot(gs[1, subplot_idx])
         subplot_idx += 1
 
-        stat_view   = cast(dict[str, float], metric_stats)
-        stat_values = [stat_view[k] for k in stat_keys]
+        bar_labels = [statistic.display for statistic in bar_stats]
+        stat_values = [metric_stats[statistic] for statistic in bar_stats]
 
         y_positions: np.ndarray                  = np.arange(len(bar_labels))
         base_rgb:    tuple[float, float, float]  = mcolors.to_rgb(style.color)
@@ -781,8 +574,6 @@ def create_unified_plot(
     fig.savefig(output_path, dpi=_PLOT_DPI)
     plt.close(fig)
 
-    return stats
-
 
 # ---------------------------------------------------------------------------
 # High-level API
@@ -791,160 +582,6 @@ def create_unified_plot(
 # All four metrics run together in a single ffmpeg pass.
 _metrics_all: list[MetricType] = list(MetricType)
 
-
-def _is_known_metric(col: str) -> bool:
-    """Return ``True`` if *col* is a recognized ``MetricType.value``."""
-    try:
-        MetricType(col)
-        return True
-    except ValueError:
-        return False
-
-
-def _extract_key_stats(full_stats: FullMetricStatistics, metric_type: MetricType) -> MetricStats:
-    """Extract the key statistics subset from a full statistics dict.
-
-    For PSNR, substitutes the highest non-inf percentile for ``max`` when the
-    true maximum is infinite.
-
-    Args:
-        full_stats:  Full statistics dictionary.
-        metric_type: Metric type (affects PSNR max handling).
-
-    Returns:
-        ``MetricStats`` with ``min``, ``p05``, ``p10``, ``p25``, ``median``,
-        ``p75``, ``p90``, ``p95``, ``max``, and ``std``.
-    """
-    max_value = full_stats["max"]
-    if metric_type == MetricType.PSNR and np.isinf(max_value):
-        for pkey in ("p95", "p90", "p75", "p50"):
-            candidate = full_stats[pkey]
-            if not np.isinf(candidate):
-                max_value = candidate
-                break
-    return {
-        "min":    full_stats["min"],
-        "p05":    full_stats["p5"],
-        "p10":    full_stats["p10"],
-        "p25":    full_stats["p25"],
-        "median": full_stats["p50"],
-        "p75":    full_stats["p75"],
-        "p90":    full_stats["p90"],
-        "p95":    full_stats["p95"],
-        "max":    max_value,
-        "std":    full_stats["std"],
-    }
-
-
-def parse_metrics(artifacts: QualityLogs, factor: int = 1) -> pd.DataFrame:
-    """Parse all available metric files from *artifacts* into a single DataFrame.
-
-    Dispatches to the individual parsers (``parse_psnr_file``, ``parse_ssim_file``,
-    ``parse_vmaf_file``, ``parse_vif_file``) for each non-``None``, existing path
-    in *artifacts*.  Results are joined via ``pd.concat(..., axis=1)`` on the shared
-    ``frameNum`` index.
-
-    Frame number alignment at factor *F*:
-    - PSNR/SSIM: raw ``n`` is 1-based sequential; parser maps to ``(n-1)*F`` → ``{0, F, 2F, …}``
-    - VMAF/VIF: raw ``frameNum`` is the true video frame number → ``{0, F, 2F, …}``
-
-    All four metrics produce the same index at the same factor, so the inner join
-    is lossless with no NaN.
-
-    Individual parse failures are caught, logged as warnings, and that metric is
-    omitted from the result.
-
-    Args:
-        artifacts: ``QualityLogs`` with paths to metric files.
-        factor:    Frame sampling factor used during metric generation.
-
-    Returns:
-        DataFrame indexed by ``frameNum`` with one column per successfully parsed
-        metric (column names are ``MetricType.value`` strings).
-
-    Raises:
-        ValueError: If no metric files could be parsed.
-    """
-    # Map each metric to its parser and the relevant artifact path.
-    _parsers: list[tuple[MetricType, Path | None, Callable[[Path, int], pd.DataFrame]]] = [
-        (MetricType.PSNR, artifacts.psnr_log,  parse_psnr_file),
-        (MetricType.SSIM, artifacts.ssim_log,  parse_ssim_file),
-        (MetricType.VMAF, artifacts.vmaf_json, parse_vmaf_file),
-        (MetricType.VIF,  artifacts.vif_log,   parse_vif_file),
-    ]
-
-    frames: list[pd.DataFrame] = []
-    for metric_type, path, parser in _parsers:
-        if path is None or not path.exists():
-            continue
-        try:
-            df = parser(path, factor)
-            frames.append(df)
-            logger.debug("parse_metrics: parsed %s (%d frames)", metric_type.value, len(df))
-        except (OSError, ValueError, TypeError) as exc:
-            logger.warning("parse_metrics: failed to parse %s from %s: %s", metric_type.value, path, exc)
-
-    if not frames:
-        raise ValueError(
-            "parse_metrics: no metric files could be parsed from artifacts. "
-            "At least one valid metric file (PSNR, SSIM, VMAF, or VIF) is required."
-        )
-
-    return pd.concat(frames, axis=1)
-
-
-def normalize_metrics(df_raw: pd.DataFrame) -> pd.DataFrame:
-    """Convert raw metric values to the 0–100 display scale.
-
-    For each column whose name matches a ``MetricType.value``, applies
-    ``MetricType(col).info.normalize(series)``.  Columns not matching any
-    ``MetricType.value`` are passed through unchanged (forward-compatible).
-
-    Args:
-        df_raw: DataFrame with raw metric values (``frameNum`` index,
-                column names are ``MetricType.value`` strings).
-
-    Returns:
-        New DataFrame with the same index and columns, values on the 0–100 scale.
-    """
-    result = df_raw.copy()
-    for col in result.columns:
-        try:
-            mt = MetricType(col)
-        except ValueError:
-            continue  # unknown column — pass through unchanged
-        result[col] = mt.info.normalize(result[col])
-    return result
-
-
-def compute_metric_stats(df_norm: pd.DataFrame) -> PerMetricStats:
-    """Compute key statistics for each metric column in a normalized DataFrame.
-
-    For each column whose name matches a ``MetricType.value``, calls
-    ``compute_statistics`` then ``_extract_key_stats`` and stores the result.
-    Columns not matching any ``MetricType.value`` are silently skipped.
-
-    Args:
-        df_norm: Normalized DataFrame (output of ``normalize_metrics``).
-
-    Returns:
-        ``PerMetricStats`` mapping each recognized ``MetricType`` to its
-        ``MetricStats``.
-    """
-    result: PerMetricStats = {}
-    for col in df_norm.columns:
-        try:
-            mt = MetricType(col)
-        except ValueError:
-            continue
-        std_cutoff = 100.0 if mt == MetricType.PSNR else None
-        full = compute_statistics(df_norm[col], std_cutoff_max=std_cutoff)
-        result[mt] = _extract_key_stats(full, mt)
-        logger.debug(
-            "compute_metric_stats: %s min=%.2f med=%.2f max=%.2f",
-            mt.value, result[mt]["min"], result[mt]["median"], result[mt]["max"],
-        )
-    return result
 
 
 # ---------------------------------------------------------------------------
@@ -1051,12 +688,14 @@ def create_quality_plot(
 
     # Stats subplot
     quality_series  = pd.Series(qualities)
-    quality_stats   = compute_statistics(quality_series, std_cutoff_max=_QUALITY_Y_MAX)
+    quality_stats   = _quantile_statistics(quality_series, std_cutoff_max=_QUALITY_Y_MAX)
 
-    bar_labels  = ["Min", "5%", "25%", "50%", "75%", "95%", "Max"]
-    stat_keys   = ["min", "p5", "p25", "p50", "p75", "p95", "max"]
-    stat_view   = cast(dict[str, float], quality_stats)
-    stat_values = [stat_view[k] for k in stat_keys]
+    bar_stats   = (
+        StatisticType.MIN, StatisticType.P05, StatisticType.P25, StatisticType.MEDIAN,
+        StatisticType.P75, StatisticType.P95, StatisticType.MAX,
+    )
+    bar_labels  = [statistic.display for statistic in bar_stats]
+    stat_values = [quality_stats[statistic] for statistic in bar_stats]
 
     ax_stats    = fig.add_subplot(gs[1, :])
     y_positions: np.ndarray                 = np.arange(len(bar_labels))
@@ -1086,10 +725,10 @@ def create_quality_plot(
     summary_text = (
         f"{quality_label}:\n"
         f"  Chunks: {len(chunks)}\n"
-        f"  Min: {quality_stats['min']:>5.1f}\n"
-        f"  Med: {quality_stats['p50']:>5.1f}\n"
-        f"  Max: {quality_stats['max']:>5.1f}\n"
-        f"  Std: {quality_stats['std']:>5.1f}"
+        f"  Min: {quality_stats[StatisticType.MIN]:>5.1f}\n"
+        f"  Med: {quality_stats[StatisticType.MEDIAN]:>5.1f}\n"
+        f"  Max: {quality_stats[StatisticType.MAX]:>5.1f}\n"
+        f"  Std: {quality_stats[StatisticType.STD]:>5.1f}"
     )
 
     with warnings.catch_warnings():
@@ -1410,7 +1049,10 @@ class QualityMeasurer:
         """Parse metric files, generate the plot (measurement completion).
 
         Shared post-processing used by both ``measure_chunk`` and
-        ``measure_chunk_async`` after metric files have been produced.
+        ``measure_chunk_async`` after metric files have been produced. Each
+        metric's own ``parse_log`` yields its per-frame values; the shared
+        statistics step (this measurer) normalizes, indexes, and quantizes
+        them into the flat measured set.
 
         Args:
             encoded:             Path to the encoded video (used for plot title/path).
@@ -1424,28 +1066,68 @@ class QualityMeasurer:
                                  metric run's progress (``0`` = not determined).
 
         Returns:
-            ``QualityMeasurement`` with metrics, target results, and artifact paths.
+            ``QualityMeasurement`` with the flat measured set and artifact paths.
+
+        Raises:
+            ValueError: No metric file could be parsed.
         """
         logger.debug("Parsing metrics and generating plots")
         resolved_plot_path = plot_path if plot_path is not None else output_dir / f"{encoded.stem}.png"
 
-        artifacts_for_parse = QualityLogs(
+        logs = QualityLogs(
             psnr_log  = artifacts.psnr_log  if artifacts.psnr_log  is not None and artifacts.psnr_log.exists()  else None,
             ssim_log  = artifacts.ssim_log  if artifacts.ssim_log  is not None and artifacts.ssim_log.exists()  else None,
             vmaf_json = artifacts.vmaf_json if artifacts.vmaf_json is not None and artifacts.vmaf_json.exists() else None,
             vif_log   = artifacts.vif_log   if artifacts.vif_log   is not None and artifacts.vif_log.exists()   else None,
         )
+        paths: dict[MetricType, Path | None] = {
+            MetricType.PSNR: logs.psnr_log,
+            MetricType.SSIM: logs.ssim_log,
+            MetricType.VMAF: logs.vmaf_json,
+            MetricType.VIF:  logs.vif_log,
+        }
 
-        df_raw  = parse_metrics(artifacts_for_parse, sampling)
-        df_norm = normalize_metrics(df_raw)
-        metrics = compute_metric_stats(df_norm)
+        series:      dict[MetricType, pd.Series]                    = {}
+        stats:       dict[MetricType, dict[StatisticType, float]]   = {}
+        measured:    dict[MetricStatKey, float]                     = {}
+        for metric_type in _metrics_all:
+            path = paths[metric_type]
+            if path is None:
+                continue
+            try:
+                values = metric_type.info.parse_log(path)
+            except (OSError, ValueError, TypeError) as exc:
+                logger.warning("Failed to parse %s from %s: %s", metric_type.value, path, exc)
+                continue
+            # The subsample factor maps the i-th scored frame to source
+            # frame i*factor for every metric: PSNR/SSIM logs count their
+            # select-filtered output; VMAF/VIF report true frame numbers.
+            raw = pd.Series(
+                values,
+                index = [i * sampling for i in range(len(values))],
+                name  = metric_type.value,
+                dtype = float,
+            )
+            normalized = cast(pd.Series, metric_type.info.normalize(raw))
+            series[metric_type] = normalized
+            stats[metric_type]  = _metric_statistics(normalized, metric_type.info)
+            for statistic, value in stats[metric_type].items():
+                measured[MetricStatKey(metric_type, statistic)] = value
+            logger.debug("Parsed %s (%d frames)", metric_type.value, len(values))
+
+        if not series:
+            raise ValueError(
+                "No metric files could be parsed from artifacts. "
+                "At least one valid metric file (PSNR, SSIM, VMAF, or VIF) is required."
+            )
 
         plot_title = (
             f"Quality metrics\n"
             f"{encoded.stem.replace(TIME_SEPARATOR_MS, '.').replace(TIME_SEPARATOR_SAFE, ':')}"
         )
         create_unified_plot(
-            df_norm             = df_norm,
+            series_norm         = series,
+            stats               = stats,
             factor              = sampling,
             output_path         = resolved_plot_path,
             title               = plot_title,
@@ -1453,17 +1135,9 @@ class QualityMeasurer:
             chunk_start_seconds = chunk_start_seconds,
         )
 
-        # Delete tmp files after both parse_metrics and create_unified_plot have
-        # consumed them; the set dedups the shared VIF/VMAF path.
-        to_delete: set[Path] = set()
-        for path in (
-            artifacts_for_parse.psnr_log,
-            artifacts_for_parse.ssim_log,
-            artifacts_for_parse.vmaf_json,
-            artifacts_for_parse.vif_log,
-        ):
-            if path is not None:
-                to_delete.add(path)
+        # Delete tmp files after both the parse and the plot have consumed
+        # them; the set dedups the shared VIF/VMAF path.
+        to_delete: set[Path] = {path for path in paths.values() if path is not None}
         for path in to_delete:
             try:
                 path.unlink(missing_ok=True)
@@ -1474,7 +1148,7 @@ class QualityMeasurer:
         artifacts.plot = resolved_plot_path
 
         return QualityMeasurement(
-            metrics     = metrics,
+            metrics     = MeasuredMetrics(measured),
             logs        = artifacts,
             frame_count = frame_count,
         )

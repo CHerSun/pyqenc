@@ -6,6 +6,7 @@
 - Created: 2026-10-03
 - Amended: 2026-10-12 — convergence rework: one persisted row shape + one renderer for all four populations (optimization/merge × search/fixed); strategy rows show deltas in every mode; %-size deltas replace ratios; tolerance-epsilon dominance (§97) folds in; marks are mode-dependent; the shared plain-text table formatter (§119) folds in; the merge miss-detail block is dropped
 - Amended: 2026-10-17 — presentation restoration: the 2026-10-12 evening rulings lost on the unmerged branch tip re-land on main (value-driven widths with the compact header phrase, `+` rule crossings, `◆` absolute-pair markers, mode-native basis lines, legend line, blank line before the table) plus the new negligible-band ruling (Req 2.8: `≈`-prefixed deltas inside `acceptance_delta`)
+- Amended: 2026-10-27 — the Req 7 identity vocabulary and the Req 11.6 deferral are consumed by `2026-10-27 metric-stat-identity`: `MetricStatKey`/`StatisticType`/`MetricInfo` move to the leaf module `pyqenc/quality_metrics.py`; the deferred work (per-metric parser classes, the `QualityTarget` field fold, the full consumer retarget, the typed set roles `MeasuredMetrics`/`TargetedMetrics` with the single narrowing authority) lands there. This spec's requirements are otherwise unchanged.
 
 ## Cross-Spec Notes
 

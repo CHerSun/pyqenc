@@ -15,7 +15,7 @@ import pytest
 
 from pyqenc.api import extract_streams, process_audio
 from pyqenc.app_config import load_app_config
-from pyqenc.metrics import NoOpMetricsCollector
+from pyqenc.app_metrics import NoOpAppMetricsCollector
 from pyqenc.models import CleanupLevel
 from pyqenc.phase import (
     Artifact,
@@ -125,7 +125,7 @@ class TestClosureDerivedRegistry:
             force=False,
             cleanup=CleanupLevel.NONE,
             no_metrics=True,
-            collector=NoOpMetricsCollector(),
+            collector=NoOpAppMetricsCollector(),
             terminals=terminals,
         )
 

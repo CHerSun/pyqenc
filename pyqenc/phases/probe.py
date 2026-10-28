@@ -24,8 +24,8 @@ from typing import TYPE_CHECKING, ClassVar
 
 from pydantic import BaseModel
 
+from pyqenc.app_metrics import AppMetricKey
 from pyqenc.constants import CROP_SOURCE_DETECTED, CROP_SOURCE_MANUAL, TEMP_SUFFIX
-from pyqenc.metrics import MetricKey
 from pyqenc.models import (
     CropParams,
     CropYaml,
@@ -55,7 +55,7 @@ from pyqenc.utils.yaml_utils import load_model, save_model
 
 if TYPE_CHECKING:
     from pyqenc.app_config import AppConfig
-    from pyqenc.metrics import MetricsCollector
+    from pyqenc.app_metrics import AppMetricsCollector
 
 # ---------------------------------------------------------------------------
 # probe.yaml — the slow-facet sidecar (re-homed, Req 21)
@@ -188,14 +188,14 @@ class ProbePhase(Phase[ProbePhaseResult]):
     name:        str       = "probe"
     SIDECAR_NAME = "probe.yaml"
     DEPENDS_ON:  ClassVar[tuple[type[Phase], ...]] = (JobPhase, ExtractionPhase)
-    _METRIC_KEY: MetricKey = MetricKey.PROBE
+    _METRIC_KEY: AppMetricKey = AppMetricKey.PROBE
 
     def __init__(
         self,
         config:      AppConfig,
         phases:      PhaseRegistry,
         *,
-        collector:   MetricsCollector,
+        collector:   AppMetricsCollector,
         crop_params: CropParams | None = None,
         plan:        EncodingPlan,
     ) -> None:
@@ -343,7 +343,7 @@ class ProbePhase(Phase[ProbePhaseResult]):
             logger.info("Crop: %s (cached)", crop.display())
         else:
             logger.info("Detecting crop: %s", video.file.path.name)
-            with self._collector.time(MetricKey.PROBE, "crop_detect"):
+            with self._collector.time(AppMetricKey.PROBE, "crop_detect"):
                 crop = detect_crop_parameters(video)
             crop_source = CROP_SOURCE_DETECTED
 
@@ -451,7 +451,7 @@ class ProbePhase(Phase[ProbePhaseResult]):
                 timestamps_path,
             )
 
-        with self._collector.time(MetricKey.PROBE, "frame_count"):
+        with self._collector.time(AppMetricKey.PROBE, "frame_count"):
             try:
                 counted = get_frame_count(video.file.path)
             except FrameCountError as exc:

@@ -11,7 +11,8 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from pyqenc.models import QualityTarget
-from pyqenc.quality import MetricType, _score_attempt
+from pyqenc.quality import _score_attempt
+from pyqenc.quality_metrics import MetricStatKey, MetricType, TargetedMetrics
 
 # ---------------------------------------------------------------------------
 # Shared strategies
@@ -37,6 +38,11 @@ _ACTUAL_RANGES: dict[MetricType, tuple[float, float]] = {
 _STATISTICS = ["min", "median", "max", "p05", "p10", "p25", "p75", "p90", "p95"]
 
 
+def _tm(**pairs: float) -> TargetedMetrics:
+    """Build a targeted map from sidecar-form keys (``_tm(vmaf_min=96.0)``)."""
+    return TargetedMetrics({MetricStatKey.parse(key): value for key, value in pairs.items()})
+
+
 @st.composite
 def st_single_target_with_actual(
     draw: st.DrawFn,
@@ -51,8 +57,7 @@ def st_single_target_with_actual(
     target_val  = draw(st.floats(min_value=t_lo, max_value=t_hi, allow_nan=False, allow_infinity=False))
     actual_val  = draw(st.floats(min_value=a_lo, max_value=a_hi, allow_nan=False, allow_infinity=False))
     target = QualityTarget(
-        metric    = metric_type.value,
-        statistic = statistic,
+        identity  = MetricStatKey.parse(f"{metric_type.value}-{statistic}"),
         value     = target_val,
     )
     return target, actual_val
@@ -63,7 +68,7 @@ def st_target_list_with_actuals(
     draw: st.DrawFn,
     min_size: int = 1,
     max_size: int = 3,
-) -> tuple[list[QualityTarget], dict[str, float]]:
+) -> tuple[list[QualityTarget], TargetedMetrics]:
     """Draw a list of (QualityTarget, actual) pairs with unique metric+stat keys."""
     # Pick distinct (metric, statistic) combinations to avoid duplicate keys
     metric_types = draw(
@@ -75,14 +80,13 @@ def st_target_list_with_actuals(
         )
     )
     targets: list[QualityTarget] = []
-    metrics: dict[str, float]   = {}
+    metrics: dict[MetricStatKey, float] = {}
     for mt in metric_types:
         target, actual = draw(st_single_target_with_actual(metric_type=mt))
-        key = f"{target.metric}_{target.statistic}"
         # Ensure unique keys (same metric, different stat could collide — use fixed stat per metric)
         targets.append(target)
-        metrics[key] = actual
-    return targets, metrics
+        metrics[target.identity] = actual
+    return targets, TargetedMetrics(metrics)
 
 
 # ---------------------------------------------------------------------------
@@ -100,7 +104,7 @@ class TestScoreAttemptSignContract:
     @settings(max_examples=200)
     def test_all_pass_large_surplus_returns_positive(
         self,
-        target_data: tuple[list[QualityTarget], dict[str, float]],
+        target_data: tuple[list[QualityTarget], TargetedMetrics],
     ) -> None:
         """When all targets pass and at least one surplus > acceptance_delta → positive score.
 
@@ -110,11 +114,11 @@ class TestScoreAttemptSignContract:
         targets, _ = target_data
 
         # Force all actuals to pass with surplus > acceptance_delta
-        forced_metrics: dict[str, float] = {}
+        forced_metrics: dict[MetricStatKey, float] = {}
         has_large_surplus = False
         for target in targets:
-            key  = f"{target.metric}_{target.statistic}"
-            info = MetricType(target.metric).info
+            key  = target.identity
+            info = target.identity.metric.info
             # Set actual = target + 2 * acceptance_delta (guaranteed large surplus)
             surplus = info.acceptance_delta * 2.0 + 1.0
             if info.higher_is_better:
@@ -122,7 +126,7 @@ class TestScoreAttemptSignContract:
             else:
                 actual = target.value - surplus
             # Clamp to realistic range
-            a_lo, a_hi = _ACTUAL_RANGES[MetricType(target.metric)]
+            a_lo, a_hi = _ACTUAL_RANGES[target.identity.metric]
             actual = max(a_lo, min(a_hi, actual))
             forced_metrics[key] = actual
             # Check if this still gives a large surplus after clamping
@@ -136,20 +140,20 @@ class TestScoreAttemptSignContract:
 
         # Verify all targets actually pass with large surplus
         all_pass = all(
-            MetricType(t.metric).info.deficit(forced_metrics[f"{t.metric}_{t.statistic}"], t.value) > MetricType(t.metric).info.acceptance_delta
+            t.identity.metric.info.deficit(forced_metrics[t.identity], t.value) > t.identity.metric.info.acceptance_delta
             for t in targets
         )
         if not all_pass:
             return
 
-        score = _score_attempt(forced_metrics, targets)
+        score = _score_attempt(TargetedMetrics(forced_metrics), targets)
         assert score > 0.0, f"Expected positive score, got {score}"
 
     @given(st_target_list_with_actuals(min_size=1, max_size=3))
     @settings(max_examples=200)
     def test_all_pass_within_delta_returns_zero(
         self,
-        target_data: tuple[list[QualityTarget], dict[str, float]],
+        target_data: tuple[list[QualityTarget], TargetedMetrics],
     ) -> None:
         """When all targets pass and all surpluses ≤ acceptance_delta → 0.0.
 
@@ -159,20 +163,20 @@ class TestScoreAttemptSignContract:
         targets, _ = target_data
 
         # Force all actuals to pass with surplus exactly at 0 (target value itself)
-        forced_metrics: dict[str, float] = {}
+        forced_metrics: dict[MetricStatKey, float] = {}
         for target in targets:
-            key  = f"{target.metric}_{target.statistic}"
+            key  = target.identity
             # surplus = 0 ≤ acceptance_delta always
             forced_metrics[key] = target.value
 
-        score = _score_attempt(forced_metrics, targets)
+        score = _score_attempt(TargetedMetrics(forced_metrics), targets)
         assert score == 0.0, f"Expected 0.0 (early acceptance), got {score}"
 
     @given(st_target_list_with_actuals(min_size=1, max_size=3))
     @settings(max_examples=200)
     def test_any_fail_returns_negative(
         self,
-        target_data: tuple[list[QualityTarget], dict[str, float]],
+        target_data: tuple[list[QualityTarget], TargetedMetrics],
     ) -> None:
         """When at least one target fails → negative score.
 
@@ -182,10 +186,10 @@ class TestScoreAttemptSignContract:
         targets, _ = target_data
 
         # Force the first target to fail, rest pass at target value
-        forced_metrics: dict[str, float] = {}
+        forced_metrics: dict[MetricStatKey, float] = {}
         for i, target in enumerate(targets):
-            key  = f"{target.metric}_{target.statistic}"
-            info = MetricType(target.metric).info
+            key  = target.identity
+            info = target.identity.metric.info
             if i == 0:
                 # Force fail: actual is worse than target by a meaningful margin
                 deficit = -1.0  # negative deficit = fail
@@ -194,7 +198,7 @@ class TestScoreAttemptSignContract:
                 else:
                     actual = target.value - deficit   # above target (worse for inverted)
                 # Clamp to realistic range
-                a_lo, a_hi = _ACTUAL_RANGES[MetricType(target.metric)]
+                a_lo, a_hi = _ACTUAL_RANGES[target.identity.metric]
                 actual = max(a_lo, min(a_hi, actual))
                 # Verify it actually fails after clamping
                 real_deficit = info.deficit(actual, target.value)
@@ -206,14 +210,14 @@ class TestScoreAttemptSignContract:
                 # Pass at exactly target value
                 forced_metrics[key] = target.value
 
-        score = _score_attempt(forced_metrics, targets)
+        score = _score_attempt(TargetedMetrics(forced_metrics), targets)
         assert score < 0.0, f"Expected negative score, got {score}"
 
     @given(st_target_list_with_actuals(min_size=1, max_size=3))
     @settings(max_examples=200)
     def test_missing_key_raises_value_error(
         self,
-        target_data: tuple[list[QualityTarget], dict[str, float]],
+        target_data: tuple[list[QualityTarget], TargetedMetrics],
     ) -> None:
         """Missing any target key in metrics raises ValueError.
 
@@ -222,8 +226,8 @@ class TestScoreAttemptSignContract:
         """
         targets, metrics = target_data
         # Remove the first target's key from metrics
-        first_key = f"{targets[0].metric}_{targets[0].statistic}"
-        incomplete = {k: v for k, v in metrics.items() if k != first_key}
+        first_key = targets[0].identity
+        incomplete = TargetedMetrics({k: v for k, v in metrics.items() if k != first_key})
 
         with pytest.raises(ValueError):
             _score_attempt(incomplete, targets)
@@ -233,7 +237,7 @@ class TestScoreAttemptSignContract:
     @pytest.mark.skip(reason="Known issue: _score_attempt returns 0.0 (early accept) when surplus == acceptance_delta; test expectation too strict")
     def test_score_sign_matches_pass_fail(
         self,
-        target_data: tuple[list[QualityTarget], dict[str, float]],
+        target_data: tuple[list[QualityTarget], TargetedMetrics],
     ) -> None:
         """score > 0 iff all pass with large surplus; score == 0 iff all pass within delta; score < 0 iff any fail.
 
@@ -246,11 +250,11 @@ class TestScoreAttemptSignContract:
         all_pass     = True
         early_accept = True
         for target in targets:
-            key  = f"{target.metric}_{target.statistic}"
-            actual = metrics.get(key)
+            key     = target.identity
+            actual  = metrics.get(key)
             if actual is None:
                 return  # skip if key missing (shouldn't happen with our strategy)
-            info    = MetricType(target.metric).info
+            info    = target.identity.metric.info
             if math.isinf(actual):
                 actual = info.lossless_value
             deficit = info.deficit(actual, target.value)
@@ -319,7 +323,7 @@ class TestQualitySearchConvergence:
         intercept       = vmaf_target_val - slope * q_cross
 
         granularity = Decimal("1")
-        target      = QualityTarget(metric="vmaf", statistic="min", value=vmaf_target_val)
+        target      = QualityTarget(identity=MetricStatKey.parse("vmaf-min"), value=vmaf_target_val)
         search      = QualitySearch(
             quality_better  = Decimal("0"),
             quality_worse   = Decimal("51"),
@@ -333,7 +337,7 @@ class TestQualitySearchConvergence:
         current_q = Decimal("25")  # start at midpoint
         while True:
             vmaf   = _linear_vmaf(current_q, slope, intercept)
-            next_q = search.record(current_q, {"vmaf_min": vmaf})
+            next_q = search.record(current_q, _tm(vmaf_min=vmaf))
             if next_q is None:
                 break
             current_q = next_q
@@ -398,7 +402,7 @@ class TestQualitySearchV2Convergence:
             return
 
         granularity = Decimal("1")
-        target      = QualityTarget(metric="vmaf", statistic="min", value=vmaf_target_val)
+        target      = QualityTarget(identity=MetricStatKey.parse("vmaf-min"), value=vmaf_target_val)
         search      = QualitySearchV2(
             quality_better  = Decimal("0"),
             quality_worse   = Decimal("51"),
@@ -411,7 +415,7 @@ class TestQualitySearchV2Convergence:
         current_q = Decimal("25")  # start at midpoint
         while True:
             vmaf   = _quadratic_vmaf(current_q, a, q_sweet, peak)
-            next_q = search.record(current_q, {"vmaf_min": vmaf})
+            next_q = search.record(current_q, _tm(vmaf_min=vmaf))
             if next_q is None:
                 break
             current_q = next_q
@@ -483,7 +487,7 @@ class TestFinalityAfterExhaustion:
 
         worse       = better + span
         granularity = Decimal("1")
-        target      = QualityTarget(metric="vmaf", statistic="min", value=90.0)
+        target      = QualityTarget(identity=MetricStatKey.parse("vmaf-min"), value=90.0)
 
         impls = [QualitySearch, QualitySearchV2]
         search = impls[impl_idx](
@@ -500,7 +504,7 @@ class TestFinalityAfterExhaustion:
         exhausted_at = None
         for idx in range(200):
             passes  = oracle[idx % len(oracle)]
-            metrics = {"vmaf_min": 95.0 if passes else 80.0}
+            metrics = _tm(vmaf_min=95.0 if passes else 80.0)
             next_q  = search.record(current_q, metrics)
             if next_q is None:
                 exhausted_at = search.attempts
@@ -511,7 +515,7 @@ class TestFinalityAfterExhaustion:
 
         # All post-exhaustion calls must return None.
         for i, passes in enumerate(extra):
-            metrics = {"vmaf_min": 95.0 if passes else 80.0}
+            metrics = _tm(vmaf_min=95.0 if passes else 80.0)
             result  = search.record(current_q, metrics)
             assert result is None, (
                 f"Expected None after exhaustion (call {i+1}), got {result}"
@@ -557,7 +561,7 @@ class TestProtocolStateInvariants:
 
         worse       = better + span
         granularity = Decimal("1")
-        target      = QualityTarget(metric="vmaf", statistic="min", value=90.0)
+        target      = QualityTarget(identity=MetricStatKey.parse("vmaf-min"), value=90.0)
 
         impls = [QualitySearch, QualitySearchV2]
         search = impls[impl_idx](
@@ -581,7 +585,7 @@ class TestProtocolStateInvariants:
         current_q = (current_q / granularity).to_integral_value() * granularity
 
         for i, passes in enumerate(oracle):
-            metrics = {"vmaf_min": 95.0 if passes else 80.0}
+            metrics = _tm(vmaf_min=95.0 if passes else 80.0)
 
             # Compute ground-truth score before recording.
             score = _score_attempt(metrics, [target])

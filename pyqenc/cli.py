@@ -26,6 +26,7 @@ from pyqenc.api import (
     run_pipeline,
 )
 from pyqenc.app_config import load_app_config
+from pyqenc.app_metrics import flush_all_metrics
 from pyqenc.constants import (
     CONFIG_DIR_HOME,
     CONFIG_FILENAME_CWD,
@@ -34,7 +35,6 @@ from pyqenc.constants import (
     FAILURE_SYMBOL_MAJOR,
     SUCCESS_SYMBOL_MAJOR,
 )
-from pyqenc.metrics import flush_all_metrics
 from pyqenc.models import (
     CleanupLevel,
     CropParams,

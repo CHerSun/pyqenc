@@ -16,21 +16,21 @@ from typing import cast
 from unittest.mock import patch
 
 import pytest
-from hypothesis import given, settings
+from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
 from pyqenc.models import QualityTarget
 
 # Module-level imports avoid first-example import overhead (pandas/matplotlib
 # take ~2-3 s on first import on Windows, which would exceed the deadline).
-from pyqenc.quality import MetricInfo, MetricType, QualityLogs
-from pyqenc.utils.visualization import (
-    QualityMeasurer,
-    compute_metric_stats,
-    normalize_metrics,
-    parse_metrics,
-    parse_vif_file,
+from pyqenc.quality_metrics import (
+    MeasuredMetrics,
+    MetricInfo,
+    MetricStatKey,
+    MetricType,
+    StatisticType,
 )
+from pyqenc.utils.visualization import QualityMeasurer
 
 # ---------------------------------------------------------------------------
 # Shared strategies
@@ -107,16 +107,16 @@ def test_quality_target_parse_accepts_vif(stat: str, value: float) -> None:
     # Feature: vif-metric-support, Property 12: QualityTarget.parse accepts VIF
     """
     result = QualityTarget.parse(f"{MetricType.VIF.value}-{stat}:{value}")
-    assert result.metric    == MetricType.VIF.value
-    assert result.statistic == stat
+    assert result.identity.metric    == MetricType.VIF
+    assert result.identity.statistic == StatisticType(stat)
     assert abs(result.value - value) < 1e-9
 
 
 def test_quality_target_parse_vif_example() -> None:
     """Concrete example: 'vif-min:85.0' parses correctly (Req 7.1)."""
     result = QualityTarget.parse("vif-min:85.0")
-    assert result.metric    == MetricType.VIF.value
-    assert result.statistic == "min"
+    assert result.identity.metric    == MetricType.VIF
+    assert result.identity.statistic == StatisticType.MIN
     assert result.value     == 85.0
 
 
@@ -127,62 +127,60 @@ def test_quality_target_parse_invalid_metric_raises() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Property 6: parse_vif_file DataFrame structure
+# Property 6: parse_log structure (one value per frame, frame order)
 # deadline=1000: first call imports pandas (~1-2 s on Windows cold start).
 # ---------------------------------------------------------------------------
 
 
 @settings(max_examples=100, deadline=1000)
 @given(frame_values=st.lists(_st_unit, min_size=1, max_size=50))
-def test_parse_vif_file_structure(frame_values: list[float]) -> None:
-    """Property 6: DataFrame has index 'frameNum' and one column 'vif'.
+def test_parse_vif_structure(frame_values: list[float]) -> None:
+    """Property 6: parse_log returns exactly one value per frame.
 
     Validates: Requirements 4.1, 4.2
-    # Feature: vif-metric-support, Property 6: parse_vif_file DataFrame structure
+    # Feature: vif-metric-support, Property 6: parse_log structure
     """
-    df = parse_vif_file(_write_vif(frame_values))
-    assert df.index.name == "frameNum"
-    assert list(df.columns) == [MetricType.VIF.value]
-    assert len(df) == len(frame_values)
+    values = MetricType.VIF.info.parse_log(_write_vif(frame_values))
+    assert len(values) == len(frame_values)
 
 
 # ---------------------------------------------------------------------------
-# Property 7: parse_vif_file frame indexing matches VMAF frameNum
+# Property 7: parse_log preserves the frames' order
 # ---------------------------------------------------------------------------
 
 
 @settings(max_examples=100)
 @given(frame_values=st.lists(_st_unit, min_size=1, max_size=30))
-def test_parse_vif_file_frame_indexing(frame_values: list[float]) -> None:
-    """Property 7: frameNum values match the VMAF JSON frameNum field (0-based).
+def test_parse_vif_preserves_frame_order(frame_values: list[float]) -> None:
+    """Property 7: parsed values follow the JSON frames' order (frameNum
+    ascends with list position — the source frame a value belongs to).
 
     Validates: Requirements 4.3
-    # Feature: vif-metric-support, Property 7: parse_vif_file frame indexing
+    # Feature: vif-metric-support, Property 7: parse_log frame order
     """
-    df = parse_vif_file(_write_vif(frame_values))
-    assert list(df.index) == list(range(len(frame_values)))
+    values = MetricType.VIF.info.parse_log(_write_vif(frame_values))
+    assert values == [pytest.approx(v) for v in frame_values]
 
 
 # ---------------------------------------------------------------------------
-# Property 8: parse_vif_file finite values
+# Property 8: parse_log finite values
 # ---------------------------------------------------------------------------
 
 
 @settings(max_examples=100)
 @given(frame_values=st.lists(_st_unit, min_size=1, max_size=50))
-def test_parse_vif_file_finite_values(frame_values: list[float]) -> None:
-    """Property 8: Every value in the 'vif' column is a finite float.
+def test_parse_vif_finite_values(frame_values: list[float]) -> None:
+    """Property 8: Every parsed value is a finite float.
 
     Validates: Requirements 4.6
-    # Feature: vif-metric-support, Property 8: parse_vif_file finite values
+    # Feature: vif-metric-support, Property 8: parse_log finite values
     """
-    df = parse_vif_file(_write_vif(frame_values))
-    for val in df[MetricType.VIF.value]:
+    for val in MetricType.VIF.info.parse_log(_write_vif(frame_values)):
         assert math.isfinite(val), f"Non-finite value: {val}"
 
 
 # ---------------------------------------------------------------------------
-# Property 9: parse_vif_file combined score is average of four scales
+# Property 9: parse_log combined score is average of four scales
 # ---------------------------------------------------------------------------
 
 
@@ -190,11 +188,11 @@ def test_parse_vif_file_finite_values(frame_values: list[float]) -> None:
 @given(
     s0=_st_unit, s1=_st_unit, s2=_st_unit, s3=_st_unit,
 )
-def test_parse_vif_file_combined_score(s0: float, s1: float, s2: float, s3: float) -> None:
+def test_parse_vif_combined_score(s0: float, s1: float, s2: float, s3: float) -> None:
     """Property 9: Combined VIF = average of the four integer_vif_scale values.
 
     Validates: Requirements 4.5
-    # Feature: vif-metric-support, Property 9: parse_vif_file combined score
+    # Feature: vif-metric-support, Property 9: parse_log combined score
     """
     frames = [{"frameNum": 0, "metrics": {
         "vmaf": 95.0,
@@ -204,52 +202,88 @@ def test_parse_vif_file_combined_score(s0: float, s1: float, s2: float, s3: floa
         "integer_vif_scale3": s3,
     }}]
     _VIF_TMP2.write_text(json.dumps({"frames": frames}), encoding="utf-8")
-    df = parse_vif_file(_VIF_TMP2)
+    values = MetricType.VIF.info.parse_log(_VIF_TMP2)
     expected = (s0 + s1 + s2 + s3) / 4
-    assert abs(df[MetricType.VIF.value].iloc[0] - expected) < 1e-9
+    assert values[0] == pytest.approx(expected)
 
 
 # ---------------------------------------------------------------------------
-# Property 10: metric pipeline VIF normalization
+# Properties 10/11/14: the measured set through the public measurer
 # ---------------------------------------------------------------------------
 
 
-@settings(max_examples=50)
+def _measure_with(
+    tmp_path: Path,
+    log_files: dict[str, str],
+) -> MeasuredMetrics:
+    """Measure through ``QualityMeasurer.measure_chunk`` with ffmpeg mocked
+    at the process boundary (``run_metrics`` writes the synthetic outputs)."""
+    from pyqenc.models import CropParams
+    from pyqenc.utils.ffmpeg_runner import FFmpegInput, FFmpegRunResult
+
+    measurer = QualityMeasurer(work_dir=tmp_path)
+
+    async def _fake_run_metrics(metrics, **kwargs) -> FFmpegRunResult:
+        ext        = kwargs.get("output_extension") or ".tmp"
+        output_dir = Path(str(kwargs.get("cwd")))
+        prefix     = kwargs.get("output_prefix", "")
+        for stem, content in log_files.items():
+            (output_dir / f"{prefix}{stem}{ext}").write_text(content, encoding="utf-8")
+        return FFmpegRunResult(returncode=0, success=True, stderr_lines=[], frame_count=0)
+
+    with patch("pyqenc.utils.visualization.run_metrics", side_effect=_fake_run_metrics):
+        measurement = measurer.measure_chunk(
+            encoded          = tmp_path / "encoded.mkv",
+            reference        = FFmpegInput(path=tmp_path / "reference.mkv"),
+            ref_crop         = CropParams(),
+            output_dir       = tmp_path,
+            duration_seconds = 1.0,
+            fps_value        = None,
+            sampling         = 1,
+            plot_path        = tmp_path / "plot.png",
+        )
+    return measurement.metrics
+
+
+@settings(max_examples=25, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture])
 @given(frame_values=st.lists(_st_unit, min_size=2, max_size=30))
-def test_metric_pipeline_vif_normalized(frame_values: list[float]) -> None:
-    """Property 10: the parse→normalize→stats pipeline maps VIF into [0, 100].
+def test_metric_pipeline_vif_normalized(tmp_path: Path, frame_values: list[float]) -> None:
+    """Property 10 + 14: the parse→normalize→stats pipeline maps VIF into
+    [0, 100] and the measured set carries all ten VIF statistics.
 
     Bug guarded: raw VIF scale is ~[0, 1.5]; a stats row leaking the raw
     scale would show min/median values far below the other metrics.
 
-    Validates: Requirements 5.2, 5.3
+    Validates: Requirements 5.2, 5.3, 9.1
     # Feature: vif-metric-support, Property 10: pipeline VIF normalization
     """
-    artifacts = QualityLogs(vif_log=_write_vif(frame_values))
-    result    = compute_metric_stats(normalize_metrics(parse_metrics(artifacts, 1)))
-    assert MetricType.VIF in result
-    for stat_key in ("min", "p05", "p10", "p25", "median", "p75", "p90", "p95", "max"):
-        val = result[MetricType.VIF][stat_key]
-        assert 0.0 <= val <= 100.0, f"VIF {stat_key}={val} outside [0, 100]"
+    result = _measure_with(tmp_path, {"vmaf": json.dumps({"frames": [
+        {
+            "frameNum":    i,
+            "metrics":     {"vmaf": 95.0, **{f"integer_vif_scale{s}": v for s in range(4)}},
+        }
+        for i, v in enumerate(frame_values)
+    ]})})
+    for statistic in StatisticType:
+        key   = MetricStatKey(MetricType.VIF, statistic)
+        assert key in result, f"missing measured statistic {key.sidecar_key()}"
+        value = result[key]
+        if statistic is StatisticType.STD and math.isnan(value):
+            continue
+        assert 0.0 <= value <= 100.0, f"VIF {statistic.value}={value} outside [0, 100]"
 
 
-# ---------------------------------------------------------------------------
-# Property 11: no VIF input → no VIF stats row
-# ---------------------------------------------------------------------------
-
-
-@settings(max_examples=50)
-@given(frame_values=st.lists(_st_unit, min_size=2, max_size=30))
-def test_metric_pipeline_no_vif_input_no_vif_row(frame_values: list[float]) -> None:
-    """Property 11: a PSNR-only run never produces a VIF stats row.
+@settings(max_examples=25, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture])
+@given(frame_values=st.lists(st.floats(min_value=30.0, max_value=60.0), min_size=2, max_size=30))
+def test_metric_pipeline_no_vif_input_no_vif_row(tmp_path: Path, frame_values: list[float]) -> None:
+    """Property 11: a PSNR-only run never produces VIF measurements.
 
     Validates: Requirements 5.5
     # Feature: vif-metric-support, Property 11: no VIF input, no VIF row
     """
-    artifacts = QualityLogs(psnr_log=_write_psnr(frame_values))
-    result    = compute_metric_stats(normalize_metrics(parse_metrics(artifacts, 1)))
-    assert MetricType.VIF  not in result
-    assert MetricType.PSNR in result
+    result = _measure_with(tmp_path, {"psnr": _write_psnr(frame_values).read_text(encoding="utf-8")})
+    assert not [key for key in result if key.metric is MetricType.VIF]
+    assert any(key.metric is MetricType.PSNR for key in result)
 
 
 # ---------------------------------------------------------------------------
@@ -265,7 +299,7 @@ def test_generate_metrics_vif_shares_vmaf_path(tmp_path: Path) -> None:
     Validates: Requirements 6.2, 12.1, 12.2
     # Feature: vif-metric-support, Property 15: _generate_metrics VIF shares vmaf path
     """
-    from pyqenc.quality import MetricType as _MetricType
+    from pyqenc.quality_metrics import MetricType as _MetricType
     from pyqenc.utils.ffmpeg_runner import FFmpegInput, FFmpegRunResult
 
     evaluator = QualityMeasurer(work_dir=tmp_path)
@@ -308,6 +342,14 @@ def test_generate_metrics_vif_shares_vmaf_path(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+class _ProbeMetricInfo(MetricInfo):
+    """A concrete descriptor with arbitrary formula parameters (the parse
+    contract is irrelevant to the normalization property)."""
+
+    def parse_log(self, path: Path) -> list[float]:
+        return []
+
+
 @settings(max_examples=200)
 @given(
     offset=st.floats(min_value=-1e6, max_value=1e6, allow_nan=False, allow_infinity=False),
@@ -328,7 +370,7 @@ def test_normalize_formula_correctness(
     Validates: Requirements 1.3, 1.7
     # Feature: vif-metric-support, Property 1: Normalization formula correctness
     """
-    test_info = MetricInfo(
+    test_info = _ProbeMetricInfo(
         name              = "TEST",
         higher_is_better  = True,
         _offset           = offset,
@@ -343,6 +385,8 @@ def test_normalize_formula_correctness(
         comparison_range  = 10.0,
         acceptance_delta  = 0.2,
         subsample_via_filter = False,
+        log_extension     = ".log",
+        std_cutoff_max    = None,
     )
     result   = cast(float, test_info.normalize(raw))  # scalar input -> scalar result (Series stubs lack SupportsFloat)
     expected = offset + raw * scale
@@ -437,44 +481,3 @@ def test_vif_target_evaluation_direction(actual: float, target_val: float) -> No
     # Feature: vif-metric-support, Property 13: Target judging direction-awareness
     """
     assert MetricType.VIF.info.passes(actual, target_val) == (actual >= target_val)
-
-
-# ---------------------------------------------------------------------------
-# Property 14: Sidecar YAML VIF key generation
-# ---------------------------------------------------------------------------
-
-
-@settings(max_examples=100)
-@given(
-    vif_stats=st.fixed_dictionaries({
-        "min":    _st_normalized,
-        "p05":    _st_normalized,
-        "p10":    _st_normalized,
-        "p25":    _st_normalized,
-        "median": _st_normalized,
-        "p75":    _st_normalized,
-        "p90":    _st_normalized,
-        "p95":    _st_normalized,
-        "max":    _st_normalized,
-        "std":    st.floats(min_value=0.0, max_value=10.0, allow_nan=False, allow_infinity=False),
-    }),
-)
-def test_sidecar_vif_keys(vif_stats: dict[str, float]) -> None:
-    """Property 14: Sidecar flattening produces all 10 vif_* keys with correct values.
-
-    Validates: Requirements 9.1
-    # Feature: vif-metric-support, Property 14: Sidecar YAML VIF key generation
-    """
-    from pyqenc.quality import MetricStats, PerMetricStats
-
-    # hypothesis-generated dict — runtime shape is the test's own strategy
-    stats: PerMetricStats = {MetricType.VIF: cast(MetricStats, vif_stats)}
-    flat: dict[str, float] = {
-        f"{mt.value}_{stat}": value
-        for mt, ms in stats.items()
-        for stat, value in cast(dict[str, float], ms).items()
-    }
-    for s in ("min", "p05", "p10", "p25", "median", "p75", "p90", "p95", "max", "std"):
-        key = f"{MetricType.VIF.value}_{s}"
-        assert key in flat
-        assert flat[key] == vif_stats[s]

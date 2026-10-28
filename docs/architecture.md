@@ -390,10 +390,11 @@ The optimization and merge summaries are ONE comparison table: one persisted
 row shape, one renderer, identical mechanics (`pyqenc/summary_tables.py`).
 
 - **`StrategyRow {strategy, size_bytes, metrics}`** — THE row shape persisted
-  in both `optimization.yaml` and `merge.yaml`. Metrics are keyed by the
-  `MetricStatKey` pair type (typed keys in memory, canonical `vmaf_median`
-  strings on disk — `pyqenc/quality.py` owns the closed metric/statistic
-  sets, the display vocabulary, and tolerant parsing). Breadth is the
+  in both `optimization.yaml` and `merge.yaml`. Metrics are the targeted set
+  role over the `MetricStatKey` pair type (the role instance in memory,
+  canonical `vmaf_median` strings on disk — `pyqenc/quality_metrics.py` owns
+  the closed metric/statistic sets, the key forms, the display vocabulary,
+  and tolerant parsing). Breadth is the
   per-phase caveat: optimization rows keep the full worst-chunk statistics
   (the anchor re-derivation substrate); merge rows keep the rendered basis
   (the presentation reference's keys).
@@ -477,9 +478,10 @@ create_unified_plot(df)  → PNG visualization
 
 ### Pipeline execution metrics
 
-`MetricsCollector` is injected into every phase. It tracks:
+`AppMetricsCollector` (from `pyqenc/app_metrics.py`) is injected into every
+phase. It tracks:
 
-- Wall-clock time per operation type (`TimeKey` enum)
+- Wall-clock time per operation type (`AppMetricKey` enum)
 - Disk space distribution across work-dir subdirectories
 - Quality search convergence statistics
 
@@ -558,8 +560,9 @@ All models are Pydantic.
 | `EncodedChunk` | A winning attempt as a stream, composed with its chunk and strategy; owns both compose-only name families (attempt `<chunk>.q<q>.*`, winner `<chunk>.*`) — the quality value is a sidecar fact, never a payload field |
 | `Chapters` / `AudioOutput` / `MergedVideo` | Artifact payloads: the chapter edition, one (track, chain) audio output, one merged output — `MergedVideo` owns its output-name family incl. the per-strategy fixed-quality suffix |
 | `Strategy` | Encoding strategy (`display_name()`/`safe_name()`/`fingerprint` triple, codec config, resolved ffmpeg args) |
-| `QualityTarget` | Quality constraint (metric, statistic, threshold value) |
-| `MetricStatKey` | The metric × statistic identity: canonical `vmaf_median` sidecar form, `VMAF 50%` display form, tolerant parse — the single naming authority |
+| `QualityTarget` | Quality constraint: the metric-statistic pair (`identity`) + threshold value |
+| `MetricStatKey` | The metric × statistic identity: canonical `vmaf_median` sidecar form, `vmaf-min` CLI form, `VMAF 50%` display form, tolerant parse — the single naming authority (owned by `pyqenc/quality_metrics.py`) |
+| `MeasuredMetrics` / `TargetedMetrics` | The map roles: the full measured set and its narrowed subset; narrowing goes through `narrowed_to` / the plan's `targeted()` front |
 | `CodecConfig` | Encoder configuration (quality range, granularity, max_step, label, profiles) |
 | `CropParams` | Crop geometry (top, bottom, left, right pixel offsets) |
 | `PhaseOutcome` | `COMPLETED` / `REUSED` / `PENDING` / `FAILED` |

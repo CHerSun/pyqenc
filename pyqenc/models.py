@@ -13,7 +13,7 @@ from collections.abc import Iterable
 from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 from enum import Enum, IntEnum
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, ClassVar, Final, Self
+from typing import Annotated, ClassVar, Final, Self
 
 from pydantic import (
     BaseModel,
@@ -34,10 +34,13 @@ from pyqenc.constants import (
     TIME_SEPARATOR_MS,
     UP_ARROW,
 )
+from pyqenc.quality_metrics import (
+    FIXED_COMPARISON_PAIRS,
+    MeasuredMetrics,
+    MetricStatKey,
+    TargetedMetrics,
+)
 from pyqenc.utils.naming import sanitize_filesystem_text
-
-if TYPE_CHECKING:
-    from pyqenc.quality import MetricStatKey
 
 logger = logging.getLogger(__name__)
 
@@ -566,16 +569,17 @@ class SceneBoundary(BaseModel):
 class QualityTarget(BaseModel):
     """Quality target specification for encoding.
 
+    The identity is the metric-statistic pair itself — validated against the
+    closed sets at construction (a mistyped metric or statistic fails here,
+    never at first use). The tolerant string boundary is :meth:`parse`.
+
     Attributes:
-        metric:    Metric type (vmaf, ssim, psnr).
-        statistic: Statistical measure (min, median, max, p05, p10, p25, p75,
-                   p90, p95).
-        value:     Target value for the metric.
+        identity: The targeted metric-statistic pair.
+        value:    Target value for the metric.
     """
 
-    metric:    str
-    statistic: str
-    value:     float
+    identity: MetricStatKey
+    value:    float
 
     @classmethod
     def parse(cls, target_str: str) -> Self:
@@ -593,55 +597,17 @@ class QualityTarget(BaseModel):
         """
         try:
             metric_stat, value_str = target_str.split(":")
-            metric, statistic = metric_stat.split("-")
+            identity = MetricStatKey.parse(metric_stat)
             value = float(value_str)
-
-            from pyqenc.quality import MetricType  # deferred to avoid circular import
-            valid_metrics = {m.value for m in MetricType}
-            if metric.lower() not in valid_metrics:
-                raise ValueError(f"Invalid metric '{metric}'. Must be one of: {sorted(valid_metrics)}")
-
-            valid_stats = {"min", "med", "median", "max", "p05", "p10", "p25", "p75", "p90", "p95"}
-            if statistic.lower() not in valid_stats:
-                raise ValueError(f"Invalid statistic '{statistic}'. Must be one of: {valid_stats}")
-
-            if statistic.lower() == "med":
-                statistic = "median"
-
-            return cls(
-                metric=metric.lower(),
-                statistic=statistic.lower(),
-                value=value,
-            )
+            return cls(identity=identity, value=value)
         except (ValueError, AttributeError) as e:
             raise ValueError(
                 f"Invalid quality target format: '{target_str}'. "
                 f"Expected format: 'metric-stat:value' (e.g., 'vmaf-min:95')"
             ) from e
 
-    def key(self) -> MetricStatKey:
-        """Return the target's metric-statistic identity.
-
-        The fields stay strings (the value-type fold is TODO §116); this is
-        the typed view over them.
-
-        Returns:
-            The typed metric-statistic key.
-
-        Raises:
-            ValueError: The metric or statistic field is outside the closed
-                sets (fields are validated at target parse, not at
-                construction — this accessor is where bad values fail).
-        """
-        from pyqenc.quality import MetricStatKey, MetricType, StatisticType  # deferred to avoid circular import
-
-        return MetricStatKey(
-            metric    = MetricType(self.metric),
-            statistic = StatisticType(self.statistic),
-        )
-
     def __str__(self) -> str:
-        return f"{self.metric}-{self.statistic}≥{self.value}"
+        return f"{self.identity.cli_key()}≥{self.value}"
 
 
 def targets_as_strings(targets: list[QualityTarget]) -> list[str]:
@@ -657,7 +623,7 @@ def targets_as_strings(targets: list[QualityTarget]) -> list[str]:
     Returns:
         Sorted list of strings like ``["vmaf-min:93.0"]``.
     """
-    return sorted(f"{t.metric}-{t.statistic}:{t.value}" for t in targets)
+    return sorted(f"{t.identity.cli_key()}:{t.value}" for t in targets)
 
 
 class EncodingPlan(BaseModel):
@@ -757,6 +723,25 @@ class EncodingPlan(BaseModel):
             or self.measure
             or (self.optimize and len(self.strategies) > 1)
         )
+
+    def targeted(self, metrics: MeasuredMetrics) -> TargetedMetrics:
+        """The mode-aware full→targeted narrowing front.
+
+        A searched plan narrows to the configured targets' identities
+        (guaranteed present by the construction invariants); a fixed plan
+        narrows to the fixed comparison pairs. Delegates to
+        ``metrics.narrowed_to`` — the mode picks the pair set, the primitive
+        filters.
+
+        Args:
+            metrics: The full measured set of one measurement.
+
+        Returns:
+            The targeted subset for this plan's mode.
+        """
+        if self.fixed_quality:
+            return metrics.narrowed_to(FIXED_COMPARISON_PAIRS)
+        return metrics.narrowed_to(t.identity for t in self.targets)
 
 
 def _coerce_decimal_pair(v: tuple | list) -> tuple[Decimal, Decimal]:

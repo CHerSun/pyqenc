@@ -26,6 +26,7 @@ from pyqenc.phases.encoding import (
     _write_winner_sidecar,
 )
 from pyqenc.phases.probe import ProbePhase, ProbePhaseResult
+from pyqenc.quality_metrics import MeasuredMetrics, MetricStatKey, TargetedMetrics
 from pyqenc.stream_model import (
     EncodedChunk,
     ExtendedVideoStream,
@@ -52,7 +53,19 @@ _STRATEGY_B = next(
     if s.preset == "slow" and s.profile == "h265"
 )
 _RESOLUTION = "1920x1080"
-_TARGETS = [QualityTarget(metric="vmaf", statistic="min", value=93.0)]
+_TARGETS = [QualityTarget(identity=MetricStatKey.parse("vmaf-min"), value=93.0)]
+
+
+def _mm(**pairs: float) -> MeasuredMetrics:
+    """Build a full measured set from sidecar-form keys (``_mm(vmaf_min=96.0)``)."""
+    return MeasuredMetrics({MetricStatKey.parse(key): value for key, value in pairs.items()})
+
+
+def _tm(**pairs: float) -> TargetedMetrics:
+    """Build a targeted map from sidecar-form keys (``_tm(vmaf_min=96.0)``)."""
+    return TargetedMetrics({MetricStatKey.parse(key): value for key, value in pairs.items()})
+
+
 
 
 def _make_chunk(cid_start: float, cid_end: float, tmp_path: Path) -> VideoStreamChunk:
@@ -118,7 +131,7 @@ class TestSidecarFrameCount:
         """The per-attempt sidecar carries the attempt's frame count."""
         attempt = tmp_path / "chunk.q18.0.mkv"
         _write_attempt_sidecar(
-            attempt, {"vmaf_min": 94.5}, 3, 2400,
+            attempt, _mm(vmaf_min=94.5), 3, 2400,
         )
         data = yaml.safe_load(attempt.with_suffix(".yaml").read_text(encoding="utf-8"))
         assert data["frame_count"] == 2400
@@ -127,7 +140,7 @@ class TestSidecarFrameCount:
         """An unknown count is persisted as the 0 sentinel (no None in yaml)."""
         attempt = tmp_path / "chunk.q18.0.mkv"
         _write_attempt_sidecar(
-            attempt, {"vmaf_min": 94.5}, 3, 0,
+            attempt, _mm(vmaf_min=94.5), 3, 0,
         )
         data = yaml.safe_load(attempt.with_suffix(".yaml").read_text(encoding="utf-8"))
         assert data["frame_count"] == 0
@@ -143,24 +156,29 @@ class TestWinnerTargetedSubset:
     }
 
     def test_search_persists_the_target_keys_only(self) -> None:
-        from pyqenc.phases.encoding import _winner_targeted_metrics
-
-        targets = [
-            QualityTarget(metric="vmaf", statistic="median", value=96.0),
-            QualityTarget(metric="psnr", statistic="p10", value=43.0),
-        ]
-        subset = _winner_targeted_metrics(self._FULL, targets)
-        assert sorted(subset) == ["psnr_p10", "vmaf_median"]
+        """A searched plan narrows the winner's metrics to the configured
+        targets' identities — the judging keys, nothing else."""
+        plan = load_app_config(default_only=True).build_encoding_plan(
+            optimize=True, measure=True,
+            strategies=["h265-aq+slow"],
+            targets=["vmaf-median:96.0", "psnr-p10:43.0"],
+        )
+        subset = plan.targeted(_mm(**self._FULL))
+        assert sorted(key.sidecar_key() for key in subset) == ["psnr_p10", "vmaf_median"]
 
     def test_fixed_persists_the_comparison_stat_set(self) -> None:
         """Bug guarded: fixed mode judges with no target set (the anchor is
         derived FROM winner metrics) — the old filter wrote ``{}`` and the
         whole fixed chain ran dataless (no anchor, no Pareto data, no
         limiter table)."""
-        from pyqenc.phases.encoding import _winner_targeted_metrics
-
-        subset = _winner_targeted_metrics(self._FULL, [])
-        assert sorted(subset) == [
+        plan = load_app_config(default_only=True).build_encoding_plan(
+            optimize=True, measure=True,
+            strategies=["h265-aq+slow"],
+            targets=[],
+            quality=(Decimal("18"), Decimal("18")),
+        )
+        subset = plan.targeted(_mm(**self._FULL))
+        assert sorted(key.sidecar_key() for key in subset) == [
             "psnr_median", "psnr_p10", "vmaf_median", "vmaf_p10",
         ]
 
@@ -168,7 +186,7 @@ class TestWinnerTargetedSubset:
         """The winner result sidecar carries the winning attempt's count."""
         _write_winner_sidecar(
             tmp_path, "chunk",
-            Decimal("18.0"), {"vmaf_min": 94.5}, 2400,
+            Decimal("18.0"), _tm(vmaf_min=94.5), 2400,
             targets_met=True,
         )
         data = yaml.safe_load(
@@ -291,7 +309,7 @@ class TestScanWinnerSidecars:
         import logging as _logging
         from decimal import Decimal as _Decimal
 
-        from pyqenc.metrics import NoOpMetricsCollector
+        from pyqenc.app_metrics import NoOpAppMetricsCollector
         from pyqenc.models import PhaseOutcome
         from pyqenc.phases.encoding import EncodingPhase, LimiterSummary, LimiterSummaryRow
         from pyqenc.phases.probe import ProbePhase, ProbePhaseResult
@@ -301,13 +319,13 @@ class TestScanWinnerSidecars:
             strategies=["h265-aq+slow"], targets=["ssim-median:90.0"],
         )
         probe = ProbePhase(
-            config, {}, collector=NoOpMetricsCollector(), crop_params=None, plan=plan,
+            config, {}, collector=NoOpAppMetricsCollector(), crop_params=None, plan=plan,
         )
         probe.result = ProbePhaseResult(
             outcome=PhaseOutcome.COMPLETED, message="stub", plan=plan,
         )
         phase = EncodingPhase(
-            config, {ProbePhase: probe}, collector=NoOpMetricsCollector(),
+            config, {ProbePhase: probe}, collector=NoOpAppMetricsCollector(),
         )
         summaries = [LimiterSummary(
             strategy = "h265-aq+slow",

@@ -20,8 +20,8 @@ from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
 from pyqenc.app_config import load_app_config
+from pyqenc.app_metrics import NoOpAppMetricsCollector
 from pyqenc.constants import EXTRACTED_DIR, TIMESTAMPS_FILENAME
-from pyqenc.metrics import NoOpMetricsCollector
 from pyqenc.models import CleanupLevel, PhaseOutcome, SizedFingerprint
 from pyqenc.phase import Artifact, PhaseRegistry
 from pyqenc.phases.extraction import (
@@ -131,7 +131,7 @@ def _make_extraction_phase(
     include/exclude filters are the ones under test, so the shared dependency
     walk treats the job as already-run without any mocking.
     """
-    collector = NoOpMetricsCollector()
+    collector = NoOpAppMetricsCollector()
 
     config = _APP_CONFIG.model_copy(deep=True)
     config.extraction.include = include
@@ -410,7 +410,7 @@ def test_frame_count_preservation(frame_count: int) -> None:
     from pyqenc.phases.merge import MergePhase
     from pyqenc.phases.probe import ProbePhase, ProbePhaseResult
 
-    collector = NoOpMetricsCollector()
+    collector = NoOpAppMetricsCollector()
 
     with tempfile.TemporaryDirectory() as tmp_dir:
         tmp_path = Path(tmp_dir)

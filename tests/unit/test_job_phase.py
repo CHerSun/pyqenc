@@ -28,6 +28,7 @@ from pyqenc.models import (
     fingerprinter,
 )
 from pyqenc.phases.job import JobPhase, JobSidecar
+from pyqenc.quality_metrics import MetricStatKey
 from pyqenc.state import ArtifactState
 from pyqenc.utils.yaml_utils import write_yaml_atomic
 
@@ -35,7 +36,7 @@ from pyqenc.utils.yaml_utils import write_yaml_atomic
 # Helpers
 # ---------------------------------------------------------------------------
 
-_QUALITY_TARGETS = [QualityTarget(metric="vmaf", statistic="min", value=93.0)]
+_QUALITY_TARGETS = [QualityTarget(identity=MetricStatKey.parse("vmaf-min"), value=93.0)]
 _APP_CONFIG      = load_app_config(default_only=True)
 
 

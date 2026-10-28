@@ -23,8 +23,9 @@ from pyqenc.utils.log_format import fmt_key_value_table
 
 if TYPE_CHECKING:
     from pyqenc.app_config import AppConfig, SelectEntry
-    from pyqenc.metrics import MetricsCollector
+    from pyqenc.app_metrics import AppMetricsCollector
 
+from pyqenc.app_metrics import AppMetricKey
 from pyqenc.audio.chain import (
     ChainExecutionError,
     ResolvedChain,
@@ -39,7 +40,6 @@ from pyqenc.constants import (
     SUCCESS_SYMBOL_MINOR,
     TEMP_SUFFIX,
 )
-from pyqenc.metrics import MetricKey
 from pyqenc.models import FingerprintYaml, PhaseOutcome, SizedFingerprint, SizedFingerprintYaml
 from pyqenc.phase import (
     Artifact,
@@ -176,14 +176,14 @@ class AudioPhase(Phase[AudioPhaseResult]):
     name: str = "audio"
     SIDECAR_NAME = "audio.yaml"
     DEPENDS_ON: ClassVar[tuple[type[Phase], ...]] = (JobPhase, ExtractionPhase)
-    _METRIC_KEY: MetricKey = MetricKey.AUDIO
+    _METRIC_KEY: AppMetricKey = AppMetricKey.AUDIO
 
     def __init__(
         self,
         config: AppConfig,
         phases: PhaseRegistry,
         *,
-        collector: MetricsCollector,
+        collector: AppMetricsCollector,
     ) -> None:
         super().__init__(config, phases, collector=collector)
 
@@ -510,7 +510,7 @@ class AudioPhase(Phase[AudioPhaseResult]):
                 label = f"[{output.chain_name}] {output.stream.file.path.stem}"
                 logger.debug("Producing %s", label)
                 try:
-                    with self._collector.time(MetricKey.AUDIO, output.chain_name):
+                    with self._collector.time(AppMetricKey.AUDIO, output.chain_name):
                         await execute_chain(chain, output.stream, audio_dir)
                     art.state = ArtifactState.COMPLETE
                     produced += 1
