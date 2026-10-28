@@ -4,15 +4,6 @@
 - Each items needs validation and design consideration before any implementation.
 - Items are to be deleted, once they go into the code (after spec is approved or after implementation if done without spec).
 
-## 6. Working with app metrics I/O errors
-
-- `_write_atomic` swallows `OSError` (`pyqenc/metrics.py:752-760`); `_try_resume` swallows load failures (`pyqenc/metrics.py:590-592`). Non-fatal by design — but a user can finish a multi-hour encode and silently end up with a stale or missing `metrics.yaml`.
-
-Human input: metrics are not what the user wants to get - he wants to get audio/video processed. So it's just an extra nice-to-have info.
-Warning is enough, but maybe make it log rarer, like exponential delay (first failure - ignore, happens; on second consecutive failure (2^1) - log warning; after another 4 consecutive failure (delta of 2^2 from previous) - log failure that still failing after N attempts; after another 8 failures (2^3 delta from previous; this is probably max reasonable step, which shouldn't increase further; even worse - might log on every failed consecutive attempt after that); on succesful write - reset the counter)
-
----
-
 ## 16. Measuring frames sampling is never disabled for few frames
 
 - Sampling applies unconditionally via `select='not(mod(n,{subsample}))'` (`pyqenc/quality.py:377,400`); the only validation is `metrics_sampling >= 1` (`pyqenc/phases/measure.py:933-934`). No dynamic chunk's frame-count guard anywhere; `merge.py:404-405` only logs that subsampling may miss outliers.
@@ -919,7 +910,7 @@ https://www.structlog.org/en/stable/
 
 ---
 
-## 147. Long-job visibility — start lines + count-based progress bars for silent phases
+## 147. Long-job visibility — starting/finished lines + count-based progress bars for silent phases
 
 Evidence (user, full-movie auto run, 2026-10-10):
 
@@ -931,7 +922,15 @@ Evidence (user, full-movie auto run, 2026-10-10):
 - 5 minutes of extraction work with zero intermediate output: no per-artifact starting lines, no count-based progress bar — the user is kept blind during long jobs.
 - The count-based bar doctrine already exists (ONE advance per item finalization, weighted by the item's duration; duration-based is for fine-grained jobs like merge/measure) — extraction's artifact materialization fits the count-based shape exactly.
 - Layering with §60: §60 asks for DEBUG start/finish lines on every long job and external call (developer visibility); THIS item is the user-facing layer — INFO start lines for long jobs and progress bars over itemized work. Open design question: the mechanism home (phase hook vs. runner facility), not per-site ad-hoc logging.
-- Audit needed: which phases have no user-facing progress at all today (extraction confirmed; sweep the rest).
+- Confirmed silent so far: extraction + audio (2026-10-28); audit the rest.
+
+Direction fixed (user, 2026-10-28): replicate the encoding/optimization INFO shape in extraction and audio —
+
+- ONE phase-level starting line, emitted right before actual task processing begins (after recovery/plan previews): the model is `Starting encoding: %d pair(s) to encode, %d already complete` (`phases/encoding.py:2264`) and its optimization twin (`phases/optimization.py:868`).
+- Per-task finished lines stating exactly what finished, after each task — the model is encoding's winner line family (`fmt_chunk_final` call sites, e.g. `phases/encoding.py:1388`).
+- Why both phases qualify today: all per-item work is DEBUG-only — extraction materializes tracks (`phases/extraction.py:1124`), subtitles (`:1020`), attachments (`:1058`), chapters (`:1206`), timestamps (`:311`) silently; audio produces chains silently (`phases/audio.py:511`). The INFO surface is plan previews only — extraction's `Materialization plan:` (`phases/extraction.py:724`), audio's `Sources: %d (track, chain) output(s) to produce` (`phases/audio.py:499`) — then silence until the Phase.run closer (§108).
+
+**Questions to think about:** how the starting line layers with the existing pre-work tables (streams/tracks Want/Present, selector, materialization plan); does the count-based progress bar (the original ask above) still ride along once starting+finished lines exist, or do the lines suffice; the mechanism home (phase hook vs. runner facility) stays open.
 
 ---
 

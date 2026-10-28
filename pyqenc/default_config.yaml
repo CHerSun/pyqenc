@@ -30,11 +30,10 @@ encoding:
     - "h264*"           # all h264 profiles at their codec default preset (veryslow)
     - "h265*"           # all h265 profiles at their codec default preset (slow)
     # - "av1*"          # AV1: limited hardware decoding support on older devices
+    # - "fgs-*"         # Film Grain Synthesis profiles. No grain preservation, but huge space savings. Not recommended.
     # - "nvenc-h265-10bit-cq"  # NVENC: requires NVIDIA GPU
     # - "vulkan*"       # Vulkan: requires GPU with Vulkan support
-  concurrency: 1          # max simultaneous (chunk, strategy) encode+measure jobs; clamped to CPU count
-                         # measured: no benefit above 1 (ffmpeg already scales across the CPU);
-                         # raise only under observed CPU underutilization
+  concurrency: 1          # max simultaneous (chunk, strategy) encode+measure jobs; clamped to CPU count; no benefit unless CPU is idling.
   visual_hash: true        # emoji prefix on chunk log lines for visual identification
 
 optimization:
@@ -50,12 +49,10 @@ measurement:
   sampling: 1  # measure every N-th frame; 1 = every frame; higher = faster but less precise
                # applies to quality checks during encoding, merge verification, and measure command
   concurrency: 1  # max videos 'pyqenc measure' processes simultaneously (one task per video:
-                  # screenshots + measurement); clamped to CPU count
-                  # measured: no benefit above 1 (slower at 2) — a metrics pass already uses all cores
+                  # screenshots + measurement); clamped to CPU count; no benefit unless CPU is idling.
 
 audio:
-  concurrency: 1  # max simultaneous (track, chain) jobs; clamped to CPU count
-                  # measured: ~2x faster wall at 4 (4 jobs) — audio filter chains are single-process
+  concurrency: 1  # max simultaneous (track, chain) jobs; clamped to CPU count; scales quite nicely.
 
   # Audio processing is defined by three pieces:
   #   filters — a palette of named, reusable transformations (this section, dict-merged across layers)
