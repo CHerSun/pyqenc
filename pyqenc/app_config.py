@@ -211,29 +211,65 @@ class ChunkingConfig(BaseModel):
 
 
 class EncodingConfig(BaseModel):
-    """Encoding phase configuration: quality targets, strategies, and runtime tuning.
+    """Encoding phase configuration: target profiles, strategies, and tuning.
 
-    The YAML parse form plus plain run flags — nothing else. ``targets`` and
-    ``strategies`` stay raw strings: they are resolved to typed objects
+    The YAML parse form plus plain run flags — nothing else. Profile entries
+    and ``strategies`` stay raw strings: they are resolved to typed objects
     exactly once at the run boundary via
     :meth:`AppConfig.build_encoding_plan`, whose result threads through the
     pipeline as the :class:`~pyqenc.models.EncodingPlan`. No resolved state
     lives here and no field is written after load.
 
     Attributes:
-        targets:      Raw quality target strings (e.g. ``"vmaf-min:95"``).
-        strategies:   Raw strategy pattern strings (e.g. ``"h265*"``).
-        concurrency:  Maximum concurrent encoding processes; clamped to
-                      the CPU count at validation.
-        visual_hash:  Whether to display emoji visual hash in chunk logs.
+        target_profiles:        Named bundles of raw quality target strings
+                                (e.g. ``{"high": ["vmaf-med:96.9", ...]}``).
+        default_target_profile: The profile a bare run uses.
+        strategies:             Raw strategy pattern strings (e.g. ``"h265*"``).
+        concurrency:            Maximum concurrent encoding processes; clamped
+                                to the CPU count at validation.
+        visual_hash:            Whether to display emoji visual hash in chunk
+                                logs.
     """
 
     model_config = ConfigDict(validate_assignment=True)
 
-    targets:      list[str]
-    strategies:   list[str]
-    concurrency:  _Concurrency
-    visual_hash:  bool
+    target_profiles:        dict[str, list[str]]
+    default_target_profile: str
+    strategies:             list[str]
+    concurrency:            _Concurrency
+    visual_hash:            bool
+
+    @model_validator(mode="after")
+    def _validate_target_profiles(self) -> Self:
+        """Structural target-profile invariants.
+
+        Profile names exclude ``:`` and ``,`` so a ``--targets`` value can
+        never be valid under both readings (raw pairs always contain ``:``;
+        a profile name never does) — the try-both dispatch stays unambiguous
+        regardless of order. Names must be non-empty, every profile
+        non-empty, and the default must name a defined profile; entry
+        strings stay raw and are parsed at the run boundary.
+        """
+        for name in self.target_profiles:
+            if not name or ":" in name or "," in name:
+                raise ValueError(
+                    f"Target profile name {name!r} is invalid: names must be "
+                    f"non-empty and contain no ':' or ',' (they would be "
+                    f"ambiguous with raw target pairs on --targets)."
+                )
+        for name, entries in self.target_profiles.items():
+            if not entries:
+                raise ValueError(
+                    f"Target profile {name!r} is empty — a profile must carry "
+                    f"at least one quality target."
+                )
+        if self.default_target_profile not in self.target_profiles:
+            raise ValueError(
+                f"default_target_profile {self.default_target_profile!r} is "
+                f"not a defined target profile (available: "
+                f"{', '.join(sorted(self.target_profiles))})."
+            )
+        return self
 
 
 class TestBasisConfig(BaseModel):
@@ -592,6 +628,64 @@ class AppConfig(BaseModel):
             )
         return self
 
+    def _resolve_targets(self, targets: Sequence[str] | None) -> list[QualityTarget]:
+        """Resolve the run's target set from a ``--targets`` value or the default.
+
+        Try-both dispatch, raw first: an explicit value parses as raw
+        ``metric-stat:value`` pairs (the incumbent grammar — every value
+        that parsed before target profiles existed behaves identically);
+        on parse failure, a single-element value is looked up as a target
+        profile name. Both failing raises one error naming both
+        interpretations and listing the available profiles. ``None`` — the
+        flag was not given — resolves ``default_target_profile``.
+
+        Args:
+            targets: Comma-split ``--targets`` value, or ``None``.
+
+        Returns:
+            The resolved target list.
+
+        Raises:
+            ValueError: If the value is neither valid raw pairs nor a
+                profile name, or the selected profile carries an invalid
+                entry.
+        """
+        if targets is None:
+            return self._parse_profile(self.encoding.default_target_profile)
+        try:
+            return [QualityTarget.parse(t) for t in targets]
+        except ValueError as raw_error:
+            if len(targets) == 1 and targets[0] in self.encoding.target_profiles:
+                return self._parse_profile(targets[0])
+            available = ", ".join(sorted(self.encoding.target_profiles))
+            raise ValueError(
+                f"Invalid --targets value '{','.join(targets)}': not valid "
+                f"target pairs ({raw_error}) and not a target profile name "
+                f"(available profiles: {available})."
+            ) from raw_error
+
+    def _parse_profile(self, name: str) -> list[QualityTarget]:
+        """Parse one target profile's raw entries, errors naming the profile.
+
+        Args:
+            name: A defined target profile name.
+
+        Returns:
+            The parsed target list.
+
+        Raises:
+            ValueError: If any entry fails :meth:`QualityTarget.parse`.
+        """
+        try:
+            return [
+                QualityTarget.parse(t)
+                for t in self.encoding.target_profiles[name]
+            ]
+        except ValueError as error:
+            raise ValueError(
+                f"Target profile '{name}' carries an invalid target: {error}"
+            ) from error
+
     def build_encoding_plan(
         self,
         *,
@@ -624,7 +718,9 @@ class AppConfig(BaseModel):
                         ``False``). Explicit and required: volatile per-run
                         intent with no config home.
             strategies: Strategy patterns; ``None`` → ``encoding.strategies``.
-            targets:    Quality target strings; ``None`` → ``encoding.targets``.
+            targets:    The ``--targets`` value (comma-split) — raw pairs or
+                        a single target profile name; ``None`` →
+                        ``default_target_profile``.
             quality:    The ``-q`` bounds in input order; ``None`` → no override.
 
         Returns:
@@ -632,20 +728,34 @@ class AppConfig(BaseModel):
 
         Raises:
             ValueError: If any target string or strategy pattern is invalid,
-                the override violates a matched codec's range or granularity,
-                labels mix under an override, the resolved set mixes fixed
-                and searched strategies, the plan resolves to no strategies,
-                or a searched run carries no quality targets.
+                the ``--targets`` value is neither raw pairs nor a profile
+                name, an explicit non-empty ``--targets`` is combined with a
+                single-point ``-q`` (a fixed run judges by its anchor and
+                consumes no targets; ``--targets ''`` declares a bar-less
+                fixed run), the override violates a matched
+                codec's range or granularity, labels mix under an override,
+                the resolved set mixes fixed and searched strategies, the
+                plan resolves to no strategies, or a searched run carries
+                no quality targets.
         """
-        resolved_targets = [
-            QualityTarget.parse(t)
-            for t in (targets if targets is not None else self.encoding.targets)
-        ]
+        resolved_targets = self._resolve_targets(targets)
 
         canonical_quality: tuple[Decimal, Decimal] | None = None
         if quality is not None:
             first, second = _coerce_decimal_pair(quality)
             canonical_quality = (first, second) if first <= second else (second, first)
+            if (
+                targets
+                and canonical_quality[0] == canonical_quality[1]
+            ):
+                raise ValueError(
+                    "--targets pins the acceptance bar, but a single-point "
+                    "-q fixes the knob: a fixed run judges by its runtime-"
+                    "elected anchor and consumes no targets. Constrain a "
+                    "search instead (e.g. -q 18:24 together with --targets), "
+                    "pass an empty --targets to declare a bar-less fixed "
+                    "run, or drop --targets entirely."
+                )
 
         patterns = (
             strategies if strategies is not None else self.encoding.strategies

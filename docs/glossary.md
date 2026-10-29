@@ -22,8 +22,14 @@ gate as new packages/dependencies. Established 2026-10-17 (TODO §129).
   quantize proposals.
 - **quality target** (plural: **targets**) — an acceptance constraint: the
   metric-statistic pair + value. `QualityTarget` (field `identity`), config
-  `encoding.targets`, `--targets`. Bare "target" in encoding context means
-  this.
+  entries of `encoding.target_profiles`, `--targets`. Bare "target" in
+  encoding context means this.
+- **target profile** — a named bundle of quality targets
+  (`encoding.target_profiles`; `ultra`/`high`/`medium`/`low` shipped,
+  calibrated at h265+slow CRF 14/18/22/26 anchor levels). Selected by name
+  via `--targets <name>` or by default via `default_target_profile`. The
+  qualified compound of **profile**: "profile" alone means the encoding
+  profile.
 
 ## Judging and comparison
 

@@ -1542,9 +1542,13 @@ class TestPerFileAcceptance:
         config = merge._config
         probe_result = merge._phases[ProbePhase].result
         assert probe_result is not None
+        # The config-side target change a user would make between fixed runs:
+        # edit the default profile's entries (explicit targets cannot ride a
+        # fixed run — the plan-build guard rejects bar plus pinned knob).
+        default = config.encoding.default_target_profile
+        config.encoding.target_profiles[default] = ["vmaf-min:99.0"]
         probe_result.plan = config.build_encoding_plan(optimize=True, measure=True,
             strategies = ["h265-aq+slow"],
-            targets    = ["vmaf-min:99.0"],
             quality    = (Decimal("18"), Decimal("18")),
         )
 

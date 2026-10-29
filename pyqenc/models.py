@@ -692,7 +692,9 @@ class EncodingPlan(BaseModel):
         if not self._fixed_quality and not self.targets:
             raise ValueError(
                 "Searched run has no quality targets — the search has no bar "
-                "to meet. Provide config encoding.targets or --targets "
+                "to meet. Provide targets via --targets (a target profile "
+                "name or raw metric-stat:value pairs; defined profiles live "
+                "in config encoding.target_profiles) "
                 "(fixed runs via -q / collapsed profiles may omit targets)."
             )
         return self

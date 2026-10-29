@@ -83,23 +83,17 @@ For VMAF specifically, prefer `p10` over `min`/`p05` due to the first-frame bias
 
 ---
 
-## Recommended target set
+## Target profiles
 
-The defaults shipped with `pyqenc` (in `default_config.yaml`) are a starting point, not a universal prescription. The right values depend on your content and how much quality vs size trade-off you want.
+Quality targets ship as named bundles — **target profiles** (`ultra` / `high` / `medium` / `low`) defined in `encoding.target_profiles`, selected by name (`--targets high`) or via `default_target_profile` for a bare run. Raw pairs still work for full control (`--targets vmaf-med:97,...`).
 
-```yaml
-encoding:
-  targets:
-    - "vmaf-med:96.0"   # 95–97 = high quality. 98+ for visually lossless
-    - "psnr-med:45.0"   # 44–46 = good; 50+ = near-lossless
-    - "ssim-med:98.0"   # 98+ = good; non-linear scale, compressed near 100
-    - "vif-med:93.0"    # grain/texture retention; 92–94 = good; higher = crisper but larger
-    # --- floor safeguards ---
-    - "vmaf-p10:93.0"
-    - "psnr-min:43.0"
-    - "ssim-min:96.0"
-    - "vif-min:90.0"
-```
+The shipped values were calibrated on 1080p animation (plain `h265+slow` fixed runs at CRF 14/18/22/26; each bar = the merged-output measured level at that anchor CRF) — a profile means "the quality of that anchor CRF on the reference source". Each profile bundles four `med` targets with four `p10` floor safeguards; the full table lives in `default_config.yaml` and [cli-reference.md](cli-reference.md#quality-target-format).
+
+To tune (in order of preference):
+
+1. Pick a different profile: `--targets medium` / `--targets ultra` — or change `default_target_profile`.
+2. Edit or add a profile in your config — `target_profiles` dict-merges across config layers, so a local layer can tune one profile or add `anime-high` without retyping the rest.
+3. Raw pairs for one-off control.
 
 To increase quality (larger files): raise the most constraining passing target (marked `•` in logs and in winning-limiter distribution summary table of encoding phase, see below) by 0.5–1.0.
 

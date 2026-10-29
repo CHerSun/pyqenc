@@ -257,14 +257,15 @@ def _add_chunking_arguments(parser: argparse.ArgumentParser) -> None:
 
 
 _QUALITY_TARGET_HELP: str = (
-    "Quality targets as comma-separated metric-stat:value pairs "
-    "(e.g. 'vmaf-min:95,ssim-med:98,vif-min:95'). "
+    "Quality targets: a target profile name (e.g. 'high' — named bundles "
+    "from config encoding.target_profiles) or comma-separated "
+    "metric-statistic:value pairs (e.g. 'vmaf-min:95,ssim-med:98,vif-min:95'). "
     "All metrics are normalized to 0–100 where 100≈lossless. "
     "Landmarks: VMAF 95+ good, SSIM 98+ good, PSNR 40–60 typical, VIF 92+ good. "
     "Note: 'min' targets are volatile, especially so with metrics sampling. "
     "'p10' instead of 'min' is more stable for targeting "
     "(p10 stays >=2 frames even on the shortest chunk). "
-    "If not specified, uses default from config file."
+    "If not specified, uses default_target_profile from config."
 )
 
 
@@ -336,11 +337,13 @@ def _add_quality_arguments(parser: argparse.ArgumentParser) -> None:
         dest="measure",
         default=True,
         help=(
-            "Skip quality measurements nothing consumes: merged-output "
-            "measurement always; attempt measurement and the optimization "
-            "phase when no elimination applies on a fixed run (--no-optimize "
-            "or a single strategy). Run 'pyqenc measure <output>' afterwards "
-            "for quality metrics."
+            "Skip quality measurements: always the merged-output measurement "
+            "(its target verdicts and missed-target warnings are not produced "
+            "either; run 'pyqenc measure <output>' afterwards for quality "
+            "metrics), plus attempt measurement and the optimization phase "
+            "when nothing consumes them — a fixed run with --no-optimize or "
+            "a single strategy. The per-chunk search itself always measures; "
+            "it steers by the results."
         ),
     )
     parser.add_argument(
@@ -910,6 +913,7 @@ Examples:
   pyqenc auto source.mkv -y
 
   # Custom quality target and strategies
+  pyqenc auto source.mkv --targets high --strategies h265-aq -y
   pyqenc auto source.mkv --targets vmaf-min:95 --strategies h265-aq -y
 
   # Fixed-quality run: pin the knob, skip the per-chunk search

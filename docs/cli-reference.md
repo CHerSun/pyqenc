@@ -61,11 +61,11 @@ These options apply to `auto` and `video` (the video chain resolvers).
 
 | Option                    | Description                                                                                                                                                                    | Default                            |
 | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------- |
-| `--targets TARGETS`       | Quality targets (see [Quality Target Format](#quality-target-format))                                                                                                          | from config (8 targets, see below) |
+| `--targets TARGETS`       | Quality targets: a target profile name or raw pairs (see [Quality Target Format](#quality-target-format))                                                                       | `default_target_profile` from config (`high`) |
 | `--strategies STRATEGIES` | Encoding strategies (see [Strategy Format](#strategy-format))                                                                                                                  | from config (`h264*,h265*`)        |
 | `-q, --quality V`         | Quality knob override for every matched strategy: a single value (`18`) pins it — a [fixed-quality run](./quality-targeting.md#fixed-quality-mode-q) with the per-chunk search disabled; a pair (`18:24`, `18-24`, `18..24`, order-free) constrains the search band. Replaces profile-level `quality_range` | off (config ranges) |
 | `--no-optimize`           | Disable optimization — produce output for all strategies (no elimination; measurements still run, including the optimization-phase anchor that feeds the winner-limiter table) | `False` (optimization enabled)     |
-| `--no-measure`            | Skip quality measurements nothing consumes — see [Measurement Opt-Out](#measurement-opt-out---no-measure) | `False` (measurements enabled)    |
+| `--no-measure`            | Skip quality measurements — always the merged-output one, plus attempt measurement and the optimization phase when nothing consumes them; see [Measurement Opt-Out](#measurement-opt-out---no-measure) | `False` (measurements enabled)    |
 | `--sampling N`            | Frame sampling for quality measurement: every N-th frame. Lower = more precise but slower. Measurements precision directly affect encoding results. sampling=1 is recommended. | from config (`1`)                  |
 | `--no-visual-hash`        | Disable emoji visual-hash prefix on chunk log lines                                                                                                                            | off                                |
 
@@ -174,7 +174,33 @@ Config search order (first found wins):
 
 ## Quality Target Format
 
-**Format:** `metric-statistic:value[,...]`
+**Format:** a target profile name (`high`) or `metric-statistic:value[,...]`
+
+`--targets` accepts either form; raw pairs parse first, and a value that is
+neither valid pairs nor a profile name fails listing the available profiles.
+
+### Target profiles
+
+Named bundles of targets defined in `encoding.target_profiles` (dict-merged
+across config layers — a local layer can tune one profile or add its own
+without retyping the rest). The shipped set was calibrated on 1080p
+animation (plain `h265+slow` fixed runs; bars = merged-output measured
+levels at the anchor CRFs):
+
+| Profile  | Anchor CRF | `vmaf-med` | `psnr-med` | `ssim-med` | `vif-med` |
+| -------- | ---------- | ---------- | ---------- | ---------- | --------- |
+| `ultra`  | 14         | 97.5       | 50.3       | 99.2       | 96.6      |
+| `high`   | 18         | 96.9       | 48.3       | 98.9       | 94.9      |
+| `medium` | 22         | 96.1       | 46.4       | 98.4       | 92.8      |
+| `low`    | 26         | 94.3       | 44.9       | 97.9       | 90.3      |
+
+(each profile also carries `p10` floor safeguards per metric — see
+`default_config.yaml`)
+
+A bare run uses `default_target_profile` (`high`). A profile is ignored on
+fixed runs (`-q <value>`): those judge by the runtime-elected anchor, and
+combining explicit `--targets` with a single-point `-q` is rejected at
+startup.
 
 ### Metrics
 

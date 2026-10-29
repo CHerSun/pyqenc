@@ -29,38 +29,6 @@
 
 ---
 
-## 21. (HIGH) Quality-target presets (ultra, high / medium / low) don't exist
-
-- CLI accepts only raw pairs `--targets vmaf-min:95,...`
-  (`pyqenc/cli.py:43-45,227-231`); `profile[+preset]` patterns
-  (`cli.py:239-243`) are encoder speed presets, unrelated. No named target
-  bundles anywhere in config.
-
-**Questions to think about:** `--target <preset>` alongside `--targets
-<raw list>`; presets defined in config (metrics per preset)? What would be a good UX for the end user? Easy to understand, difficult to make mistake. Maybe make `--targets` naming more verbose intentionally?
-
-Something like:
-- ultra - should match approximately CRF 12-14 quality (say, 0.25 bits per pixel expected bitrate)
-- high - should match CRF 16-18 approximately (~0.17 - those are just examples)
-- medium - should match CRF 20-22 approximately (~0.1 - for the free space estimation)
-- low - should match CRF 25+ approximately (~0.07 - if we don't have other means to estimate)
-
-With some default profile being default (similarly to codec's default preset in config) - used if user told nothing. Probably `high`
-
-CRF above is when using H.265-anime at slow preset. One problem is how to estimate that. Pipeline runs on chunks - more granular quality assessment.
-But we can use built-in profile quality range limiting for running fixed-CRF encodes on chunks to get the quality measures.
-
-Another question is I want targets to favor retaining natural film grain, not favoring blurred results. h.265-anime is particularly tuned for this, so probably we should run 2 encodes at fixed CRFs - with plain h.265 and with h.265-anime variant at the same CRF values. And compare measured metrics to better understand the difference - where we could give more slack, where we should make things tighter (in favor of retention of original looks, but at sane quality levels).
-
-Another thought:
-
-- we have currently a separate `--targets` and a separate `--quality` (`-q`). And probably checks to avoid user giving both (probably not).
-- `-q` takes precedence, even if both are given.
-- what if we collapse targets and quality into a single key? Key accepting: fixed quality, target profile or targets (some order, but their format is different)
-  i.e. if user told `-q 18` - he wants fixed quality. if he gave `-q high` - he wants high targets preset (translates into explicit targets). if he gave `vmaf-med:97` - he wants explicit targets. This way we can't be contradictory.
-
----
-
 ## 22. (low) End-user output-name template system ({fps}, {title}, …)
 
 - Not a naming-ownership concern — the merge-output name family has a single owner (`MergedVideo`, `2026-09-28 artifact-model` spec). This item is the end-user feature: config-defined templates for final output file names that the owner consumes.
@@ -967,7 +935,22 @@ Direction fixed (user, 2026-10-28): replicate the encoding/optimization INFO sha
 
 ---
 
-## Last known = 151
+## 152. Target-profile calibration breadth — more source encodings
+
+- The shipped ultra/high/medium/low values (landed with the target-profiles feature, 2026-10-29) are calibrated on ONE source: test.mkv (Ciao.Alberto, 1080p animation; plain h265+slow fixed runs at CRF 14/18/22/26, bars = merged-output levels; per-chunk sidecars also measured). Reference data: logs `D:\_encoding\tmp\calib-q*.log`, work-dirs `D:\_encoding\pyqenc_tmp\calib-q*`, aggregator `D:\_encoding\tmp\agg_calib.py`.
+- Animation compresses atypically (flat areas, no live grain). Collect the same 4-anchor calibration from live-action and grainy sources (e.g. the Laputa BD remux, Leon test encodes on D:) and check how far per-profile bars should shift — per content-type profiles (`anime-high` etc.) are the natural config answer if the spread is large; the dict-merged `target_profiles` already supports them.
+- Open from the original §21 discussion: the plain-h265 vs grain-tuned (h265-crisp/aq) comparison at the same anchor CRFs — where VIF bars deserve slack for grain-preserving profiles.
+
+---
+
+## 153. docs/quality-targeting.md — full rework
+
+- The doc got a light touch in the target-profiles landing (the stale "Recommended target set" block became "Target profiles"), but needs a full rework: structure around profiles first (the default UX), raw pairs as the advanced path.
+- Add some internet research on measured-quality encoding practice (per-title encoding lineages, VMAF/PSNR/SSIM/VIF guidance from published encodes) to ground the guidance numbers instead of only our single-source calibration.
+
+---
+
+## Last known = 153
 
 Keep this updated, so we can keep continuous numbering even on last todo item deletion.
 Keep this the last entry for easy human updates.

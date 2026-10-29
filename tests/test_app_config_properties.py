@@ -688,8 +688,8 @@ class TestDeepMergeLayerPriorityOrdering:
 # For any valid AppConfig instance, serialising it to a dict via model_dump()
 # and feeding that dict back through AppConfig.model_validate() must produce
 # an equivalent AppConfig (same field values throughout the model tree), with
-# encoding.targets and encoding.strategies preserved as their raw
-# string forms so that re-validation triggers resolution again correctly.
+# encoding.target_profiles entries and encoding.strategies preserved as their
+# raw string forms so that re-validation triggers resolution again correctly.
 #
 # Bug this catches: if model_dump() serialised anything beyond the raw parse
 # form, model_validate() would fail or produce incorrect results. Also
@@ -906,18 +906,21 @@ class TestAppConfigRoundTrip:
         **Validates: Requirements 3.1, 11.1, 11.2**
         """
         config = _BASE_CONFIG.model_copy(deep=True)
-        config.encoding.targets = quality_targets
-        config.encoding.strategies      = strategies
+        config.encoding.target_profiles["custom"] = quality_targets
+        config.encoding.default_target_profile = "custom"
+        config.encoding.strategies = strategies
 
         dumped        = config.model_dump()
         round_tripped = AppConfig.model_validate(dumped)
 
-        # quality_targets and strategies must survive as their raw string lists.
-        assert round_tripped.encoding.targets == quality_targets, (
-            f"encoding.targets did not survive round-trip as raw strings.\n"
+        # Profile entries and strategies must survive as their raw string lists.
+        assert round_tripped.encoding.target_profiles["custom"] == quality_targets, (
+            f"encoding.target_profiles['custom'] did not survive round-trip "
+            f"as raw strings.\n"
             f"  expected : {quality_targets!r}\n"
-            f"  got      : {round_tripped.encoding.targets!r}"
+            f"  got      : {round_tripped.encoding.target_profiles['custom']!r}"
         )
+        assert round_tripped.encoding.default_target_profile == "custom"
         assert round_tripped.encoding.strategies == strategies, (
             f"encoding.strategies did not survive round-trip as raw strings.\n"
             f"  expected : {strategies!r}\n"
@@ -942,7 +945,8 @@ class TestAppConfigRoundTrip:
         dumped        = config.model_dump()
         round_tripped = AppConfig.model_validate(dumped)
 
-        assert round_tripped.encoding.targets          == config.encoding.targets
+        assert round_tripped.encoding.target_profiles == config.encoding.target_profiles
+        assert round_tripped.encoding.default_target_profile == config.encoding.default_target_profile
         assert round_tripped.encoding.strategies        == config.encoding.strategies
         assert round_tripped.encoding.concurrency       == config.encoding.concurrency
         assert round_tripped.measurement.sampling       == config.measurement.sampling
@@ -1479,7 +1483,7 @@ class TestValidationErrorOnInvalidStrings:
         """
         data = self._base_dict()
         # "badmetric" is not a valid MetricType value (valid: vmaf, ssim, psnr, vif)
-        data["encoding"]["targets"] = ["badmetric-min:95"]
+        data["encoding"]["target_profiles"]["high"] = ["badmetric-min:95"]
         config = AppConfig.model_validate(data)
 
         import pytest
@@ -1506,7 +1510,7 @@ class TestValidationErrorOnInvalidStrings:
         """
         data = self._base_dict()
         # "badstat" is not among the valid stats (min, med, median, max, p05, p10, p25, p75, p90, p95)
-        data["encoding"]["targets"] = ["vmaf-badstat:95"]
+        data["encoding"]["target_profiles"]["high"] = ["vmaf-badstat:95"]
         config = AppConfig.model_validate(data)
 
         import pytest
@@ -1631,8 +1635,9 @@ class TestLoadAppConfigWithBundledDefault:
     def test_resolved_targets_is_non_empty(self) -> None:
         """The bundled default resolves to at least one quality target.
 
-        Bug condition: if the bundled default_config.yaml has an empty
-        encoding.targets list, encoding phases would silently accept
+        Bug condition: if the bundled default_config.yaml resolves to no
+        quality targets (an empty default target profile), encoding phases
+        would silently accept
         any quality and produce maximally compressed (low quality) output
         rather than reporting the missing target configuration.
 

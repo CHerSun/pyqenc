@@ -12,18 +12,52 @@ chunking:
   min_scene_length: 24  # minimum frames per chunk. 20+ recommended (p10 is 2 frames then).
 
 encoding:
-  targets:
-    # Format: "metric-statistic:value". See docs/quality-targeting.md for guidance.
-    # To increase quality (larger files): raise the most constrained passing target (• in logs).
-    # To decrease quality (smaller files): lower the most constrained failing target (✘ in logs).
-    - "vmaf-med:96.0"   # 95–97 = high quality. 98+ for visually lossless
-    - "psnr-med:46.0"   # 44–46 = good; 50+ = near-lossless
-    - "ssim-med:98.5"   # 98+ = good; non-linear scale, compressed near 100
-    - "vif-med:94.0"    # grain/texture retention; 92–94 = good; higher = crisper but larger
-    - "vmaf-p10:94.0"   # --- floor safeguards ---
-    - "psnr-p10:44.0"
-    - "ssim-p10:97.0"
-    - "vif-p10:91.5"
+  # Quality targets come as named bundles — target profiles. --targets accepts
+  # a profile name (e.g. 'high') or raw "metric-statistic:value" pairs
+  # (e.g. 'vmaf-med:96.9,vif-med:94.9'); a bare run uses default_target_profile.
+  # Entry format and tuning guidance: docs/quality-targeting.md.
+  target_profiles:
+    # Calibrated on 1080p animation (plain h265+slow fixed runs at the anchor
+    # CRFs; bars = merged-output measured levels, 2026-10-29). On other content
+    # a profile still means "the quality of that anchor CRF on the reference
+    # source" — collect more source calibrations to refine.
+    ultra:               # ≈ CRF 14 reference quality
+      - "vmaf-med:97.5"
+      - "psnr-med:50.3"
+      - "ssim-med:99.2"
+      - "vif-med:96.6"
+      - "vmaf-p10:95.9"  # --- floor safeguards ---
+      - "psnr-p10:48.3"
+      - "ssim-p10:98.9"
+      - "vif-p10:94.9"
+    high:                # ≈ CRF 18 reference quality
+      - "vmaf-med:96.9"
+      - "psnr-med:48.3"
+      - "ssim-med:98.9"
+      - "vif-med:94.9"
+      - "vmaf-p10:94.7"  # --- floor safeguards ---
+      - "psnr-p10:46.1"
+      - "ssim-p10:98.4"
+      - "vif-p10:92.7"
+    medium:              # ≈ CRF 22 reference quality
+      - "vmaf-med:96.1"
+      - "psnr-med:46.4"
+      - "ssim-med:98.4"
+      - "vif-med:92.8"
+      - "vmaf-p10:93.0"  # --- floor safeguards ---
+      - "psnr-p10:44.2"
+      - "ssim-p10:97.8"
+      - "vif-p10:90.2"
+    low:                 # ≈ CRF 26 reference quality
+      - "vmaf-med:94.3"
+      - "psnr-med:44.9"
+      - "ssim-med:97.9"
+      - "vif-med:90.3"
+      - "vmaf-p10:90.5"  # --- floor safeguards ---
+      - "psnr-p10:42.4"
+      - "ssim-p10:97.1"
+      - "vif-p10:87.6"
+  default_target_profile: high # used when the run says nothing; ignored on fixed (-q <value>) runs
   strategies:
     # Format: "profile[+preset]" — profile is required, preset is optional (omit = codec default).
     # Wildcards: "h265*" = all h265 profiles; "*" = all profiles; "*+*" = all profiles × all presets.
