@@ -174,6 +174,7 @@ class TestWinnerTargetedSubset:
         plan = load_app_config(default_only=True).build_encoding_plan(
             optimize=True, measure=True,
             strategies=["h265-aq+slow"],
+            targets=[],
             quality=(Decimal("18"), Decimal("18")),
         )
         subset = plan.targeted(_mm(**self._FULL))

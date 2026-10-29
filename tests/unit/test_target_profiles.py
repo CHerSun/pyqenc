@@ -9,10 +9,12 @@ Covers the target-profiles feature (TODO §21, 2026-10-29):
 - ``EncodingConfig`` structural invariants: profile names exclude ``:``
   and ``,`` (the two grammars stay disjoint), profiles are non-empty,
   the default names a defined profile.
-- The fixed-run guard: explicit ``--targets`` combined with a
-  single-point ``-q`` is rejected at plan build; an empty ``--targets``
-  is an invalid value outright (targets are the search's bar — there is
-  nothing to declare with an empty one).
+- The fixed-run guard: a non-empty explicit ``--targets`` combined with a
+  single-point ``-q`` is rejected at plan build. An empty ``--targets``
+  value is rejected at CLI parse (a user giving the flag must mean it);
+  the plan API itself accepts an empty list — a script-driven fixed run
+  has no targets to give, and a searched run's own invariant catches
+  emptiness where it is consumed.
 """
 
 from decimal import Decimal
@@ -270,15 +272,29 @@ class TestFixedRunTargetGuard:
                 targets=["high"], quality=(Decimal("18"), Decimal("18")),
             )
 
-    def test_empty_targets_rejected(self) -> None:
-        """An empty explicit target list is an invalid value, not a shape.
+    def test_empty_targets_with_point_q_stays_legal_at_the_api(self) -> None:
+        """An empty explicit target list is API-legal on a fixed run.
 
-        Bug condition: an empty --targets is accepted as "no bar" — targets
-        are the search's acceptance bar, and nothing (a fixed run included)
-        has a use for an explicitly empty one; the user meant to omit the
-        flag and use default_target_profile.
+        Bug condition: the boundary rejects empty targets outright — a
+        script-driven fixed run would have to invent targets just to pass
+        the call. Emptiness only matters where it is consumed: a searched
+        run's own no-target invariant.
         """
-        with pytest.raises(ValueError, match="not a valid bar"):
+        plan = _DEFAULT_CONFIG.build_encoding_plan(
+            optimize=True, measure=True,
+            targets=[], quality=(Decimal("18"), Decimal("18")),
+        )
+        assert plan.fixed_quality is True
+        assert plan.targets == []
+
+    def test_empty_targets_on_searched_run_hits_plan_invariant(self) -> None:
+        """A searched run with an empty target list fails its own invariant.
+
+        Bug condition: the search runs with no bar — the emptiness the CLI
+        rejects up front must still be caught at the plan contract for API
+        callers.
+        """
+        with pytest.raises(ValueError, match="Searched run has no quality targets"):
             _DEFAULT_CONFIG.build_encoding_plan(
                 optimize=True, measure=True, targets=[],
             )

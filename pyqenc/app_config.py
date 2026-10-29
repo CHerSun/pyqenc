@@ -652,13 +652,6 @@ class AppConfig(BaseModel):
         """
         if targets is None:
             return self._parse_profile(self.encoding.default_target_profile)
-        if not targets:
-            raise ValueError(
-                "Empty --targets value: targets are the search's acceptance "
-                "bar — an empty value is not a valid bar. Omit --targets to "
-                "use default_target_profile, or pass a target profile name "
-                "or raw metric-stat:value pairs."
-            )
         try:
             return [QualityTarget.parse(t) for t in targets]
         except ValueError as raw_error:
@@ -736,9 +729,10 @@ class AppConfig(BaseModel):
         Raises:
             ValueError: If any target string or strategy pattern is invalid,
                 the ``--targets`` value is neither raw pairs nor a profile
-                name or is empty, an explicit ``--targets`` is combined with
+                name, an explicit non-empty ``--targets`` is combined with
                 a single-point ``-q`` (a fixed run judges by its anchor and
-                consumes no targets), the override violates a matched
+                consumes no targets; an empty list is API-legal for
+                script-driven fixed runs), the override violates a matched
                 codec's range or granularity, labels mix under an override,
                 the resolved set mixes fixed and searched strategies, the
                 plan resolves to no strategies, or a searched run carries
@@ -751,7 +745,7 @@ class AppConfig(BaseModel):
             first, second = _coerce_decimal_pair(quality)
             canonical_quality = (first, second) if first <= second else (second, first)
             if (
-                targets is not None
+                targets
                 and canonical_quality[0] == canonical_quality[1]
             ):
                 raise ValueError(
@@ -759,7 +753,7 @@ class AppConfig(BaseModel):
                     "-q fixes the knob: a fixed run judges by its runtime-"
                     "elected anchor and consumes no targets. Constrain a "
                     "search instead (e.g. -q 18:24 together with --targets) "
-                    "or drop --targets for the fixed run."
+                    "or drop the explicit targets for the fixed run."
                 )
 
         patterns = (

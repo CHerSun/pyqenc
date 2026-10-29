@@ -669,18 +669,20 @@ class TestEncodingPresentationTargets:
         written next to the winner file so the real winner scan reads it.
 
         *targets* defaults to a raw pair list for searched runs; fixed runs
-        (a single-point override) build with no explicit targets — the
-        plan-build guard rejects any explicit targets with a pinned knob,
-        so the default profile rides the plan unused.
+        (a single-point override) pass the API-legal empty list (a non-empty
+        bar with a pinned knob is rejected by the plan-build guard).
         """
         from pyqenc.app_config import load_app_config
 
         config = load_app_config(default_only=True).model_copy(deep=True)
-        if targets is None and (
-            quality_range_override is None
-            or quality_range_override[0] != quality_range_override[1]
-        ):
-            targets = ["vmaf-min:93.0"]
+        if targets is None:
+            # Fixed runs (a single-point override) carry the API-legal empty
+            # list — a non-empty bar with a pinned knob is rejected by the
+            # plan-build guard.
+            targets = [] if (
+                quality_range_override is not None
+                and quality_range_override[0] == quality_range_override[1]
+            ) else ["vmaf-min:93.0"]
         plan = config.build_encoding_plan(optimize=optimize, measure=measure,
             strategies = ["h265-aq+slow"],
             targets    = targets,
