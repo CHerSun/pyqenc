@@ -447,18 +447,22 @@ class TestPlanConstructionInvariants:
         """Without targets a searched run degenerates into a single
         default-quality encode — no bar means no search."""
         config = _config_with_strategies("h265-aq", "h264")
+        searched = config.build_encoding_plan(optimize=True, measure=True)
         with pytest.raises(ValueError, match="Searched run has no quality targets"):
-            config.build_encoding_plan(optimize=True, measure=True, targets=[])
+            EncodingPlan(
+                strategies=searched.strategies, targets=[],
+                optimize=True, measure=True,
+            )
 
-    def test_fixed_run_without_targets_allowed(self) -> None:
-        """Fixed runs legitimately omit targets: the fixed knob is the reference
-        and config targets drive nothing there."""
+    def test_fixed_run_without_explicit_targets_allowed(self) -> None:
+        """Fixed runs legitimately omit explicit targets: the fixed knob is
+        the reference and the default profile's targets ride the plan unused."""
         config = _config_with_strategies("h265-aq")
         plan = config.build_encoding_plan(optimize=True, measure=True,
-            strategies=["h265-aq"], targets=[], quality=(Decimal("18"), Decimal("18")),
+            strategies=["h265-aq"], quality=(Decimal("18"), Decimal("18")),
         )
         assert plan.fixed_quality is True
-        assert plan.targets == []
+        assert len(plan.targets) > 0
 
 
 class TestAudioPassNeverResolves:

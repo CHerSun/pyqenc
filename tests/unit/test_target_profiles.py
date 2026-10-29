@@ -9,9 +9,10 @@ Covers the target-profiles feature (TODO §21, 2026-10-29):
 - ``EncodingConfig`` structural invariants: profile names exclude ``:``
   and ``,`` (the two grammars stay disjoint), profiles are non-empty,
   the default names a defined profile.
-- The fixed-run guard: explicit non-empty ``--targets`` combined with a
+- The fixed-run guard: explicit ``--targets`` combined with a
   single-point ``-q`` is rejected at plan build; an empty ``--targets``
-  declares a bar-less fixed run and stays legal.
+  is an invalid value outright (targets are the search's bar — there is
+  nothing to declare with an empty one).
 """
 
 from decimal import Decimal
@@ -269,18 +270,18 @@ class TestFixedRunTargetGuard:
                 targets=["high"], quality=(Decimal("18"), Decimal("18")),
             )
 
-    def test_empty_targets_with_point_q_stays_legal(self) -> None:
-        """An empty --targets declares a bar-less fixed run.
+    def test_empty_targets_rejected(self) -> None:
+        """An empty explicit target list is an invalid value, not a shape.
 
-        Bug condition: the guard over-fires on the explicit empty value,
-        removing the only way to say "fixed run, no targets" from the CLI.
+        Bug condition: an empty --targets is accepted as "no bar" — targets
+        are the search's acceptance bar, and nothing (a fixed run included)
+        has a use for an explicitly empty one; the user meant to omit the
+        flag and use default_target_profile.
         """
-        plan = _DEFAULT_CONFIG.build_encoding_plan(
-            optimize=True, measure=True,
-            targets=[], quality=(Decimal("18"), Decimal("18")),
-        )
-        assert plan.fixed_quality is True
-        assert plan.targets == []
+        with pytest.raises(ValueError, match="not a valid bar"):
+            _DEFAULT_CONFIG.build_encoding_plan(
+                optimize=True, measure=True, targets=[],
+            )
 
     def test_default_profile_with_point_q_stays_silent(self) -> None:
         """-q alone with the config-default profile is a normal fixed run.

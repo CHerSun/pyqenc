@@ -371,11 +371,22 @@ def _add_quality_arguments(parser: argparse.ArgumentParser) -> None:
 def _parse_targets(targets_str: str | None) -> list[str] | None:
     """Parse comma-separated quality targets into raw target strings.
 
-    Returns ``None`` meaning "use defaults from config".
+    Returns ``None`` meaning "use the default target profile from config".
+
+    Raises:
+        ValueError: If the value contains no target tokens — targets are the
+            search's acceptance bar; an empty value is not a valid bar.
     """
     if targets_str is None:
         return None
-    return [t.strip() for t in targets_str.split(",") if t.strip()]
+    tokens = [t.strip() for t in targets_str.split(",") if t.strip()]
+    if not tokens:
+        raise ValueError(
+            "Empty --targets value is not allowed. "
+            "Omit --targets to use default_target_profile from config, "
+            "or pass a target profile name or metric-stat:value pairs."
+        )
+    return tokens
 
 
 def _build_config(args: argparse.Namespace) -> AppConfig:
