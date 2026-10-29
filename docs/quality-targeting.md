@@ -87,7 +87,7 @@ For VMAF specifically, prefer `p10` over `min`/`p05` due to the first-frame bias
 
 Quality targets ship as named bundles — **target profiles** (`ultra` / `high` / `medium` / `low`) defined in `encoding.target_profiles`, selected by name (`--targets high`) or via `default_target_profile` for a bare run. Raw pairs still work for full control (`--targets vmaf-med:97,...`).
 
-The shipped values were calibrated on 1080p animation (plain `h265+slow` fixed runs at CRF 14/18/22/26; each bar = the merged-output measured level at that anchor CRF) — a profile means "the quality of that anchor CRF on the reference source". Each profile bundles four `med` targets with four `p10` floor safeguards; the full table lives in `default_config.yaml` and [cli-reference.md](cli-reference.md#quality-target-format).
+The shipped values were calibrated on 1080p animation (plain `h265+slow` fixed runs at CRF 14/18/22/26, every chunk measured): a profile means "the quality of that anchor CRF on the reference source". Medians sit at the **duration-weighted p25** of the per-chunk medians — at most ~a quarter of the runtime gets pushed below the anchor, keeping the searched result near the fixed-CRF size. Floors sit at the **per-chunk p10**, lifting the worst decile of chunks above the fixed run's floor: `vmaf-p10` (VMAF's `min` carries a first-frame bias — a single skewed point on frame 0 drags it), plus `psnr-min`/`ssim-min`/`vif-min` (no such artifact). The full tables live in `default_config.yaml` and [cli-reference.md](cli-reference.md#quality-target-format).
 
 To tune (in order of preference):
 

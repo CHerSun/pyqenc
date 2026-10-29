@@ -184,18 +184,20 @@ neither valid pairs nor a profile name fails listing the available profiles.
 Named bundles of targets defined in `encoding.target_profiles` (dict-merged
 across config layers — a local layer can tune one profile or add its own
 without retyping the rest). The shipped set was calibrated on 1080p
-animation (plain `h265+slow` fixed runs; bars = merged-output measured
-levels at the anchor CRFs):
+animation (plain `h265+slow` fixed runs; bars = quantiles of the per-chunk
+measured distributions at the anchor CRFs — medians at the duration-weighted
+p25, floors at the per-chunk p10):
 
 | Profile  | Anchor CRF | `vmaf-med` | `psnr-med` | `ssim-med` | `vif-med` |
 | -------- | ---------- | ---------- | ---------- | ---------- | --------- |
-| `ultra`  | 14         | 97.5       | 50.3       | 99.2       | 96.6      |
-| `high`   | 18         | 96.9       | 48.3       | 98.9       | 94.9      |
-| `medium` | 22         | 96.1       | 46.4       | 98.4       | 92.8      |
-| `low`    | 26         | 94.3       | 44.9       | 97.9       | 90.3      |
+| `ultra`  | 14         | 97.1       | 49.1       | 99.2       | 95.9      |
+| `high`   | 18         | 96.3       | 47.0       | 98.8       | 94.0      |
+| `medium` | 22         | 94.8       | 45.0       | 98.3       | 91.8      |
+| `low`    | 26         | 92.9       | 43.3       | 97.7       | 89.4      |
 
-(each profile also carries `p10` floor safeguards per metric — see
-`default_config.yaml`)
+Each profile also carries floor safeguards — `vmaf-p10` plus `psnr-min` /
+`ssim-min` / `vif-min` (VMAF's `min` carries a first-frame bias, so it stays
+at `p10`; the other three have no such artifact) — see `default_config.yaml`.
 
 A bare run uses `default_target_profile` (`high`). A profile is ignored on
 fixed runs (`-q <value>`): those judge by the runtime-elected anchor, and
