@@ -950,7 +950,41 @@ Direction fixed (user, 2026-10-28): replicate the encoding/optimization INFO sha
 
 ---
 
-## Last known = 153
+## 154. SSIMULACRA 2 measure
+
+According to its repository - it has one of the highest correlations with percepted quality, higher then vmaf. Also, VMAF is rather expensive to measure (comparable with encoding time - and for search mode that is a critical disadvantage).
+While other current metrics - SSIM, PSNR, VIF - correlate badly with human perception.
+
+Another huge point for SSIMULACRA 2 - it is tune for texture retention (and even gives a bit of slack for extra added noise).
+
+Question is - if we can add it to pyqenc and what is the price of that. We cannot ask users for modified ffmpeg build. There looks to be some python packages.
+Also it looks like ffmpeg can be used for frames decoding, and those raw frames can be thrown into SSIMULACRA 2 lib for scoring.
+
+Problem - currently we run all metrics in single decoding (single full video reading; potentially from network location, so number of full reads does matter).
+
+Consider the same approach for all metrics? Mutually exclusive vmaf / SSIMULACRA 2 ?
+I.e. if vmaf and not SSIMULACRA 2 - try to run all via ffmpeg
+If SSIMULACRA 2 - try to run all via raw frames (or whatever approach looks feasible).
+But if both SSIMULACRA 2 + VMAF - 2 runs only?
+
+Finally, we need to pick which metrics to use by default - for this we need to measure the time needed for the measures and collect reviews. We might even want to reduce our default targets sets.
+
+One more matter - measuring currently takes a lot of time, so we use fine-grained duration based progress reporting. Need to retain it, if possible for SSIMULACRA 2.
+
+no vapoursynth or other extra dependencies by default. Any extra dependency needs approval.
+
+---
+
+## 155. VMAF on GPU
+
+can we run vmaf on gpu? To speed up the measure significantly and offload it from CPU? What is required for that?
+
+no custom ffmpeg builds allowed. Should safely fall back to CPU-based on failure / lack of capability.
+
+---
+
+
+## Last known = 155
 
 Keep this updated, so we can keep continuous numbering even on last todo item deletion.
 Keep this the last entry for easy human updates.
