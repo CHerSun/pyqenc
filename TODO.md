@@ -983,6 +983,14 @@ no custom ffmpeg builds allowed. Should safely fall back to CPU-based on failure
 
 ---
 
+## 156. (fast) remove space estimation
+
+proper space estimation is troublesome to get - need to preview all producing phases, profiles / targets, etc. Too cumbersome, too much upkeep. And current space estimation is pretty much useless.
+instead check free space before each item is produced - if lower then config-defined - stop. We don't want to consume absolutely every byte (could lead to system problems).
+for merge item production - it produces large items. We can calculate how much space is required beforehand (sum size of winners for the strategy) - so check that + config-defined.
+
+---
+
 
 ## Last known = 155
 

@@ -229,8 +229,9 @@ Config build order: built-in defaults → `~/.config/pyqenc/config.yaml` → `./
 
 - [CLI Reference](docs/cli-reference.md) — all options, quality target format, strategy format
 - [Quality Targeting Guide](docs/quality-targeting.md) — metric pitfalls, recommended targets, VIF vs VMAF, narrowing the quality search range
-- [Sample Comparison](docs/sample-comparison.md) — pyqenc vs BSEncode side-by-side
 - [Architecture](docs/architecture.md) — pipeline internals
+- [Project glossary](docs/glossary.md)
+- [Audio processing](docs/audio-processing.md) - how audio processing works
 
 ---
 
