@@ -61,11 +61,11 @@ These options apply to `auto` and `video` (the video chain resolvers).
 
 | Option                    | Description                                                                                                                                                                    | Default                            |
 | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------- |
-| `--targets TARGETS`       | Quality targets (see [Quality Target Format](#quality-target-format))                                                                                                          | from config (8 targets, see below) |
+| `--targets TARGETS`       | Quality targets: a target profile name or raw pairs (see [Quality Target Format](#quality-target-format))                                                                       | `default_target_profile` from config (`high`) |
 | `--strategies STRATEGIES` | Encoding strategies (see [Strategy Format](#strategy-format))                                                                                                                  | from config (`h264*,h265*`)        |
 | `-q, --quality V`         | Quality knob override for every matched strategy: a single value (`18`) pins it — a [fixed-quality run](./quality-targeting.md#fixed-quality-mode-q) with the per-chunk search disabled; a pair (`18:24`, `18-24`, `18..24`, order-free) constrains the search band. Replaces profile-level `quality_range` | off (config ranges) |
 | `--no-optimize`           | Disable optimization — produce output for all strategies (no elimination; measurements still run, including the optimization-phase anchor that feeds the winner-limiter table) | `False` (optimization enabled)     |
-| `--no-measure`            | Skip quality measurements nothing consumes — see [Measurement Opt-Out](#measurement-opt-out---no-measure) | `False` (measurements enabled)    |
+| `--no-measure`            | Skip quality measurements — always the merged-output one, plus attempt measurement and the optimization phase when nothing consumes them; see [Measurement Opt-Out](#measurement-opt-out---no-measure) | `False` (measurements enabled)    |
 | `--sampling N`            | Frame sampling for quality measurement: every N-th frame. Lower = more precise but slower. Measurements precision directly affect encoding results. sampling=1 is recommended. | from config (`1`)                  |
 | `--no-visual-hash`        | Disable emoji visual-hash prefix on chunk log lines                                                                                                                            | off                                |
 
@@ -174,7 +174,41 @@ Config search order (first found wins):
 
 ## Quality Target Format
 
-**Format:** `metric-statistic:value[,...]`
+**Format:** a target profile name (`high`) or `metric-statistic:value[,...]`
+
+`--targets` accepts either form; raw pairs parse first, and a value that is
+neither valid pairs nor a profile name fails listing the available profiles.
+
+### Target profiles
+
+Named bundles of targets defined in `encoding.target_profiles` (dict-merged
+across config layers — a local layer can tune one profile or add its own
+without retyping the rest). One principle: **every bar is the `h265-crisp`
+anchor run's own measured level** (calibrated on 1080p animation) — the
+vmaf target at the anchor's merged `p10` (vmaf targets use the p10 stat;
+its `min` carries a first-frame bias, and the p10 level exceeds the p5
+median level at every anchor, so no `vmaf-med` bar is shipped — it could
+never bind), psnr/ssim/vif targets at the duration-weighted p5 of the
+anchor's per-chunk medians, and psnr/ssim/vif floor safeguards at the
+anchor's merged min stats. The crisp anchor carries the grain-preservation
+focus; no per-metric tilt.
+
+| Profile  | Anchor CRF | `vmaf-p10` | `psnr-med` | `ssim-med` | `vif-med` |
+| -------- | ---------- | ---------- | ---------- | ---------- | --------- |
+| `ultra`  | 14         | 96.5       | 48.6       | 99.1       | 95.7      |
+| `high`   | 18         | 95.3       | 46.4       | 98.6       | 93.5      |
+| `medium` | 22         | 93.8       | 44.4       | 97.9       | 90.9      |
+| `low`    | 26         | 91.6       | 42.2       | 97.2       | 88.4      |
+
+Each profile also carries floor safeguards — `psnr-min` /
+`ssim-min` / `vif-min` (vmaf needs no min floor: its `p10` target above
+already plays that role, and its `min` carries a first-frame bias) — see
+`default_config.yaml`.
+
+A bare run uses `default_target_profile` (`high`). A profile is ignored on
+fixed runs (`-q <value>`): those judge by the runtime-elected anchor, and
+combining explicit `--targets` with a single-point `-q` is rejected at
+startup.
 
 ### Metrics
 
@@ -214,7 +248,7 @@ Config search order (first found wins):
 --targets vif-med:94,vmaf-p10:97,psnr-med:48,ssim-med:99
 ```
 
-When omitted, the config defaults apply (a set of `med` targets & a set of floor safeguards).
+When omitted, the config defaults apply (the `default_target_profile` bundle: a `vmaf-p10` target, `med` targets for psnr/ssim/vif, and min floor safeguards).
 
 ---
 

@@ -12,18 +12,45 @@ chunking:
   min_scene_length: 24  # minimum frames per chunk. 20+ recommended (p10 is 2 frames then).
 
 encoding:
-  targets:
-    # Format: "metric-statistic:value". See docs/quality-targeting.md for guidance.
-    # To increase quality (larger files): raise the most constrained passing target (• in logs).
-    # To decrease quality (smaller files): lower the most constrained failing target (✘ in logs).
-    - "vmaf-med:96.0"   # 95–97 = high quality. 98+ for visually lossless
-    - "psnr-med:46.0"   # 44–46 = good; 50+ = near-lossless
-    - "ssim-med:98.5"   # 98+ = good; non-linear scale, compressed near 100
-    - "vif-med:94.0"    # grain/texture retention; 92–94 = good; higher = crisper but larger
-    - "vmaf-p10:94.0"   # --- floor safeguards ---
-    - "psnr-p10:44.0"
-    - "ssim-p10:97.0"
-    - "vif-p10:91.5"
+  # Quality targets come as named bundles — target profiles. --targets accepts
+  # a profile name (e.g. 'high') or raw "metric-statistic:value" pairs
+  # (e.g. 'vmaf-med:96.9,vif-med:94.9'); a bare run uses default_target_profile.
+  # Entry format and tuning guidance: docs/quality-targeting.md.
+  default_target_profile: high # used when the run says nothing; ignored on fixed (-q <value>) runs
+  target_profiles:
+    # Named bundles of quality targets ("metric-statistic:value" entries).
+    ultra:               # ≈ CRF 13-14
+      - "vmaf-p10:96.5"
+      - "psnr-med:48.6"
+      - "ssim-med:99.1"
+      - "vif-med:95.7"
+      - "psnr-min:45.1"  # --- floor safeguards ---
+      - "ssim-min:98.4"
+      - "vif-min:92.2"
+    high:                # ≈ CRF 17-18
+      - "vmaf-p10:95.3"
+      - "psnr-med:46.4"
+      - "ssim-med:98.6"
+      - "vif-med:93.5"
+      - "psnr-min:42.8"  # --- floor safeguards ---
+      - "ssim-min:97.4"
+      - "vif-min:88.3"
+    medium:              # ≈ CRF 21-22
+      - "vmaf-p10:93.8"
+      - "psnr-med:44.4"
+      - "ssim-med:97.9"
+      - "vif-med:90.9"
+      - "psnr-min:41.4"  # --- floor safeguards ---
+      - "ssim-min:96.4"
+      - "vif-min:84.3"
+    low:                 # ≈ CRF 25-26
+      - "vmaf-p10:91.6"
+      - "psnr-med:42.2"
+      - "ssim-med:97.2"
+      - "vif-med:88.4"
+      - "psnr-min:39.6"  # --- floor safeguards ---
+      - "ssim-min:95.1"
+      - "vif-min:81.6"
   strategies:
     # Format: "profile[+preset]" — profile is required, preset is optional (omit = codec default).
     # Wildcards: "h265*" = all h265 profiles; "*" = all profiles; "*+*" = all profiles × all presets.
@@ -119,14 +146,18 @@ audio:
     # A chain applied to N matched tracks produces exactly N outputs, named
     # "<stream name> chain=<name>.<ext>". No encode filter -> FLAC (lossless);
     # otherwise the LAST encode filter in the chain sets the codec/extension.
-    - name: stereo_std_normal     # standard stereo fold (LFE dropped), peak-normalised to prevent clipping
-      filters: [to_stereo, peaknorm, aac]
-    - name: stereo_std_night      # standard stereo fold (LFE dropped) + dynamic normalisation for night listening
-      filters: [to_stereo, peaknorm, dynaudnorm, aac]
-    - name: stereo_lfe_normal     # LFE-keeping stereo fold, peak-normalised to prevent clipping
-      filters: [to_stereo_lfe, peaknorm, aac]
-    - name: stereo_lfe_night      # LFE-keeping stereo fold + dynamic normalisation for night listening
-      filters: [to_stereo_lfe, peaknorm, dynaudnorm, aac]
+    - name: aac                    # default aac-encoding (original stream)
+      filters: [peaknorm, aac]
+    - name: aac_night              # night-normalized aac-encoding
+      filters: [peaknorm, dynaudnorm, aac]
+    #- name: stereo_std_normal     # standard stereo fold (LFE dropped), peak-normalised to prevent clipping
+    #  filters: [to_stereo, peaknorm, aac]
+    #- name: stereo_std_night      # standard stereo fold (LFE dropped) + dynamic normalisation for night listening
+    #  filters: [to_stereo, peaknorm, dynaudnorm, aac]
+    #- name: stereo_lfe_normal     # LFE-keeping stereo fold, peak-normalised to prevent clipping
+    #  filters: [to_stereo_lfe, peaknorm, aac]
+    #- name: stereo_lfe_night      # LFE-keeping stereo fold + dynamic normalisation for night listening
+    #  filters: [to_stereo_lfe, peaknorm, dynaudnorm, aac]
 
   select: []                      # empty (default) = process ALL extracted audio tracks
     # Uncomment and adapt entries below to process only specific tracks. Each

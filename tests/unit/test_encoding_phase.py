@@ -660,19 +660,32 @@ class TestEncodingPresentationTargets:
         winner_targets_met: bool = True,
         optimize: bool = True,
         measure: bool = True,
+        targets: list[str] | None = None,
     ) -> tuple[EncodingPhaseResult, dict[str, object]]:
         """Run EncodingPhase through run() with a stubbed encode pool.
 
         Returns the phase result and the kwargs the pool (``_encode_pairs``)
         received. When *winner_metrics* is given, a winner result sidecar is
         written next to the winner file so the real winner scan reads it.
+
+        *targets* defaults to a raw pair list for searched runs; fixed runs
+        (a single-point override) pass the API-legal empty list (a non-empty
+        bar with a pinned knob is rejected by the plan-build guard).
         """
         from pyqenc.app_config import load_app_config
 
         config = load_app_config(default_only=True).model_copy(deep=True)
+        if targets is None:
+            # Fixed runs (a single-point override) carry the API-legal empty
+            # list — a non-empty bar with a pinned knob is rejected by the
+            # plan-build guard.
+            targets = [] if (
+                quality_range_override is not None
+                and quality_range_override[0] == quality_range_override[1]
+            ) else ["vmaf-min:93.0"]
         plan = config.build_encoding_plan(optimize=optimize, measure=measure,
             strategies = ["h265-aq+slow"],
-            targets    = ["vmaf-min:93.0"],
+            targets    = targets,
             quality    = quality_range_override,
         )
 
@@ -941,11 +954,22 @@ class TestWinningLimiterBasisLine:
         from pyqenc.stream_model import VideoStream, VideoStreamChunk, VideoStreamInfo
 
         config = load_app_config(default_only=True).model_copy(deep=True)
-        plan = config.build_encoding_plan(optimize=True, measure=True,
-            strategies = ["h265-aq+slow"],
-            targets    = plan_targets,
-            quality    = (_D("18"), _D("18")) if fixed else None,
-        )
+        if fixed:
+            # A fixed run cannot carry explicit targets (the plan-build guard
+            # rejects a bar plus a pinned knob): the given targets ride the
+            # config's default profile instead — the real fixed-run shape,
+            # where the search-tuned config targets exist but drive nothing.
+            default = config.encoding.default_target_profile
+            config.encoding.target_profiles[default] = list(plan_targets)
+            plan = config.build_encoding_plan(optimize=True, measure=True,
+                strategies = ["h265-aq+slow"],
+                quality    = (_D("18"), _D("18")),
+            )
+        else:
+            plan = config.build_encoding_plan(optimize=True, measure=True,
+                strategies = ["h265-aq+slow"],
+                targets    = plan_targets,
+            )
 
         base.mkdir(parents=True, exist_ok=True)
         src = base / "source.mkv"

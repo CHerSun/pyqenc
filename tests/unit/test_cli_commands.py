@@ -71,13 +71,15 @@ class TestPipelineHandlerContracts:
     """
 
     @staticmethod
-    def _run(name: str, tmp_path, run_success: bool = True):
+    def _run(name: str, tmp_path, run_success: bool = True,
+             extra_args: list[str] | None = None):
         from dataclasses import replace
 
         source = tmp_path / "src.mkv"
         source.write_bytes(b"\x00" * 16)
         args = _pipeline_parser().parse_args(
-            [name, str(source), "-y", "--work-dir", str(tmp_path / "work")],
+            [name, str(source), "-y", "--work-dir", str(tmp_path / "work")]
+            + (extra_args or []),
         )
         captured: dict = {}
 
@@ -98,6 +100,17 @@ class TestPipelineHandlerContracts:
         rc, captured = self._run("video", tmp_path)
         assert rc == 0
         assert "plan" in captured and "crop_params" in captured
+
+    def test_empty_targets_value_rejected_before_the_runner(self, tmp_path) -> None:
+        """An empty --targets value fails the command before any runner runs.
+
+        Bug condition: ``--targets ''`` parses to an empty list that rides
+        the plan as "no bar" — a user giving the flag must mean it; targets
+        are the search's acceptance bar and an empty value is not one.
+        """
+        rc, captured = self._run("video", tmp_path, extra_args=["--targets", ""])
+        assert rc == 1
+        assert captured == {}
 
     def test_audio_calls_its_runner_without_plan(self, tmp_path) -> None:
         rc, captured = self._run("audio", tmp_path)

@@ -451,8 +451,9 @@ class TestPlanConstructionInvariants:
             config.build_encoding_plan(optimize=True, measure=True, targets=[])
 
     def test_fixed_run_without_targets_allowed(self) -> None:
-        """Fixed runs legitimately omit targets: the fixed knob is the reference
-        and config targets drive nothing there."""
+        """Fixed runs legitimately omit targets (the API-legal empty list):
+        the fixed knob is the reference and config targets drive nothing
+        there — a script-driven fixed run invents no targets."""
         config = _config_with_strategies("h265-aq")
         plan = config.build_encoding_plan(optimize=True, measure=True,
             strategies=["h265-aq"], targets=[], quality=(Decimal("18"), Decimal("18")),

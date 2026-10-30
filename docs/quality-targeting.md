@@ -83,23 +83,17 @@ For VMAF specifically, prefer `p10` over `min`/`p05` due to the first-frame bias
 
 ---
 
-## Recommended target set
+## Target profiles
 
-The defaults shipped with `pyqenc` (in `default_config.yaml`) are a starting point, not a universal prescription. The right values depend on your content and how much quality vs size trade-off you want.
+Quality targets ship as named bundles — **target profiles** (`ultra` / `high` / `medium` / `low`) defined in `encoding.target_profiles`, selected by name (`--targets high`) or via `default_target_profile` for a bare run. Raw pairs still work for full control (`--targets vmaf-med:97,...`).
 
-```yaml
-encoding:
-  targets:
-    - "vmaf-med:96.0"   # 95–97 = high quality. 98+ for visually lossless
-    - "psnr-med:45.0"   # 44–46 = good; 50+ = near-lossless
-    - "ssim-med:98.0"   # 98+ = good; non-linear scale, compressed near 100
-    - "vif-med:93.0"    # grain/texture retention; 92–94 = good; higher = crisper but larger
-    # --- floor safeguards ---
-    - "vmaf-p10:93.0"
-    - "psnr-min:43.0"
-    - "ssim-min:96.0"
-    - "vif-min:90.0"
-```
+One principle per profile (calibrated on 1080p source, `h265-crisp+slow` fixed runs at CRF 14/18/22/26): **every bar is the anchor run's own measured level** — the vmaf target at the anchor's merged `p10` (vmaf targets use the p10 stat; its `min` carries a first-frame bias, and the p10 level exceeds the p5 median level at every anchor, so no `vmaf-med` bar is shipped — `p10 ≤ median` per chunk means it could never bind), psnr/ssim/vif targets at the duration-weighted p5 of the anchor's per-chunk medians (loose: most of the movie stays at or above the anchor CRF), and psnr/ssim/vif floor safeguards at the anchor's merged min stats (no chunk may measure worse than the anchor's own worst). The crisp anchor carries the grain-preservation focus; there is no per-metric tilt. The full tables live in `default_config.yaml` and [cli-reference.md](cli-reference.md#quality-target-format).
+
+To tune (in order of preference):
+
+1. Pick a different profile: `--targets medium` / `--targets ultra` — or change `default_target_profile`.
+2. Edit or add a profile in your config — `target_profiles` dict-merges across config layers, so a local layer can tune one profile or add `anime-high` without retyping the rest.
+3. Raw pairs for one-off control.
 
 To increase quality (larger files): raise the most constraining passing target (marked `•` in logs and in winning-limiter distribution summary table of encoding phase, see below) by 0.5–1.0.
 

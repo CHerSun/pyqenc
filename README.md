@@ -65,9 +65,14 @@ That's it. Default settings should work well. Later you can customize settings.
 
 > Use a separate folder per encode job — either `cd` into a dedicated folder first, or pass `--work-dir <path>`. Don't run two encodes in parallel onto the same work dir.
 
-The other intents: `pyqenc video movie.mkv -y` runs the video chain only, `pyqenc audio movie.mkv -y` the audio processing only, and `pyqenc extract movie.mkv -y` materializes streams (video and audio included) as standalone files.
+The other intents:
 
-For all options: `pyqenc auto --help` or [CLI Reference](docs/cli-reference.md).
+- video chain only - `pyqenc video movie.mkv -y`
+- audio processing only - `pyqenc audio movie.mkv -y`
+- extract streams (audio/video included) - `pyqenc extract movie.mkv -y`
+- measure videos to compare with source - `pyqenc measure movie.mkv variant1.mkv variant2.mkv -y`
+
+For all options: `pyqenc --help` or [CLI Reference](docs/cli-reference.md).
 
 ---
 
@@ -75,31 +80,31 @@ For all options: `pyqenc auto --help` or [CLI Reference](docs/cli-reference.md).
 
 ### Scene-based encoding
 
-The video is split into scenes first — detected directly from the source as timestamp windows, with no intermediate copy. Each scene is short and visually uniform — a dark scene, a fast-action sequence, a title card — they all have very different encoding characteristics. pyqenc assigns an independent quality parameter to each scene, so every scene gets exactly what it needs. Dark scenes get their own value, fast-moving scenes get theirs. No wasted bits, no scenes that look worse than others (this differs from native 2-pass encoding, where static scenes are prioritized).
+The video is split into scenes first — detected directly from the source as timestamp windows, with no intermediate copy. Each scene is expected to be short and rather uniform. pyqenc searches quality parameter independently for each scene, so that every scene gets exactly what it needs to meet requested target quality level. Dark scenes get their own value, fast-moving scenes get theirs. No wasted bits, no scenes that look worse than others (this differs from native 2-pass encoding, where static scenes are prioritized).
 
 ### Quality targeting or fixed quality
 
-You can use either quality targeting via metrics or specify fixed quality. For fixed quality - add `-q` argument, like `-q 18` - applied to all strategies.
+You can use either quality targeting via metrics or specify fixed quality. For fixed quality - add `-q` argument, like `-q 18` - applied to all strategies. Fixed mode can skip quality measurements (`--no-measure`) and doesn't need search attempts, so it encodes much faster.
 
-For quality targeting mode you need to specify minimal thresholds to reach. The default config already has some setup. Either copy & adjust config (`pyqenc config . -y`), or you can override via `--targets` argument with a list of quality targets.
+For quality targeting (search) mode you need to specify minimal thresholds to reach. The default config already has some profiles. Either copy & adjust config (`pyqenc config . -y`), or you can override via `--targets` argument directly with a list of quality targets.
 
 Quality targets are specified as `{metric}-{stat}:{value}[,{metric}-{stat}:value}]`, like `--targets vmaf-p10:95,vmaf-med:97,psnr-p10:44`.
 
 Supported metrics: `vmaf`, `vif`, `ssim`, `psnr`.
 
-Supported stats: `min`, `p05`, `p25`, `med`, `p75`, `p95`, `max`.
+Supported stats: `min`, `p05`, `p10`, `p25`, `med`, `p75`, `p90`, `p95`, `max`.
 
 See [Quality Targeting Guide](docs/quality-targeting.md) for guidance on choosing good targets.
 
 ### 🔁 Resumption
 
-pyqenc can be stopped at any point — power loss, `Ctrl+C`, whatever. Re-run the command targetting same work dir and same source to resume. Existing work is detected and reused automatically. If you've changed something between reruns - pyqenc will still try to reuse what's possible (consistency is the first target, so more work could be required on changes).
+pyqenc can be stopped at any point — power loss, `Ctrl+C`, whatever. Re-run the command targeting the same work dir and the same source to resume. Existing work is detected and reused automatically. If you've changed something between reruns - pyqenc will reuse what's possible (consistency is the primary goal, so more work could be required on changes; on no changes it recovers 99% of investments).
 
 ### Best strategy search
 
-An encoding *strategy* is a combination of a profile and a codec preset (e.g. `h265-aq+slow`). Different strategies produce different size/quality tradeoffs.
+An encoding *strategy* is a combination of a profile and a codec preset (e.g. `h265+slow`). Different strategies produce different size/quality tradeoffs.
 
-By default, pyqenc tests all specified strategies on ~1% of chunks first, then encodes the full video using only the ones with the smallest output that still meets your quality targets. You get the best result without encoding the whole movie multiple times.
+By default, pyqenc tests all given strategies on ~1% of chunks first, then encodes the full video using only the ones with the smallest output (with a small tolerance threshold) that still meets your quality targets. You get the best result without encoding the whole movie multiple times.
 
 Use `--no-optimize` to produce one output per strategy — useful when you want to compare results side by side.
 
@@ -141,15 +146,15 @@ pyqenc auto movie.mkv --strategies "av1*" -y
 
 This will test all defined AV1 profiles and select the optimal ones for the full encoding.
 
-AV1 strongly smoothes content. If you want to encode crispy (cartoons/anime) or noisy (older movies, natural grain) - AV1 is a bad choice. AV1 wins on modern content.
+AV1 strongly smooths content. If you want to encode crispy (cartoons/anime) or noisy (older movies, natural grain) - AV1 is a bad choice. AV1 wins on modern movies.
 
-> NOTE: Your devices could lack AV1 hardware decoding support and struggle with the codec.
+> NOTE: Your devices could lack AV1 hardware decoding support and struggle with the playback of AV1.
 
 ## h264 encoding
 
 h.264 codec is **NOT recommended** for use with pyqenc.
 
-h264 is an older generation codec. It has a caveat that could ruin pyqenc encoding - h264 stores codec private data once. While pyqenc encodes each chunk separately. This could cause different codec private data on chunks. When merges - video won't play correctly. Default config adds extra measures against that, but doesn't guarantee full compatibility.
+h264 is an older generation codec. It has a caveat that could ruin pyqenc encoding - h264 stores codec private data once per file. While pyqenc encodes each chunk separately. This could cause different codec private data on chunks. When merges - video won't play correctly. Default config adds extra measures against that, but doesn't guarantee full compatibility.
 
 ## 📊 Measuring quality
 
@@ -224,8 +229,9 @@ Config build order: built-in defaults → `~/.config/pyqenc/config.yaml` → `./
 
 - [CLI Reference](docs/cli-reference.md) — all options, quality target format, strategy format
 - [Quality Targeting Guide](docs/quality-targeting.md) — metric pitfalls, recommended targets, VIF vs VMAF, narrowing the quality search range
-- [Sample Comparison](docs/sample-comparison.md) — pyqenc vs BSEncode side-by-side
 - [Architecture](docs/architecture.md) — pipeline internals
+- [Project glossary](docs/glossary.md)
+- [Audio processing](docs/audio-processing.md) - how audio processing works
 
 ---
 
