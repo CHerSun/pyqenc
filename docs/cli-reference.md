@@ -184,16 +184,18 @@ neither valid pairs nor a profile name fails listing the available profiles.
 Named bundles of targets defined in `encoding.target_profiles` (dict-merged
 across config layers — a local layer can tune one profile or add its own
 without retyping the rest). The shipped set was calibrated on 1080p
-animation (plain `h265+slow` fixed runs; bars = quantiles of the per-chunk
+animation (`h265-crisp+slow` fixed runs; bars = quantiles of the per-chunk
 measured distributions at the anchor CRFs — medians at the duration-weighted
-p25, floors at the per-chunk p10):
+p25, floors at the per-chunk p10). Profiles encode the **crisp** reference
+quality: grain-preserving tuning measures ~0.5–2.4 VIF higher than plain
+h265 at the same CRF, so plain profiles search deeper under the same bars.
 
 | Profile  | Anchor CRF | `vmaf-med` | `psnr-med` | `ssim-med` | `vif-med` |
 | -------- | ---------- | ---------- | ---------- | ---------- | --------- |
-| `ultra`  | 14         | 97.1       | 49.1       | 99.2       | 95.9      |
-| `high`   | 18         | 96.3       | 47.0       | 98.8       | 94.0      |
-| `medium` | 22         | 94.8       | 45.0       | 98.3       | 91.8      |
-| `low`    | 26         | 92.9       | 43.3       | 97.7       | 89.4      |
+| `ultra`  | 14         | 97.3       | 49.3       | 99.2       | 96.5      |
+| `high`   | 18         | 96.6       | 47.1       | 98.8       | 94.6      |
+| `medium` | 22         | 95.3       | 45.1       | 98.2       | 92.4      |
+| `low`    | 26         | 93.6       | 43.2       | 97.6       | 89.8      |
 
 Each profile also carries floor safeguards — `vmaf-p10` plus `psnr-min` /
 `ssim-min` / `vif-min` (VMAF's `min` carries a first-frame bias, so it stays
