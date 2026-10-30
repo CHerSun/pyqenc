@@ -183,23 +183,27 @@ neither valid pairs nor a profile name fails listing the available profiles.
 
 Named bundles of targets defined in `encoding.target_profiles` (dict-merged
 across config layers — a local layer can tune one profile or add its own
-without retyping the rest). The shipped set was calibrated on 1080p
-animation (`h265-crisp+slow` fixed runs; bars = quantiles of the per-chunk
-measured distributions at the anchor CRFs — medians at the duration-weighted
-p25, floors at the per-chunk p10). Profiles encode the **crisp** reference
-quality: grain-preserving tuning measures ~0.5–2.4 VIF higher than plain
-h265 at the same CRF, so plain profiles search deeper under the same bars.
+without retyping the rest). One principle: **every bar is the `h265-crisp`
+anchor run's own measured level** (calibrated on 1080p animation) — the
+vmaf target at the anchor's merged `p10` (vmaf targets use the p10 stat;
+its `min` carries a first-frame bias, and the p10 level exceeds the p5
+median level at every anchor, so no `vmaf-med` bar is shipped — it could
+never bind), psnr/ssim/vif targets at the duration-weighted p5 of the
+anchor's per-chunk medians, and psnr/ssim/vif floor safeguards at the
+anchor's merged min stats. The crisp anchor carries the grain-preservation
+focus; no per-metric tilt.
 
-| Profile  | Anchor CRF | `vmaf-med` | `psnr-med` | `ssim-med` | `vif-med` |
+| Profile  | Anchor CRF | `vmaf-p10` | `psnr-med` | `ssim-med` | `vif-med` |
 | -------- | ---------- | ---------- | ---------- | ---------- | --------- |
-| `ultra`  | 14         | 97.3       | 49.3       | 99.2       | 96.5      |
-| `high`   | 18         | 96.6       | 47.1       | 98.8       | 94.6      |
-| `medium` | 22         | 95.3       | 45.1       | 98.2       | 92.4      |
-| `low`    | 26         | 93.6       | 43.2       | 97.6       | 89.8      |
+| `ultra`  | 14         | 96.5       | 48.6       | 99.1       | 95.7      |
+| `high`   | 18         | 95.3       | 46.4       | 98.6       | 93.5      |
+| `medium` | 22         | 93.8       | 44.4       | 97.9       | 90.9      |
+| `low`    | 26         | 91.6       | 42.2       | 97.2       | 88.4      |
 
-Each profile also carries floor safeguards — `vmaf-p10` plus `psnr-min` /
-`ssim-min` / `vif-min` (VMAF's `min` carries a first-frame bias, so it stays
-at `p10`; the other three have no such artifact) — see `default_config.yaml`.
+Each profile also carries floor safeguards — `psnr-min` /
+`ssim-min` / `vif-min` (vmaf needs no min floor: its `p10` target above
+already plays that role, and its `min` carries a first-frame bias) — see
+`default_config.yaml`.
 
 A bare run uses `default_target_profile` (`high`). A profile is ignored on
 fixed runs (`-q <value>`): those judge by the runtime-elected anchor, and
@@ -244,7 +248,7 @@ startup.
 --targets vif-med:94,vmaf-p10:97,psnr-med:48,ssim-med:99
 ```
 
-When omitted, the config defaults apply (a set of `med` targets & a set of floor safeguards).
+When omitted, the config defaults apply (the `default_target_profile` bundle: a `vmaf-p10` target, `med` targets for psnr/ssim/vif, and min floor safeguards).
 
 ---
 

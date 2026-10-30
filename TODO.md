@@ -145,6 +145,15 @@ Current V3 search normally converges in ~4.1 attempts.
 Old V2 search converged normally in ~3.8 attempts, but had problems with attempts where we never reach a passing score (binary convergence is too slow for this case, like 8-10 attempts there).
 I belive a value of ~3.5 is possible for convergence. This directly affects speed of the pipeline, as each encode is very costly.
 
+Extra thoughts:
+
+- 1 point - just move in the opposite direction based on pass/fail - half range (binary) to that direction sentinel (if not clamped by max step).
+- 2 points or more, all same side - our purpose is to reach a breaking point as soon as possible. Try to reach sentinel as fast as possible? or do outside-of-the-range extrapolation from known points (but not less then half range left)
+- 3 points or more, all fail, sentinel reached - check for sweet spot (half-range back to nearest point)
+- 3 points or more, all fail, back-step check done - try to pick 3 points (best score + neighbors with differing scores) - if possible - search for sweet spot by binary splitting largest range (without duplication of already tested points)
+- 2 points or more, both sides (pass and fail) - we try to narrow down - interpolate (ideally from both sides) - try next - narrow down range with new point, keep going until fast exit or new point impossible (range narrowed to granularity).
+- best score = positive, closer to 0 (smaller) or equal score but with lower quality knob (smaller size)
+
 ---
 
 ## 52. h264 codec private data differs between winning encoding attempts
@@ -158,9 +167,8 @@ appended chunk (107×) → exit 1 → pyqenc treats any nonzero exit as fatal �
 the strategy ("Failed strategies: h264", phase ERROR). Fixed runs never hit it (one CRF →
 identical SPS); h265 never (in-block parameter sets); searched+optimize runs normally never
 reach an h264 merge (tolerance eliminates it — only `--no-optimize` exposes all strategies).
-Reproduce: `D:\_encoding\tmp\nomeasure-e2e\section52-evidence\REPRODUCE.md` — the exact
-pipeline command plus a self-contained 3-winner minimal repro (exit 1 + append-mapping
-warnings). Related bycatch: the "mkvmerge failed (exit N)" ERROR line drops mkvmerge's
+Reproduce: a self-contained 3-winner minimal repro exists (exit 1 + append-mapping
+warnings; evidence pack lives outside the repo). Related bycatch: the "mkvmerge failed (exit N)" ERROR line drops mkvmerge's
 stdout warnings — the actual cause never surfaces in the log.
 
 ---
@@ -832,7 +840,7 @@ The user must name strategies as `profile[+preset]` patterns (`--strategies`, `c
 
 ## 142. Flag-transition adaptation semantics per phase — winner-wipe on unmeasured→measured fixed rerun, and a change-adaptation matrix doc
 
-Observed live 2026-10-21 (§83 rework e2e, `D:\_encoding\tmp\nomeasure-e2e\fixed-both-heal.log`):
+Observed live 2026-10-21 (§83 rework e2e):
 rerunning an UNMEASURED fixed work dir with measurement on triggers the optimization
 phase's winner-wipe — sidecar-less winners are unverifiable, so they are deleted and
 rebuilt from the attempt substrate (attempt pick-up re-measures in place, never
@@ -937,8 +945,8 @@ Direction fixed (user, 2026-10-28): replicate the encoding/optimization INFO sha
 
 ## 152. Target-profile calibration breadth — more source encodings
 
-- The shipped ultra/high/medium/low values (landed with the target-profiles feature, 2026-10-29) are calibrated on ONE source: test.mkv (Ciao.Alberto, 1080p animation; `h265-crisp+slow` fixed runs at CRF 14/18/22/26 — the crisp retarget landed 2026-10-30 after the plain-h265 calibration; plain-vs-crisp diff: VIF +0.5..+2.4 at equal CRF, +22-25% size; analysis `D:\_encoding\tmp\crisp-analysis.txt`). Bars = quantiles of the per-chunk distributions at the anchor: medians at duration-weighted p25, floors at per-chunk p10 (vmaf-p10 — first-frame min bias — plus psnr/ssim/vif-min). Reference data: logs `D:\_encoding\tmp\calib-q*.log` + `calib-crisp-q*.log`, work-dirs `D:\_encoding\pyqenc_tmp\calib-*`, aggregators `D:\_encoding\tmp\agg_calib*.py` + `agg_crisp.py`. Validation loop: one search run per profile vs its fixed-CRF baseline — first h265-only run (plain-calibrated high bars): ALL 8 targets met, merged floors == bars exactly (+3.5 psnr-min/+4.4 vif-min vs fixed), medians ≈ fixed+0.3, winning CRF med 16.5/mean 16.32 — but size +68% vs CRF-18 fixed (floor-lifted hard chunks carry the bits; ≈-fixed-size needs looser knobs: floors p05 or medians p40+).
-- Animation compresses atypically (flat areas, no live grain). Collect the same 4-anchor calibration from live-action and grainy sources (e.g. the Laputa BD remux, Leon test encodes on D:) and check how far per-profile bars should shift — per content-type profiles (`anime-high` etc.) are the natural config answer if the spread is large; the dict-merged `target_profiles` already supports them.
+- FINAL CONVENTION (settled 2026-10-30 after the v4/v5 comparison): every bar = the h265-crisp anchor's own measured level. Per-bar derivation RECIPE for re-evaluation on new sources — run the anchor fixed encodes (`pyqenc video <src> --strategies h265-crisp -q {14,18,22,26} --no-optimize -y`, one work-dir per anchor), then from each run's per-chunk attempt sidecars + merged sidecar compute: (a) vmaf target = the anchor's MERGED vmaf-p10 (no vmaf-med bar: p10 ≤ median per chunk, and the p10 level exceeds the p5-median level — a med bar could never bind); (b) psnr/ssim/vif targets = duration-weighted p5 of per-chunk MEDIANS (weight = frame_count); (c) psnr/ssim/vif floor safeguards = INTERPOLATED duration-weighted p05 of per-chunk MIN stats (sort by value, accumulate frame weight; where the 5%-of-frames mark falls inside a chunk's weight span, interpolate proportionally toward the next value — no snapping to one scene's exact number; floors must actually bind, not sit idle). Before committing any bar change, size it with a simulator over the calibration data (per-chunk metric-vs-CRF interpolation + exponential size fit; the 2026-10-30 one predicted real outcomes within 0–4%). Validation loop: one search run per profile vs its fixed-CRF baseline in a reused work-dir (stored attempts re-judge [reused] — cheap). v4-vs-v5 on the reference sample: honest merged floors → 433/409 MiB (floors idle — measured mins sat 1.7 dB above dead bars) vs interpolated p05 floors → 442/424 MiB (floors pinned exactly: psnr-min 42.85 vs 42.8, vif-min 88.3 vs bar; winning-CRF distributions unchanged — the cost sits in the worst tail only). Experiment history: merged-copied bars too tight (chunk medians sit below global medians — 50–63% fail at anchor); p25/p10 quantile set → 598 MiB (floor lift of long hard chunks dominates size); honest-honest → sim 827 (global medians are the tightest median bars); vif tilt rejected (double-counts — the crisp calibration IS the crispness weighting).
+- Animation compresses atypically (flat areas, no live grain). Collect the same 4-anchor calibration from live-action and grainy sources and check how far per-profile bars should shift — per content-type profiles (`anime-high` etc.) are the natural config answer if the spread is large; the dict-merged `target_profiles` already supports them.
 - Open from the original §21 discussion: the plain-h265 vs grain-tuned (h265-crisp/aq) comparison at the same anchor CRFs — where VIF bars deserve slack for grain-preserving profiles.
 
 ---
@@ -991,8 +999,15 @@ for merge item production - it produces large items. We can calculate how much s
 
 ---
 
+## 157. pyright drift — 25 errors in visualization/metrics utilities
 
-## Last known = 155
+- 2026-10-31 check (`uvx pyright --pythonpath .venv\Scripts\python.exe pyqenc`): 25 errors, 0 in app_config/cli/models — all in `utils/visualization.py` (22: matplotlib/pandas stubbing — `Axes`/`MultipleLocator`/`Line2D` not-exported families, min/max over pandas generators, one possibly-unbound), `quality_metrics.py` (2: `.clip` on float), `utils/alive.py` (1).
+- Baseline was ~5 residues (§80 era, 2026-10-11); the growth is pyright/matplotlib-stub drift under unpinned `uvx`. Not a merge gate (the gates are ruff+ty+pytest); decide whether to pin a pyright version and clean, or drop pyright from the rotation.
+
+---
+
+
+## Last known = 157
 
 Keep this updated, so we can keep continuous numbering even on last todo item deletion.
 Keep this the last entry for easy human updates.

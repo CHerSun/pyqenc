@@ -16,56 +16,41 @@ encoding:
   # a profile name (e.g. 'high') or raw "metric-statistic:value" pairs
   # (e.g. 'vmaf-med:96.9,vif-med:94.9'); a bare run uses default_target_profile.
   # Entry format and tuning guidance: docs/quality-targeting.md.
+  default_target_profile: high # used when the run says nothing; ignored on fixed (-q <value>) runs
   target_profiles:
     # Named bundles of quality targets ("metric-statistic:value" entries).
-    # Calibrated on 1080p animation (h265-crisp+slow fixed runs at the anchor
-    # CRFs below; per-chunk attempt sidecars measured, 2026-10-30) — profiles
-    # encode the CRISP reference quality: psy-rd preserves grain/texture that
-    # plain h265 measures ~0.5-2.4 VIF lower at the same CRF, so plain
-    # profiles search deeper under the same bars (by design).
-    #   medians = duration-weighted p25 of the per-chunk medians at the anchor
-    #     — at most ~a quarter of the runtime gets pushed below the anchor;
-    #   floors = per-chunk p10, LIFTING the worst decile of chunks above the
-    #     fixed run's floor — vmaf uses p10 (its min carries a first-frame
-    #     bias), psnr/ssim/vif use min (no such artifact).
-    # Stat floors assume measurement.sampling: 1 (subsampled min is noisier).
-    ultra:               # ≈ CRF 14 reference quality
-      - "vmaf-med:97.3"
-      - "psnr-med:49.3"
-      - "ssim-med:99.2"
-      - "vif-med:96.5"
-      - "vmaf-p10:96.0"  # --- floor safeguards ---
-      - "psnr-min:46.6"
-      - "ssim-min:98.7"
-      - "vif-min:93.9"
-    high:                # ≈ CRF 18 reference quality (default)
-      - "vmaf-med:96.6"
-      - "psnr-med:47.1"
-      - "ssim-med:98.8"
-      - "vif-med:94.6"
-      - "vmaf-p10:94.5"  # --- floor safeguards ---
-      - "psnr-min:44.3"
-      - "ssim-min:97.9"
-      - "vif-min:90.7"
-    medium:              # ≈ CRF 22 reference quality
-      - "vmaf-med:95.3"
-      - "psnr-med:45.1"
-      - "ssim-med:98.2"
-      - "vif-med:92.4"
-      - "vmaf-p10:92.8"  # --- floor safeguards ---
-      - "psnr-min:42.2"
-      - "ssim-min:97.0"
-      - "vif-min:87.5"
-    low:                 # ≈ CRF 26 reference quality
-      - "vmaf-med:93.6"
-      - "psnr-med:43.2"
-      - "ssim-med:97.6"
-      - "vif-med:89.8"
-      - "vmaf-p10:89.9"  # --- floor safeguards ---
-      - "psnr-min:40.3"
-      - "ssim-min:96.1"
-      - "vif-min:85.2"
-  default_target_profile: high # used when the run says nothing; ignored on fixed (-q <value>) runs
+    ultra:               # ≈ CRF 13-14
+      - "vmaf-p10:96.5"
+      - "psnr-med:48.6"
+      - "ssim-med:99.1"
+      - "vif-med:95.7"
+      - "psnr-min:45.1"  # --- floor safeguards ---
+      - "ssim-min:98.4"
+      - "vif-min:92.2"
+    high:                # ≈ CRF 17-18
+      - "vmaf-p10:95.3"
+      - "psnr-med:46.4"
+      - "ssim-med:98.6"
+      - "vif-med:93.5"
+      - "psnr-min:42.8"  # --- floor safeguards ---
+      - "ssim-min:97.4"
+      - "vif-min:88.3"
+    medium:              # ≈ CRF 21-22
+      - "vmaf-p10:93.8"
+      - "psnr-med:44.4"
+      - "ssim-med:97.9"
+      - "vif-med:90.9"
+      - "psnr-min:41.4"  # --- floor safeguards ---
+      - "ssim-min:96.4"
+      - "vif-min:84.3"
+    low:                 # ≈ CRF 25-26
+      - "vmaf-p10:91.6"
+      - "psnr-med:42.2"
+      - "ssim-med:97.2"
+      - "vif-med:88.4"
+      - "psnr-min:39.6"  # --- floor safeguards ---
+      - "ssim-min:95.1"
+      - "vif-min:81.6"
   strategies:
     # Format: "profile[+preset]" — profile is required, preset is optional (omit = codec default).
     # Wildcards: "h265*" = all h265 profiles; "*" = all profiles; "*+*" = all profiles × all presets.
@@ -161,14 +146,18 @@ audio:
     # A chain applied to N matched tracks produces exactly N outputs, named
     # "<stream name> chain=<name>.<ext>". No encode filter -> FLAC (lossless);
     # otherwise the LAST encode filter in the chain sets the codec/extension.
-    - name: stereo_std_normal     # standard stereo fold (LFE dropped), peak-normalised to prevent clipping
-      filters: [to_stereo, peaknorm, aac]
-    - name: stereo_std_night      # standard stereo fold (LFE dropped) + dynamic normalisation for night listening
-      filters: [to_stereo, peaknorm, dynaudnorm, aac]
-    - name: stereo_lfe_normal     # LFE-keeping stereo fold, peak-normalised to prevent clipping
-      filters: [to_stereo_lfe, peaknorm, aac]
-    - name: stereo_lfe_night      # LFE-keeping stereo fold + dynamic normalisation for night listening
-      filters: [to_stereo_lfe, peaknorm, dynaudnorm, aac]
+    - name: aac                    # default aac-encoding (original stream)
+      filters: [peaknorm, aac]
+    - name: aac_night              # night-normalized aac-encoding
+      filters: [peaknorm, dynaudnorm, aac]
+    #- name: stereo_std_normal     # standard stereo fold (LFE dropped), peak-normalised to prevent clipping
+    #  filters: [to_stereo, peaknorm, aac]
+    #- name: stereo_std_night      # standard stereo fold (LFE dropped) + dynamic normalisation for night listening
+    #  filters: [to_stereo, peaknorm, dynaudnorm, aac]
+    #- name: stereo_lfe_normal     # LFE-keeping stereo fold, peak-normalised to prevent clipping
+    #  filters: [to_stereo_lfe, peaknorm, aac]
+    #- name: stereo_lfe_night      # LFE-keeping stereo fold + dynamic normalisation for night listening
+    #  filters: [to_stereo_lfe, peaknorm, dynaudnorm, aac]
 
   select: []                      # empty (default) = process ALL extracted audio tracks
     # Uncomment and adapt entries below to process only specific tracks. Each
