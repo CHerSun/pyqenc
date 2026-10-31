@@ -248,7 +248,7 @@ startup.
 --targets vif-med:94,vmaf-p10:97,psnr-med:48,ssim-med:99
 ```
 
-When omitted, the config defaults apply (the `default_target_profile` bundle: a `vmaf-p10` target, `med` targets for psnr/ssim/vif, and min floor safeguards).
+When omitted, the config defaults apply (the `default_target_profile`).
 
 ---
 

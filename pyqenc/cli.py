@@ -157,10 +157,10 @@ def _resolve_crop_params(args: argparse.Namespace) -> CropParams | None:
 def _add_base_arguments(parser: argparse.ArgumentParser) -> None:
     """Add arguments universal to ALL subcommands."""
     parser.add_argument(
-        "--work-dir",
+        "-d", "--work-dir",
         type=LongPath,
         default=LongPath("."),
-        help="Working directory for intermediate files and state (default: .)",
+        help="Working directory (default: .)",
     )
     parser.add_argument(
         "--log-level",
@@ -215,21 +215,23 @@ def _add_pipeline_arguments(parser: argparse.ArgumentParser, *, cleanup: bool = 
 def _add_filter_arguments(parser: argparse.ArgumentParser) -> None:
     """Add stream filter arguments (used by subcommands that depend on ExtractionPhase)."""
     parser.add_argument(
-        "--include",
+        "-i", "--include",
         type=str,
-        help="Regex pattern to include streams across all types (e.g. '.*eng.*')",
+        dest="include",
+        help="Extraction RegEx pattern to include streams. Default: include all",
     )
     parser.add_argument(
-        "--exclude",
+        "-x", "--exclude",
         type=str,
-        help="Regex pattern to exclude streams across all types (e.g. 'attachment')",
+        dest="exclude",
+        help="Extraction RegEx pattern to exclude streams. Default: exclude none",
     )
 
 
 def _add_crop_arguments(parser: argparse.ArgumentParser) -> None:
     """Add crop arguments (used by subcommands that depend on ExtractionPhase)."""
     parser.add_argument(
-        "--crop",
+        "-c", "--crop",
         type=str,
         metavar="CROP",
         help=(
@@ -245,7 +247,7 @@ def _add_chunking_arguments(parser: argparse.ArgumentParser) -> None:
         "--scene-threshold",
         type=float,
         default=None,
-        help="Scene detection sensitivity 0.0-255.0 (default: 27.0 from config). "
+        help="Scene detection sensitivity 0.0-255.0 (default: from config). "
              "Lower = more sensitive (more scene cuts); ~15-50 is the meaningful range.",
     )
     parser.add_argument(
@@ -257,15 +259,12 @@ def _add_chunking_arguments(parser: argparse.ArgumentParser) -> None:
 
 
 _QUALITY_TARGET_HELP: str = (
-    "Quality targets: a target profile name (e.g. 'high' — named bundles "
-    "from config encoding.target_profiles) or comma-separated "
+    "Quality targets: a target profile name (e.g. 'high'; from config or comma-separated "
     "metric-statistic:value pairs (e.g. 'vmaf-min:95,ssim-med:98,vif-min:95'). "
     "All metrics are normalized to 0–100 where 100≈lossless. "
     "Landmarks: VMAF 95+ good, SSIM 98+ good, PSNR 40–60 typical, VIF 92+ good. "
-    "Note: 'min' targets are volatile, especially so with metrics sampling. "
-    "'p10' instead of 'min' is more stable for targeting "
-    "(p10 stays >=2 frames even on the shortest chunk). "
-    "If not specified, uses default_target_profile from config."
+    "Note: don't use 'vmaf-min' - has a first frame bias. "
+    "Note: 'min' stat could be volatile, especially with sampling. "
 )
 
 
@@ -278,10 +277,7 @@ def _add_concurrency_argument(parser: argparse.ArgumentParser) -> None:
         metavar="N",
         dest="concurrency",
         help=(
-            "Concurrency for bounded work — writes every config knob "
-            "(encoding, audio, measurement); each phase consumes its own. "
-            "Values above the CPU count are clamped. "
-            "Per-domain control: edit the config file. Default: from config (1)."
+            "Override concurrency defined in config for all modes (encoding, audio, measurement)."
         ),
     )
 
@@ -289,7 +285,7 @@ def _add_concurrency_argument(parser: argparse.ArgumentParser) -> None:
 def _add_quality_arguments(parser: argparse.ArgumentParser) -> None:
     """Add quality/encoding arguments (used by subcommands that depend on EncodingPhase)."""
     parser.add_argument(
-        "--targets",
+        "-t", "--targets",
         type=str,
         default=None,
         metavar="QUALITY_TARGETS",
@@ -297,9 +293,10 @@ def _add_quality_arguments(parser: argparse.ArgumentParser) -> None:
         help=_QUALITY_TARGET_HELP,
     )
     parser.add_argument(
-        "--strategies",
+        "-s", "--strategies",
         type=str,
         default=None,
+        dest="strategies",
         help=(
             "Encoding strategies as comma-separated profile[+preset] patterns "
             "(e.g. 'h265*', 'h265-aq+slow,h264+veryslow'). "
@@ -325,14 +322,14 @@ def _add_quality_arguments(parser: argparse.ArgumentParser) -> None:
         ),
     )
     parser.add_argument(
-        "--no-optimize",
+        "-n", "--no-optimize",
         action="store_false",
         dest="optimize",
         default=True,
         help="Disable optimization phase and produce output for all strategies.",
     )
     parser.add_argument(
-        "--no-measure",
+        "-N", "--no-measure",
         action="store_false",
         dest="measure",
         default=True,
@@ -715,7 +712,7 @@ def _create_config_subcommand(subparsers: argparse._SubParsersAction) -> None:
         help="Execute the copy (default: dry-run, only announce).",
     )
     p.add_argument(
-        "--work-dir",
+        "-d", "--work-dir",
         type=LongPath,
         default=LongPath("."),
         help="Working directory (default: .)",
