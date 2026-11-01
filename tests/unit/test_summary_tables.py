@@ -226,11 +226,11 @@ class TestNegligibleDeltas:
     def test_band_boundary_is_per_metric(self) -> None:
         ssim = (QualityTarget.parse("ssim-med:97.0"),)
         row = StrategyRow(strategy="s", size_bytes=1000, metrics={
-            K(MetricType.SSIM, StatisticType.MEDIAN): 97.06,
+            K(MetricType.SSIM, StatisticType.MEDIAN): 97.08,
         })
         lines = _lines_for(ComparisonTable(rows=[row], targets=ssim))
         line = next(ln for ln in lines if ln.startswith("  s"))
-        assert "+0.1" in line  # 0.06 ≥ the SSIM band (0.05) — signed, not ≈
+        assert "+0.1" in line  # 0.08 ≥ the SSIM band (0.07) — signed, not ≈
 
 
 class TestNegligibleSizeDeltas:

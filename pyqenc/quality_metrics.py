@@ -63,12 +63,15 @@ class MetricInfo(ABC):
         plot_y_min:        Lower bound for the Y-axis in plots (normalized scale).
         plot_y_max:        Upper bound for the Y-axis in plots (normalized scale).
                            Slightly above ``lossless_value`` to leave headroom.
-        comparison_range:  Practical value span used *only* for normalizing
-                           cross-metric deficit comparisons (``_score_failing_attempt``).
-                           Not the theoretical lossless ceiling — the realistic range
-                           where quality targets are set and misses occur.
-                           VMAF ≈ 20 (targets typically 80–100), SSIM ≈ 10 (90–100),
-                           PSNR ≈ 30 (40–70 dB), VIF ≈ 5 (empirical; limited data).
+        comparison_range:  Practical value span used *only* as the cross-metric
+                           equalizer in ``_score_attempt``'s composite score
+                           (deficit / comparison_range, summed over targets).
+                           Only the RATIOS across metrics matter — a uniform
+                           rescale of all four divides every score by the same
+                           constant and changes no decision. Basis: the
+                           p10-p90 span of the metric's per-attempt values
+                           over the operating region (max over targeted
+                           stats), anchored so ssim = 5.
         acceptance_delta:  Per-metric threshold for early acceptance during the quality search.
                            When all targets pass and the least-proficit target's surplus
                            (smallest surplus across all passing targets) is within this
@@ -386,8 +389,8 @@ _METRIC_INFO: dict[MetricType, MetricInfo] = {
         display_unit      = "",
         plot_y_min        = 0.0,
         plot_y_max        = 103.0,
-        comparison_range  = 15.0,  # practical target range ~85-100
-        acceptance_delta  = 0.15,  # 0.15% surplus should be negligible
+        comparison_range  = 16.0,  # measured p10-p90 span ratio (5.4 vs ssim 1.7), anchored ssim=5
+        acceptance_delta  = 0.15,  # ≈ p50 of the per-0.5-step change (0.147-0.171); ≤ 2×p25 keeps the worst-case accept inside two steps
         subsample_via_filter = False,  # VMAF uses n_subsample internally
         log_extension     = ".json",
         std_cutoff_max    = None,
@@ -405,8 +408,8 @@ _METRIC_INFO: dict[MetricType, MetricInfo] = {
         display_unit      = "",
         plot_y_min        = 0.0,
         plot_y_max        = 103.0,
-        comparison_range  = 5.0,   # practical target range ~95-100
-        acceptance_delta  = 0.05,  # 0.05% after scaling (0.0005 raw). Metric is quite compressed towards 100, so we have to use a low value.
+        comparison_range  = 5.0,   # measured p10-p90 span (1.7) — the scale anchor
+        acceptance_delta  = 0.07,  # ≈ p50 of the per-0.5-step change (pooled 0.074; ssim's narrow scale rounds to 0.01)
         subsample_via_filter = True,   # uses select='not(mod(n,factor))' on its branch
         log_extension     = ".log",
         std_cutoff_max    = None,
@@ -423,8 +426,8 @@ _METRIC_INFO: dict[MetricType, MetricInfo] = {
         display_unit      = " dB",
         plot_y_min        = 0.0,
         plot_y_max        = 103.0,
-        comparison_range  = 20.0,  # practical target range ~40-60 dB
-        acceptance_delta  = 0.3,   # 0.3 dB surplus should be negligible
+        comparison_range  = 20.0,  # measured p10-p90 span ratio (6.9 vs ssim 1.7), anchored ssim=5
+        acceptance_delta  = 0.24,  # ≈ p50 of the per-0.5-step change (distribution is tight: p25-p90 = 0.21-0.30)
         subsample_via_filter = True,   # uses select='not(mod(n,factor))' on its branch
         log_extension     = ".log",
         std_cutoff_max    = 100.0,
@@ -441,8 +444,8 @@ _METRIC_INFO: dict[MetricType, MetricInfo] = {
         display_unit      = "",
         plot_y_min        = 0.0,
         plot_y_max        = 103.0,
-        comparison_range  = 20.0,  # Practical target range being ~80-100
-        acceptance_delta  = 0.15,  # 0.15 after scaling should be good. VIF scales nicely with ~92 being quite good.
+        comparison_range  = 21.0,  # measured p10-p90 span ratio (7.0 vs ssim 1.7), anchored ssim=5
+        acceptance_delta  = 0.25,  # ≈ p25-p50 of the per-0.5-step change (p50 0.27-0.31) — conservative: fires just under a typical step
         subsample_via_filter = False,  # VIF has no independent branch; embedded in VMAF
         log_extension     = ".json",
         std_cutoff_max    = None,
