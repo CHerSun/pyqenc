@@ -19,45 +19,64 @@ encoding:
   default_target_profile: high # used when the run says nothing; ignored on fixed (-q <value>) runs
   target_profiles:
     # Named bundles of quality targets ("metric-statistic:value" entries).
+    # Ladder per metric: median (average level) > p10 (stable guard) > min
+    # (worst-frame floor); vmaf carries min + p10 only (a derived vmaf-median
+    # always sits below its p10 bar and could never bind).
     ultra:               # ≈ CRF 13-14
       - "vmaf-p10:96.5"
       - "psnr-med:48.6"
-      - "ssim-med:99.1"
+      - "ssim-med:99.0"
       - "vif-med:95.7"
-      - "psnr-min:45.1"  # --- floor safeguards ---
+      - "psnr-p10:47.6"  # --- p10 guards (stable) ---
+      - "ssim-p10:98.8"
+      - "vif-p10:94.5"
+      - "vmaf-min:94.9"  # --- min floors (unstable, but enforcement needed) ---
+      - "psnr-min:45.1"
       - "ssim-min:98.4"
-      - "vif-min:92.2"
+      - "vif-min:92.4"
     high:                # ≈ CRF 17-18
       - "vmaf-p10:95.3"
       - "psnr-med:46.4"
-      - "ssim-med:98.6"
+      - "ssim-med:98.5"
       - "vif-med:93.5"
-      - "psnr-min:42.8"  # --- floor safeguards ---
+      - "psnr-p10:45.2"  # --- p10 guards (stable) ---
+      - "ssim-p10:98.1"
+      - "vif-p10:91.6"
+      - "vmaf-min:92.7"  # --- min floors (unstable, but enforcement needed) ---
+      - "psnr-min:42.8"
       - "ssim-min:97.4"
-      - "vif-min:88.3"
+      - "vif-min:88.5"
     medium:              # ≈ CRF 21-22
       - "vmaf-p10:93.8"
       - "psnr-med:44.4"
-      - "ssim-med:97.9"
+      - "ssim-med:97.8"
       - "vif-med:90.9"
-      - "psnr-min:41.4"  # --- floor safeguards ---
+      - "psnr-p10:43.0"  # --- p10 guards (stable) ---
+      - "ssim-p10:97.3"
+      - "vif-p10:88.6"
+      - "vmaf-min:90.2"  # --- min floors (unstable, but enforcement needed) ---
+      - "psnr-min:41.4"
       - "ssim-min:96.4"
-      - "vif-min:84.3"
+      - "vif-min:84.5"
     low:                 # ≈ CRF 25-26
       - "vmaf-p10:91.6"
       - "psnr-med:42.2"
-      - "ssim-med:97.2"
+      - "ssim-med:97.1"
       - "vif-med:88.4"
-      - "psnr-min:39.6"  # --- floor safeguards ---
+      - "psnr-p10:41.2"  # --- p10 guards (stable) ---
+      - "ssim-p10:96.7"
+      - "vif-p10:85.9"
+      - "vmaf-min:87.6"  # --- min floors (unstable, but enforcement needed) ---
+      - "psnr-min:39.6"
       - "ssim-min:95.1"
-      - "vif-min:81.6"
+      - "vif-min:81.8"
   strategies:
     # Format: "profile[+preset]" — profile is required, preset is optional (omit = codec default).
     # Wildcards: "h265*" = all h265 profiles; "*" = all profiles; "*+*" = all profiles × all presets.
     - "h264*"           # all h264 profiles at their codec default preset (veryslow)
     - "h265*"           # all h265 profiles at their codec default preset (slow)
     # - "av1*"          # AV1: limited hardware decoding support on older devices
-    # - "fgs-*"         # Film Grain Synthesis profiles. No grain preservation, but huge space savings. Not recommended.
+    # - "fgs-*"         # Film Grain Synthesis profiles. No grain preservation, but huge space savings. Not recommended if you like natural film grain.
     # - "nvenc-h265-10bit-cq"  # NVENC: requires NVIDIA GPU
     # - "vulkan*"       # Vulkan: requires GPU with Vulkan support
   concurrency: 1          # max simultaneous (chunk, strategy) encode+measure jobs; clamped to CPU count; no benefit unless CPU is idling.
