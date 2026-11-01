@@ -941,6 +941,8 @@ Direction fixed (user, 2026-10-28): replicate the encoding/optimization INFO sha
 - Open from the original §21 discussion: the plain-h265 vs grain-tuned (h265-crisp/aq) comparison at the same anchor CRFs — where VIF bars deserve slack for grain-preserving profiles.
 - Floor-stat switch (2026-11-01 sampling experiments): min floors are sampling-volatile (per-chunk worst-chunk drift 0.5–2.5 with vif-min worst and non-monotone; the merged verification view drifts +2 to +11 at s≥50 — optimistic over-acceptance at the final gate), while p10 is reliable at any sampling (per-chunk drift ≤0.53, std ≤0.5; medians ≤0.15; the one already-p10 target, vmaf-p10, self-stabilizes at its bar at every sampling). DECISION DIRECTION: switch the psnr/ssim/vif floors min → p10. Floor mechanics = the §152 recipe with p10 in place of min: interpolated duration-weighted p05 of per-chunk P10 stats (weights = frame_count) — lands 2.2–4.2 stat-units above the old min bars, so floors keep binding rather than idling. Medians and the vmaf target (anchor merged vmaf-p10) keep their existing mechanics — re-derivation on post-skip sampling-1 data reproduces every shipped bar to 0.1. Proposed values from the 2026-11-01 anchor re-runs (to apply to `target_profiles`): ultra psnr-p10 47.6 / ssim-p10 98.8 / vif-p10 94.4; high 45.2 / 98.1 / 91.5; medium 43.0 / 97.3 / 88.5; low 41.2 / 96.7 / 85.8; all medians and vmaf-p10 bars unchanged.
 - Open decision — bar safety margin: ground-truth re-judging (s=1 measurements of winners chosen at s>1) shows winners park AT bars with acceptance_delta margins (0.05–0.3) thinner than the ±0.1–0.5 per-chunk measurement noise, so ~13/108 chunks under-deliver some bar at ground truth — the same count at s3 and s100 (the reading floor keeps noise flat; capping sampling does not fix it). An explicit +0.25–0.5 margin on floors (and possibly medians) would buy ground-truth robustness at a size cost; quantify with the simulator before applying.
+- p10-only target set TESTED (2026-11-01, search re-runs at s1/s3/s10 on the same work dir): all four p10 bars bind exactly at every sampling (worst-chunk delivery identical across samplings) — p10 is reliable to target. But p10-ONLY is NOT quality-equivalent to the old profile: with medians removed, delivered per-chunk medians sink (psnr 46.4→45.5, ssim 98.6→98.3, vif 93.5→92.2 worst-chunk) and mins sink further (vif-min 88.3→85.8), for −8% size — the median bars were the binding constraint on many chunks. Verdict: keep the median targets and switch only the floors to p10 (the proposed values above); p10-only is a coherent cheaper tier, not a replacement. Note the semantic shift: a p10 floor guarantees the p10 level, not the min level — delivered mins float 0.8–5.7 below the p10 floor values.
+- TRIPLE-STAT LADDER TESTED (2026-11-01, same protocol — min + p10 + med per metric; vmaf med excluded: derived 94.8 < its p10 95.3, could never bind; vmaf-min 92.7 derived fresh): delivers the design intent at ~+1% size vs the old profile (445/437/438 MiB at s1/s3/s10) — every bar binds, every delivered stat ≥ its bar at every sampling, spreads across samplings 0.00–0.51 (mins ≤0.51, p10s ≤0.16, meds ≤0.01); the vmaf-min bar lifted the previously uncontrolled worst vmaf chunk (92.0 → 93.0+). Binding structure (chunk finals): ssim-med 46-48, vmaf-p10 36, psnr-med 10-11, psnr-p10 5-7, vif-med 4-5, mins 1-2 each — stable across samplings; vif-p10 never limited a winner and delivered with the most headroom (91.85-92.01 vs 91.5) — the one candidate to trim, though it is the volatility insurance for vif-min. Candidate final profile shape: min+p10+med ladders for psnr/ssim/vif, min+p10 for vmaf.
 
 ---
 
@@ -999,14 +1001,43 @@ for merge item production - it produces large items. We can calculate how much s
 
 ---
 
-## 158. Sampling effect on quality search — measurement experiment
+## 159. Reconsider invalidation model
 
-- The first-reading skip + per-chunk sampling override landed 2026-10-31; the practical effect of `measurement.sampling` on quality-search outcomes is otherwise guesswork. Plan: consecutive search-mode runs over the same source with increasing sampling (e.g. 1 → 3 → 5 → 10), one work-dir per value; record per-run winner qualities, sizes, target-miss patterns and wall time; compare against the sampling=1 baseline to state objectively where the speed/precision trade-off sits (short chunks already override sampling down — `effective_sampling` keeps 20 VMAF readings after the skip).
+We have 2 decision points:
+
+- Artifact completeness (complete, partial, absent...)
+- Artifact reproduction way - intermediate results acceptance, re-measuring, re-producing
+
+Current approach is - save settings with which previous things were produced. 2 points:
+
+- Phase sidecar - for settings, affecting full phase
+- File sidecar - for things affecting the specific file.
+
+One of tricky examples is the sampling value. For fixed run - it affects only measurements. For search run - measurements directly affect results, so sampling change == invalidation (winners / merged).
+
+Also, we have a weight of invalidation:
+
+- Winners invalidation is pretty much 0 (hard-links from attempts).
+- Attempts invalidation are costly (should only be invalidated on encoding settings change, which affect how the attempt itself is produced).
+- Attempts re-measuring is in the middle - VMAF measuring are quite costly, but encoding is more costly normally.
+- Attempts replay (same as winners invalidation) - is cheap.
+- Audio re-production is basically cheap (compared to video flow).
+
+The question is - currently we have to know effect of each setting at each place. Here I mean mostly encoding (attempts + winners) and merge. This is rather tricky.
+Maybe we should try to reduce that and preserve not the settings themselves, but rather the input qualities. In particular for merging phase. Input qualities there
+are the qualities of winners. And not even full qualities, but probably file qualities and the set itself (scenes). I.e. if any of winners changes (externally observable change - date / size / namings) - then the merged file should be re-produced. Basically, new_fingerprint_inputs!=preserved_fingerprint_inputs -> re-produce.
+Without diffucult settings analysis. We can reduce decision points by 1. Keeping the re-measure decision of merged to settings probably (sampling).
+
+But. Can we apply such approach anywhere else? Encoding? Maybe a fingerprint of producing settings? Problem is that that should probably be per-file.
+
+Need to think this over. If this would simplify things? If this will give easier decision points? We partially already have this implemented with strategies fingerprinting.
+Just maybe extend to the concepts of re-producing vs re-measuring?
+
+And the key difference is settings (global) vs input-based (dependencies of the phase).
 
 ---
 
-
-## Last known = 158
+## Last known = 159
 
 Keep this updated, so we can keep continuous numbering even on last todo item deletion.
 Keep this the last entry for easy human updates.
