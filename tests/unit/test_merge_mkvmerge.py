@@ -1618,15 +1618,98 @@ class TestPerFileAcceptance:
         _recovery, row = self._recover_state(merge, "h265+slow")
         assert row.state is not ArtifactState.COMPLETE, "winner-set drift must not accept"
 
-    def test_sampling_only_difference_remeasures_in_place(self, tmp_path: Path) -> None:
-        """Req 49: a sampling-only difference keeps the concat — the row is
-        pending with the re-measure reason (never re-merged)."""
-        merge, _ = _run_full_merge(tmp_path, fixed=False)
+    def test_fixed_sampling_only_difference_remeasures_in_place(self, tmp_path: Path) -> None:
+        """Req 49: in a FIXED run a sampling-only difference keeps the concat —
+        the row is pending with the re-measure reason (never re-merged); the
+        recorded quality fully determines the file."""
+        merge, _ = _run_full_merge(tmp_path, fixed=True)
         merge._config.measurement.sampling = 5
 
-        _recovery, row = self._recover_state(merge, "h265+slow")
+        _recovery, row = self._recover_state(merge, "h265-aq+slow")
         assert row.state is ArtifactState.PARTIAL, "file present, not accepted"
-        assert merge._pending_reasons["h265+slow"] == "sampling"
+        assert merge._pending_reasons["h265-aq+slow"] == "sampling"
+
+    def test_search_sampling_difference_means_remerge(self, tmp_path: Path) -> None:
+        """A sampling-only difference in a SEARCH run re-merges: the metrics
+        steer the quality search, so winners picked under the old sampling
+        may differ from the concatenated ones — the concat is potentially
+        stale (M-8). Driven through run(): mkvmerge must run."""
+        merge, _merged_dir = _run_full_merge(tmp_path, fixed=False)
+        work_dir = merge._deps[JobPhase].work_dir
+
+        # The second-run shape: a FRESH phase over the same work dir (run()
+        # memoizes its result), configured at a different sampling.
+        replay = _make_merge_phase(
+            work_dir, tmp_path / "test.mkv", work_dir / "chunk1.mkv",
+            timestamps_path = work_dir / EXTRACTED_DIR / TIMESTAMPS_FILENAME,
+        )
+        replay._config.measurement.sampling = 5
+
+        def fake_subprocess_run(cmd: list, **kwargs: object) -> MagicMock:
+            result = MagicMock()
+            result.returncode = 0
+            result.stderr = ""
+            if cmd[0] == "mkvmerge":
+                import json as _json
+
+                options_path = Path(str(cmd[1])[1:])
+                args = _json.loads(options_path.read_text(encoding="utf-8"))
+                tmp_out = Path(args[args.index("-o") + 1])
+                tmp_out.parent.mkdir(parents=True, exist_ok=True)
+                tmp_out.write_bytes(b"\x00" * 128)
+            return result
+
+        measured = _mm(
+            vmaf_min=94.5, vmaf_p10=95.0, vmaf_median=96.5, vmaf_max=99.0,
+            vmaf_std=1.2, ssim_median=98.2, psnr_median=46.0,
+        )
+        with (
+            patch(
+                "pyqenc.phases.merge.subprocess.run",
+                side_effect=fake_subprocess_run,
+            ) as mock_subprocess,
+            patch("pyqenc.phases.merge.get_frame_count", return_value=100),
+            patch.object(MergePhase, "_measure_quality", return_value=(measured, None)),
+        ):
+            result = replay.run(dry_run=False)
+
+        assert any(
+            call.args and call.args[0][0] == "mkvmerge"
+            for call in mock_subprocess.call_args_list
+        ), "search-mode sampling change must re-merge the concat"
+        assert result.outcome == PhaseOutcome.COMPLETED, result.message
+
+    def test_fixed_sampling_difference_remeasures_without_concat(self, tmp_path: Path) -> None:
+        """The fixed-mode counterpart: a sampling-only difference never runs
+        mkvmerge — the concat stays, only the measurement (and its sidecar
+        record) is redone."""
+        merge, _ = _run_full_merge(tmp_path, fixed=True)
+        work_dir = merge._deps[JobPhase].work_dir
+        chunk = work_dir / "chunk1.mkv"
+
+        replay = _make_merge_phase(
+            work_dir, tmp_path / "test.mkv", chunk,
+            timestamps_path = work_dir / EXTRACTED_DIR / TIMESTAMPS_FILENAME,
+        )
+        _wire_fixed_merge(replay, chunk, None)
+        replay._config.measurement.sampling = 5
+
+        measured = _mm(
+            vmaf_min=94.5, vmaf_p10=95.0, vmaf_median=96.5, vmaf_max=99.0,
+            vmaf_std=1.2, ssim_median=98.2, psnr_median=46.0,
+        )
+        with (
+            patch("pyqenc.phases.merge.subprocess.run") as mock_subprocess,
+            patch("pyqenc.phases.merge.get_frame_count", return_value=100),
+            patch.object(MergePhase, "_measure_quality", return_value=(measured, None)),
+        ):
+            result = replay.run(dry_run=False)
+
+        assert not any(
+            call.args and call.args[0] and call.args[0][0] == "mkvmerge"
+            for call in mock_subprocess.call_args_list
+        ), "fixed-mode sampling change re-measures in place — no concatenation"
+        assert result.outcome == PhaseOutcome.COMPLETED, result.message
 
     def test_missing_merge_yaml_still_decides_via_per_output_records(self, tmp_path: Path) -> None:
         """M-7: merge.yaml is replay-only — its absence never skips the

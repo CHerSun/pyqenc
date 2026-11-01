@@ -284,8 +284,10 @@ class _SidecarBuilder:
         """The first recorded dimension contradicting the current inputs.
 
         Returns ``None`` when the output is accepted; the mismatching
-        dimension's name otherwise (``"sampling"`` re-measures in place;
-        everything else re-merges — M-8). An unverifiable dimension counts
+        dimension's name otherwise (a ``sampling`` difference re-measures in
+        place in fixed runs only — in search runs it re-merges like any
+        other mismatch, since metrics steer the winners; everything else
+        re-merges — M-8). An unverifiable dimension counts
         as a mismatch (conservative). The variant kinds must agree — a
         mode switch between runs is itself a mismatch.
         """
@@ -367,7 +369,8 @@ class MergePhase(Phase[MergePhaseResult]):
     _MKVPROPEDIT_VIDEO_TRACK = "track:v1"
     _pending_reasons: dict[str, str]
     """Classification-derived pending reason per strategy display name
-    (``'sampling'`` re-measures in place; anything else re-merges — M-8).
+    (a ``sampling`` reason re-measures in place in FIXED runs; anything
+    else — including ``sampling`` in search runs — re-merges, M-8).
     Assigned by ``_recover``; consumed by ``_execute``."""
 
     _OUTPUT_SUFFIX       = ".mkv"
@@ -495,7 +498,9 @@ class MergePhase(Phase[MergePhaseResult]):
            acceptance, never a re-measure of a stale concat (M-8: a
            key change always re-searched winners upstream; the anchor is
            runtime-only and never compared). A sampling-ONLY difference
-           re-measures in place (the concat is current). File present
+           re-measures in place in fixed runs (the concat is current);
+           in search runs it re-merges — the metrics steer the quality
+           search, so the concat may be stale. File present
            without a sidecar is
            PARTIAL (re-merge in place — a crash leaves old outputs present).
         5. Output files not matching any expected strategy surface as
@@ -572,13 +577,14 @@ class MergePhase(Phase[MergePhaseResult]):
                         state   = ArtifactState.COMPLETE,
                     ))
                     continue
-                # Not accepted. A sampling-only difference keeps the concat
-                # (re-measure in place); anything else re-merges (M-8).
+                # Not accepted. A sampling-only difference in a FIXED run
+                # keeps the concat (re-measure in place); anything else —
+                # including sampling in search runs — re-merges (M-8).
                 self._pending_reasons[strategy.display_name()] = reason
                 logger.info(
                     "Merged output %s not accepted (%s) — %s",
                     output_file.name, reason,
-                    "re-measuring" if reason == "sampling" else "re-merging",
+                    "re-measuring" if self._remeasures_in_place(reason) else "re-merging",
                 )
 
             state = (
@@ -653,6 +659,25 @@ class MergePhase(Phase[MergePhaseResult]):
             ),
         )
 
+    def _remeasures_in_place(self, reason: str | None) -> bool:
+        """Whether a not-accepted output keeps its concat and only re-measures.
+
+        Fixed mode: a sampling-only difference leaves the concat untouched —
+        the recorded quality fully determines the file, so only the metrics
+        are stale. Search mode has no such guarantee: the measured metrics
+        steer the quality search itself, so winners picked under a different
+        sampling may differ from the concatenated ones — the concat is
+        potentially stale and always re-merges (M-8).
+
+        Args:
+            reason: The pending reason from acceptance classification
+                    (``None`` when the row was classified outside acceptance).
+
+        Returns:
+            ``True`` when the row re-measures in place (fixed + sampling-only).
+        """
+        return reason == "sampling" and self._deps[ProbePhase].plan.fixed_quality
+
     def _reused_result(self, wanted: list[Artifact], message: str) -> MergePhaseResult:
         """Build the reused result, emerging the summary from the persisted rows."""
         job_result = self._deps[JobPhase]
@@ -710,8 +735,10 @@ class MergePhase(Phase[MergePhaseResult]):
 
         Every pending row re-merges from the current winners — ABSENT,
         record-mismatched, and the sidecar-less PARTIAL alike (the
-        unverifiable case, Req 49/50) — EXCEPT the sampling-only difference,
-        which keeps the concat and re-measures in place.
+        unverifiable case, Req 49/50) — EXCEPT the sampling-only difference
+        in a fixed run, which keeps the concat and re-measures in place
+        (search runs re-merge on sampling too — the metrics steer the
+        winners, so the concat may be stale).
 
         Args:
             wanted:  Wanted merged-output rows from ``_recover()``.
@@ -767,9 +794,9 @@ class MergePhase(Phase[MergePhaseResult]):
 
                 try:
                     reason = self._pending_reasons.get(strategy_name)
-                    if reason == "sampling":
-                        # Sampling-only difference (Req 49): the concat is
-                        # current — re-measure in place, never re-merge.
+                    if self._remeasures_in_place(reason):
+                        # Sampling-only difference in a FIXED run (Req 49): the
+                        # concat is current — re-measure in place, never re-merge.
                         # Under the measurement opt-out there is nothing to
                         # redo for this row — the concat is already current.
                         if plan.measure:
