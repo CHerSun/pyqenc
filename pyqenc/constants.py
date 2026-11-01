@@ -45,6 +45,13 @@ THICK_LINE  = "═" * LINE_WIDTH
 METRIC_LOG_DECIMAL_PLACES = 1
 """Decimal places used when formatting metric values in log messages. Values are always truncated (floored), never rounded, to prevent a miss from displaying as a pass due to rounding."""
 
+MIN_READINGS_AFTER_SKIP = 20
+"""Minimum VMAF readings entering the statistics after the first-reading
+exclusion (``MetricInfo.skip_first_reading``) — the reading floor that steers
+the per-chunk sampling override (``effective_sampling``). Tail percentiles
+below this count collapse toward min; the override trades sampling down on
+short chunks rather than let the floor fail."""
+
 # Symbols for log messages
 SUCCESS_SYMBOL_MINOR = "✔"
 """Symbol to indicate successful completion of a minor step, such as an individual chunk attempt."""

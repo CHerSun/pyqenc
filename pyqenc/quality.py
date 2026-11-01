@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from decimal import ROUND_HALF_EVEN, Decimal
 from pathlib import Path
 
+from pyqenc.constants import MIN_READINGS_AFTER_SKIP
 from pyqenc.models import CropParams, QualityTarget
 from pyqenc.quality_metrics import (
     MeasuredMetrics,
@@ -28,6 +29,26 @@ from pyqenc.utils.ffmpeg_runner import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def effective_sampling(frames: int, config_sampling: int) -> int:
+    """The per-chunk sampling honoring the VMAF reading floor.
+
+    The largest sampling factor not above *config_sampling* that leaves at
+    least ``MIN_READINGS_AFTER_SKIP + 1`` scored readings on a chunk of
+    *frames* frames — the ``+1`` absorbs the first VMAF reading excluded
+    from the statistics (``skip_first_reading``). Chunks too short to reach
+    the floor at any sampling measure every frame (``1``) and simply carry
+    fewer readings; ``frames <= 0`` (no known count) behaves the same.
+
+    Args:
+        frames:          The chunk's frame count.
+        config_sampling: The configured sampling factor (``measurement.sampling``).
+
+    Returns:
+        The effective sampling factor for the chunk (always >= 1).
+    """
+    return max(1, min(config_sampling, (frames - 1) // MIN_READINGS_AFTER_SKIP))
 
 
 async def run_metrics(

@@ -4,15 +4,6 @@
 - Each items needs validation and design consideration before any implementation.
 - Items are to be deleted, once they go into the code (after spec is approved or after implementation if done without spec).
 
-## 16. Measuring frames sampling is never disabled for few frames
-
-- Sampling applies unconditionally via `select='not(mod(n,{subsample}))'` (`pyqenc/quality.py:377,400`); the only validation is `metrics_sampling >= 1` (`pyqenc/phases/measure.py:933-934`). No dynamic chunk's frame-count guard anywhere; `merge.py:404-405` only logs that subsampling may miss outliers.
-- Related (ex-§73): with p10 now targetable, adaptive sampling must keep enough readings for it — min 20 readings so `vmaf-p10` spans >=2 frames; when the chunk has too few frames, revert to a lower sampling value.
-
-**Questions to think about:** auto-set sampling=1 below a frame-count threshold (with a log line)? Adapt sampling down when frames/sampling < 20? Do not allow less then 20 min frames threshold? Purpose is to guarantee that p10 has at least 2 frames for judgement (NOT 1) - i.e. that it differs from MIN stat. And min stat could be unreliable exactly for that single-frame readings.
-
----
-
 ## 18. BALANCED metrics mode (soft matching) does not exist
 
 - No "balanced" scoring anywhere (repo grep empty); scoring remains hard pass/fail with signed surplus/deficit (`_score_attempt`, `pyqenc/quality.py:498-571`).
@@ -948,6 +939,8 @@ Direction fixed (user, 2026-10-28): replicate the encoding/optimization INFO sha
 - FINAL CONVENTION (settled 2026-10-30 after the v4/v5 comparison): every bar = the h265-crisp anchor's own measured level. Per-bar derivation RECIPE for re-evaluation on new sources — run the anchor fixed encodes (`pyqenc video <src> --strategies h265-crisp -q {14,18,22,26} --no-optimize -y`, one work-dir per anchor), then from each run's per-chunk attempt sidecars + merged sidecar compute: (a) vmaf target = the anchor's MERGED vmaf-p10 (no vmaf-med bar: p10 ≤ median per chunk, and the p10 level exceeds the p5-median level — a med bar could never bind); (b) psnr/ssim/vif targets = duration-weighted p5 of per-chunk MEDIANS (weight = frame_count); (c) psnr/ssim/vif floor safeguards = INTERPOLATED duration-weighted p05 of per-chunk MIN stats (sort by value, accumulate frame weight; where the 5%-of-frames mark falls inside a chunk's weight span, interpolate proportionally toward the next value — no snapping to one scene's exact number; floors must actually bind, not sit idle). Before committing any bar change, size it with a simulator over the calibration data (per-chunk metric-vs-CRF interpolation + exponential size fit; the 2026-10-30 one predicted real outcomes within 0–4%). Validation loop: one search run per profile vs its fixed-CRF baseline in a reused work-dir (stored attempts re-judge [reused] — cheap). v4-vs-v5 on the reference sample: honest merged floors → 433/409 MiB (floors idle — measured mins sat 1.7 dB above dead bars) vs interpolated p05 floors → 442/424 MiB (floors pinned exactly: psnr-min 42.85 vs 42.8, vif-min 88.3 vs bar; winning-CRF distributions unchanged — the cost sits in the worst tail only). Experiment history: merged-copied bars too tight (chunk medians sit below global medians — 50–63% fail at anchor); p25/p10 quantile set → 598 MiB (floor lift of long hard chunks dominates size); honest-honest → sim 827 (global medians are the tightest median bars); vif tilt rejected (double-counts — the crisp calibration IS the crispness weighting).
 - Animation compresses atypically (flat areas, no live grain). Collect the same 4-anchor calibration from live-action and grainy sources and check how far per-profile bars should shift — per content-type profiles (`anime-high` etc.) are the natural config answer if the spread is large; the dict-merged `target_profiles` already supports them.
 - Open from the original §21 discussion: the plain-h265 vs grain-tuned (h265-crisp/aq) comparison at the same anchor CRFs — where VIF bars deserve slack for grain-preserving profiles.
+- Floor-stat switch (2026-11-01 sampling experiments): min floors are sampling-volatile (per-chunk worst-chunk drift 0.5–2.5 with vif-min worst and non-monotone; the merged verification view drifts +2 to +11 at s≥50 — optimistic over-acceptance at the final gate), while p10 is reliable at any sampling (per-chunk drift ≤0.53, std ≤0.5; medians ≤0.15; the one already-p10 target, vmaf-p10, self-stabilizes at its bar at every sampling). DECISION DIRECTION: switch the psnr/ssim/vif floors min → p10. Floor mechanics = the §152 recipe with p10 in place of min: interpolated duration-weighted p05 of per-chunk P10 stats (weights = frame_count) — lands 2.2–4.2 stat-units above the old min bars, so floors keep binding rather than idling. Medians and the vmaf target (anchor merged vmaf-p10) keep their existing mechanics — re-derivation on post-skip sampling-1 data reproduces every shipped bar to 0.1. Proposed values from the 2026-11-01 anchor re-runs (to apply to `target_profiles`): ultra psnr-p10 47.6 / ssim-p10 98.8 / vif-p10 94.4; high 45.2 / 98.1 / 91.5; medium 43.0 / 97.3 / 88.5; low 41.2 / 96.7 / 85.8; all medians and vmaf-p10 bars unchanged.
+- Open decision — bar safety margin: ground-truth re-judging (s=1 measurements of winners chosen at s>1) shows winners park AT bars with acceptance_delta margins (0.05–0.3) thinner than the ±0.1–0.5 per-chunk measurement noise, so ~13/108 chunks under-deliver some bar at ground truth — the same count at s3 and s100 (the reading floor keeps noise flat; capping sampling does not fix it). An explicit +0.25–0.5 margin on floors (and possibly medians) would buy ground-truth robustness at a size cost; quantify with the simulator before applying.
 
 ---
 
@@ -1006,8 +999,14 @@ for merge item production - it produces large items. We can calculate how much s
 
 ---
 
+## 158. Sampling effect on quality search — measurement experiment
 
-## Last known = 157
+- The first-reading skip + per-chunk sampling override landed 2026-10-31; the practical effect of `measurement.sampling` on quality-search outcomes is otherwise guesswork. Plan: consecutive search-mode runs over the same source with increasing sampling (e.g. 1 → 3 → 5 → 10), one work-dir per value; record per-run winner qualities, sizes, target-miss patterns and wall time; compare against the sampling=1 baseline to state objectively where the speed/precision trade-off sits (short chunks already override sampling down — `effective_sampling` keeps 20 VMAF readings after the skip).
+
+---
+
+
+## Last known = 158
 
 Keep this updated, so we can keep continuous numbering even on last todo item deletion.
 Keep this the last entry for easy human updates.

@@ -178,7 +178,8 @@ def _metric_statistics(
 
     The shared statistics step (Req 10.2) — owned by the measurer; the
     per-metric classes never duplicate it. The metric's descriptor carries
-    its std cutoff.
+    its std cutoff and its first-reading exclusion (the plotted series is
+    unaffected — only the statistics skip it).
 
     Args:
         values: Normalized per-frame values.
@@ -187,6 +188,8 @@ def _metric_statistics(
     Returns:
         Every closed-set statistic for the metric.
     """
+    if info.skip_first_reading and len(values) > 1:
+        values = values.iloc[1:]
     return _quantile_statistics(values, info.std_cutoff_max)
 
 

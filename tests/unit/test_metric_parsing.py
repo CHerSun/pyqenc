@@ -20,7 +20,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-from hypothesis import given
+from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from pyqenc.models import CropParams
@@ -44,6 +44,9 @@ _VIF_FULL  = [0.81, 0.85, 0.93, 0.89, 0.83, 0.91, 0.82]
 
 # Wave-A pipeline outputs on _PSNR_FULL/_SSIM_FULL/_VMAF_FULL/_VIF_FULL
 # (identical at every sampling factor — statistics are factor-invariant).
+# The VMAF row excludes the first reading (``skip_first_reading``): the
+# session's first scored frame has no motion predecessor, so its reading
+# never enters the statistics.
 _EXPECTED_FULL: dict[MetricType, dict[StatisticType, float]] = {
     MetricType.PSNR: {
         StatisticType.MIN: 38.5, StatisticType.P05: 38.92,
@@ -57,14 +60,14 @@ _EXPECTED_FULL: dict[MetricType, dict[StatisticType, float]] = {
         StatisticType.P10: 92.52000000000001, StatisticType.P25: 93.05000000000001,
         StatisticType.MEDIAN: 94.5, StatisticType.P75: 96.55,
         StatisticType.P90: 97.38, StatisticType.P95: 97.58999999999999,
-        StatisticType.MAX: 97.8, StatisticType.STD: 2.2120880030716012,
+        StatisticType.MAX: 97.8, StatisticType.STD: 2.2120880030712612,
     },
     MetricType.VMAF: {
-        StatisticType.MIN: 88.2, StatisticType.P05: 88.56,
-        StatisticType.P10: 88.92, StatisticType.P25: 89.75,
-        StatisticType.MEDIAN: 91.5, StatisticType.P75: 94.45,
-        StatisticType.P90: 95.68, StatisticType.P95: 96.04,
-        StatisticType.MAX: 96.4, StatisticType.STD: 3.0960804714532686,
+        StatisticType.MIN: 89.4, StatisticType.P05: 89.575,
+        StatisticType.P10: 89.75, StatisticType.P25: 90.44999999999999,
+        StatisticType.MEDIAN: 92.6, StatisticType.P75: 94.825,
+        StatisticType.P90: 95.80000000000001, StatisticType.P95: 96.10000000000001,
+        StatisticType.MAX: 96.4, StatisticType.STD: 2.8294286820251675,
     },
     MetricType.VIF: {
         StatisticType.MIN: 81.0, StatisticType.P05: 81.3,
@@ -216,7 +219,8 @@ class TestDifferentialEquivalence:
 
     def test_single_frame_chunk_matches_the_old_pipeline(self, tmp_path: Path) -> None:
         """A one-frame measurement: every quantile collapses to the frame's
-        value and std is undefined (NaN) — as before."""
+        value and std is undefined (NaN) — as before. The single VMAF reading
+        is kept: the first-reading exclusion never empties a series."""
         measured = _measure(tmp_path, {
             "psnr": _psnr_log([44.4]),
             "ssim": _ssim_log([0.95]),
@@ -232,6 +236,59 @@ class TestDifferentialEquivalence:
                     assert math.isnan(got)
                 else:
                     assert got == pytest.approx(value)
+
+
+# ---------------------------------------------------------------------------
+# The VMAF first-reading exclusion
+# ---------------------------------------------------------------------------
+
+_SKIP_DIR = Path(_tempfile.mkdtemp(prefix="test_first_reading_"))
+"""Shared scratch dir for the skip tests (plots/overwritten per case)."""
+
+
+class TestFirstReadingSkip:
+    """The VMAF session's first reading never enters the statistics."""
+
+    def test_anomalous_first_vmaf_reading_excluded_other_metrics_keep_theirs(
+        self, tmp_path: Path,
+    ) -> None:
+        """A wildly-off first VMAF score (the motionless-first-frame artifact
+        these statistics exist to ignore) leaves every VMAF stat free of it,
+        while PSNR and VIF — no exclusion — still count their own first
+        frames."""
+        measured = _measure(tmp_path, {
+            "psnr": _psnr_log([10.0, 44.0, 45.0, 46.0, 47.0]),
+            "vmaf": _vmaf_json([50.0, 90.0, 91.0, 92.0, 93.0], [0.10, 0.9, 0.9, 0.9, 0.9]),
+        })
+        assert measured[MetricStatKey(MetricType.VMAF, StatisticType.MIN)] == pytest.approx(90.0)
+        assert measured[MetricStatKey(MetricType.VMAF, StatisticType.MAX)] == pytest.approx(93.0)
+        assert measured[MetricStatKey(MetricType.PSNR, StatisticType.MIN)] == pytest.approx(10.0)
+        assert measured[MetricStatKey(MetricType.VIF, StatisticType.MIN)] == pytest.approx(10.0)
+
+    @settings(max_examples=15, deadline=None)
+    @given(
+        first = st.floats(min_value=0.0, max_value=100.0),
+        steady = st.floats(min_value=1.0, max_value=99.0),
+        count  = st.integers(min_value=2, max_value=30),
+    )
+    def test_vmaf_stats_are_independent_of_the_first_reading(
+        self, first: float, steady: float, count: int,
+    ) -> None:
+        """Whatever the first VMAF reading is, the statistics see only the
+        rest: a constant tail yields constant quantiles (std 0) for any first
+        value — any stat influenced by the first reading fails this."""
+        vmaf = [first] + [steady] * count
+        measured = _measure(_SKIP_DIR, {
+            "vmaf": _vmaf_json(vmaf, [0.5] * len(vmaf)),
+        })
+        for statistic in (
+            StatisticType.MIN, StatisticType.P05, StatisticType.P10, StatisticType.P25,
+            StatisticType.MEDIAN, StatisticType.P75, StatisticType.P90, StatisticType.P95,
+            StatisticType.MAX,
+        ):
+            got = measured[MetricStatKey(MetricType.VMAF, statistic)]
+            assert got == pytest.approx(steady), f"vmaf {statistic.value}: {got} != {steady}"
+        assert measured[MetricStatKey(MetricType.VMAF, StatisticType.STD)] == pytest.approx(0.0)
 
 
 # ---------------------------------------------------------------------------

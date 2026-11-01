@@ -196,13 +196,13 @@ def _fixed_strategy() -> _Strategy:
     return _cast(_Strategy, strategy)
 
 
-def _chunk_mock(tmp_path: object) -> _VSC:
+def _chunk_mock(tmp_path: object, frame_count: int = 120) -> _VSC:
     chunk = _MM()
     chunk.safe_name.return_value   = "chunk_001"
     chunk.start_timestamp          = 0.0
     chunk.end_timestamp            = 5.0
     chunk.duration_seconds         = 5.0
-    chunk.frame_count              = 120
+    chunk.frame_count              = frame_count
     chunk.as_input.return_value    = _MM()
     info = _MM()
     info.resolution    = "1920x1080"
@@ -560,15 +560,20 @@ class TestAttemptFrameCountSourcing:
     (Req 9a: frame count present) and re-measure heals it.
     """
 
-    def _seed_attempt(self, tmp_path: Path, *, frame_count: int) -> Path:
-        """A real attempt on disk with complete metrics and a given count."""
+    def _seed_attempt(self, tmp_path: Path, *, frame_count: int, sampling: int = 5) -> Path:
+        """A real attempt on disk with complete metrics and a given count.
+
+        ``sampling`` defaults to the chunk's expected effective factor
+        (120 frames at the run's 10 → 5) so the seed is a cache candidate;
+        tests pass a different value to force the mismatch.
+        """
         attempt = tmp_path / "encoding" / "test_strategy" / "chunk_001.q18.0.mkv"
         attempt.parent.mkdir(parents=True, exist_ok=True)
         attempt.write_bytes(b"fake mkv")
         attempt.with_suffix(".yaml").write_text(
             _yaml.safe_dump({
                 "metrics": {"vmaf_min": 95.0},
-                "sampling": 10,
+                "sampling": sampling,
                 "frame_count": frame_count,
             }),
             encoding="utf-8",
@@ -644,6 +649,97 @@ class TestAttemptFrameCountSourcing:
         evaluator.measure_chunk.assert_not_called()
         data = _yaml.safe_load(attempt.with_suffix(".yaml").read_text(encoding="utf-8"))
         assert data["frame_count"] == 120
+
+
+class TestEffectiveSamplingThreading:
+    """The per-chunk sampling override on the shared chunk-encoding machinery.
+
+    The run-level factor is reduced on short chunks (the VMAF reading floor);
+    the attempt sidecar records the effective value and reuse requires it.
+    """
+
+    def _encoder(self, tmp_path: Path, evaluator) -> _ChunkEncoder:
+        return _ChunkEncoder(
+            quality_measurer  = evaluator,
+            work_dir          = tmp_path,
+            plan              = _FIXED_PLAN,
+            collector         = _MM(spec=_AppMetricsCollector),
+            crop_params       = None,
+            cleanup_level     = CleanupLevel.NONE,
+            visual_hash       = True,
+            sampling           = 10,
+            metric_prefix     = AppMetricKey.ENCODING,
+            measure_attempts  = True,
+        )
+
+    def _evaluator(self, tmp_path: Path) -> _MM:
+        fake_eval = _MM(spec=_QE)
+        fake_eval.targets_met  = True
+        fake_eval.logs         = _QL()
+        fake_eval.metrics      = _measured(vmaf_min=95.0, vmaf_median=96.5)
+        fake_eval.frame_count  = 24
+        evaluator = _MM(spec=_QMeasurer)
+        evaluator.work_dir = tmp_path
+        evaluator.measure_chunk.return_value = fake_eval
+        return evaluator
+
+    def test_short_chunk_measures_at_reduced_sampling_and_records_it(
+        self, tmp_path: Path,
+    ) -> None:
+        """A 24-frame chunk at config sampling 10 measures every frame: the
+        measurer runs at 1 and the sidecar records 1, not the config value."""
+        attempt = tmp_path / "encoding" / "test_strategy" / "chunk_001.q18.0.mkv"
+        attempt.parent.mkdir(parents=True, exist_ok=True)
+        attempt.write_bytes(b"fake mkv")
+
+        evaluator = self._evaluator(tmp_path)
+        encoder   = self._encoder(tmp_path, evaluator)
+        run_result = _FFR(returncode=0, success=True, stderr_lines=[], frame_count=24)
+
+        with _patch.object(encoder, "_encode_with_ffmpeg", return_value=run_result):
+            result = encoder.encode_chunk(
+                chunk           = _chunk_mock(tmp_path, frame_count=24),
+                strategy        = _fixed_strategy(),
+                quality_targets = [],
+            )
+
+        assert result.success is True
+        assert evaluator.measure_chunk.call_args.kwargs["sampling"] == 1
+        data = _yaml.safe_load(attempt.with_suffix(".yaml").read_text(encoding="utf-8"))
+        assert data["sampling"] == 1
+
+    def test_reuse_requires_the_effective_sampling(self, tmp_path: Path) -> None:
+        """A sidecar carrying the config-level factor where the chunk's
+        effective factor differs is stale: the attempt re-measures and the
+        rewritten sidecar carries the effective value."""
+        attempt = tmp_path / "encoding" / "test_strategy" / "chunk_001.q18.0.mkv"
+        attempt.parent.mkdir(parents=True, exist_ok=True)
+        attempt.write_bytes(b"fake mkv")
+        attempt.with_suffix(".yaml").write_text(
+            _yaml.safe_dump({
+                "metrics": {"vmaf_min": 95.0},
+                "sampling": 10,
+                "frame_count": 120,
+            }),
+            encoding="utf-8",
+        )
+
+        evaluator = self._evaluator(tmp_path)
+        evaluator.measure_chunk.return_value.frame_count = 120
+        encoder   = self._encoder(tmp_path, evaluator)
+
+        with _patch.object(encoder, "_encode_with_ffmpeg") as mock_encode:
+            result = encoder.encode_chunk(
+                chunk           = _chunk_mock(tmp_path, frame_count=120),
+                strategy        = _fixed_strategy(),
+                quality_targets = [],
+            )
+
+        assert result.success is True
+        mock_encode.assert_not_called()               # the file existed — measure-only
+        assert evaluator.measure_chunk.call_args.kwargs["sampling"] == 5
+        data = _yaml.safe_load(attempt.with_suffix(".yaml").read_text(encoding="utf-8"))
+        assert data["sampling"] == 5
 
 
 class TestEncodingPresentationTargets:

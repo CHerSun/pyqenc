@@ -58,7 +58,7 @@ from pyqenc.phases.chunking import ChunkingPhase
 from pyqenc.phases.job import JobPhase
 from pyqenc.phases.optimization import OptimizationPhase, OptimizationPhaseResult
 from pyqenc.phases.probe import ProbePhase
-from pyqenc.quality import QualitySearchBase, QualitySearchV3
+from pyqenc.quality import QualitySearchBase, QualitySearchV3, effective_sampling
 from pyqenc.quality_metrics import (
     MeasuredMetrics,
     MeasuredMetricsYaml,
@@ -114,12 +114,13 @@ class AttemptSidecar(BaseModel):
     re-judging substrate: cache-hits re-judge under new targets without
     re-encoding.
 
-    ``sampling`` records the frame subsampling factor used when the metrics
-    were measured — LOAD-BEARING: attempts survive a sampling change
+    ``sampling`` records the effective frame subsampling factor the metrics
+    were measured at — LOAD-BEARING: attempts survive a sampling change
     (winners are wholesale-wiped by the optimization band key) and are
-    lazily re-measured at pick-up when this differs from the current
-    config. REQUIRED — every write path carries it; a sidecar missing it
-    fails validation → absent → re-measure.
+    lazily re-measured at pick-up when this differs from the chunk's
+    current expected value (``effective_sampling`` of the chunk's frame
+    count and the run-level config factor). REQUIRED — every write path
+    carries it; a sidecar missing it fails validation → absent → re-measure.
 
     ``frame_count`` is a fact of the attempt file, from whoever last
     decoded it whole: the encode run that produced it, or the measure run
@@ -147,7 +148,7 @@ class AttemptSidecar(BaseModel):
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    sampling:    int                # subsampling factor used when the metrics were measured
+    sampling:    int                # effective subsampling factor the metrics were measured at
     frame_count: int                # frames of the attempt file (0 = unknown)
     metrics:     MeasuredMetricsYaml = Field(default_factory=MeasuredMetrics)
 
@@ -827,7 +828,11 @@ class ChunkEncoder:
                               a pair converges.
             visual_hash:       When ``True``, prepend a deterministic emoji to every
                               chunk log line for visual distinction in parallel output.
-            sampling:  Frame subsampling factor for quality metric generation.
+            sampling:  The run-level frame subsampling factor
+                              (``measurement.sampling``). Each chunk's effective
+                              factor is derived from it and the chunk's frame
+                              count via :func:`pyqenc.quality.effective_sampling`
+                              — the attempt sidecar records the effective value.
             metric_prefix:     Top-level key prefixing this encoder's dotted timing
                               keys — ``<prefix>.<strategy>`` per ffmpeg encode and
                               ``<prefix>.measure`` per quality measurement
@@ -1087,7 +1092,9 @@ class ChunkEncoder:
         wipe permission at JobPhase, not a re-encode command). The search
         starts at the codec's quantized default quality — a predictable
         starting point means a predictable recovery path when parameters
-        change.
+        change. Measurement runs at the chunk's effective sampling
+        (:func:`pyqenc.quality.effective_sampling` of the chunk's frame count
+        and the run-level factor), which the attempt sidecar records.
 
         Args:
             chunk:           The chunk window to encode.
@@ -1098,6 +1105,18 @@ class ChunkEncoder:
             ChunkEncodingResult with encoding outcome.
         """
         logger.debug(fmt_chunk_start(strategy.display_name(), chunk.safe_name(), self._visual_hash))
+
+        # The chunk's effective sampling — the run-level factor reduced to keep
+        # the VMAF reading floor on short chunks. Recorded on every attempt
+        # sidecar of this chunk and recomputed for the reuse check below, so
+        # the reuse decision never diverges from what was measured.
+        sampling = effective_sampling(chunk.frame_count, self._sampling)
+        if sampling != self._sampling:
+            readings = -(-chunk.frame_count // sampling)  # scored: indices 0, s, 2s, …
+            logger.info(fmt_chunk(strategy.display_name(), chunk.safe_name(),
+                f"sampling {self._sampling} → {sampling} ({chunk.frame_count} frame(s) → "
+                f"{readings} readings, {readings - 1} after the first-frame skip)",
+                self._visual_hash))
 
         search = QualitySearchV3(
             quality_better   = strategy.codec.quality_better,
@@ -1128,20 +1147,25 @@ class ChunkEncoder:
             targets_met: bool,
             *,
             reused:      bool,
+            remeasured:  bool = False,
         ) -> Decimal | None:
             """Conclude one attempt: judge it, log the attempt line, feed the
             search, and snapshot the best.
 
-            Shared by the cache-hit and the fresh/re-measured paths — the
-            judging and presentation are identical, only provenance differs
-            (the ``[reused]`` tag).
+            Shared by the cache-hit, re-measured, and fresh-encode paths —
+            the judging and presentation are identical, only provenance
+            differs (the ``[reused]`` / ``[re-measured]`` tags).
 
             Args:
                 attempt:     The concluded attempt (its quality is the address).
                 all_metrics: Every measured metric of the attempt.
                 frame_count: Frames of the attempt file (0 = unknown).
                 targets_met: The live comparator verdict.
-                reused:      Whether the attempt was accepted from disk.
+                reused:      Whether the attempt was accepted from disk whole
+                             (sidecar cache hit — no work performed).
+                remeasured:  Whether an existing attempt file was re-measured
+                             in place (sampling changed / stale sidecar — the
+                             encode itself was never re-run).
 
             Returns:
                 The next proposed quality, or ``None`` when the search is done.
@@ -1173,13 +1197,17 @@ class ChunkEncoder:
                 else f"{FAILURE_SYMBOL_MINOR} miss"
             )
             summary_suffix = f" ({metric_summary})" if metric_summary else ""
-            reused_tag = " [reused]" if reused else ""
+            provenance = (
+                " [reused]" if reused
+                else " [re-measured]" if remeasured
+                else ""
+            )
             logger.info(
                 fmt_chunk_attempt_result(
                     strategy.display_name(), chunk.safe_name(), attempt_number,
                     f"{pass_fail} with {strategy.codec.quality_label} "
                     f"{str(attempt.quality).rjust(strategy.codec.quality_log_padding)}"
-                    f"{summary_suffix}{best_string}{reused_tag}",
+                    f"{summary_suffix}{best_string}{provenance}",
                     self._visual_hash,
                 )
             )
@@ -1219,7 +1247,7 @@ class ChunkEncoder:
                 else None
             )
             if existing is not None and sidecar is not None and (
-                sidecar.sampling == self._sampling
+                sidecar.sampling == sampling
                 and sidecar.frame_count > 0
                 and sidecar.metrics.covers(t.identity for t in quality_targets)
             ):
@@ -1241,8 +1269,8 @@ class ChunkEncoder:
             if existing is not None:
                 # File exists but sidecar is missing, incomplete, or stale — re-measure.
                 reason = (
-                    f"sampling changed ({sidecar.sampling if sidecar is not None else '?'} → {self._sampling})"
-                    if sidecar is not None and sidecar.sampling != self._sampling
+                    f"sampling changed ({sidecar.sampling if sidecar is not None else '?'} → {sampling})"
+                    if sidecar is not None and sidecar.sampling != sampling
                     else "sidecar missing or incomplete"
                 )
                 logger.info(
@@ -1326,7 +1354,7 @@ class ChunkEncoder:
                         output_dir           = output_file.parent,
                         duration_seconds     = chunk.duration_seconds,
                         fps_value            = chunk.stream.stream.info.fps_fraction,
-                        sampling             = self._sampling,
+                        sampling             = sampling,
                         plot_path            = output_file.parent / f"{output_file.stem}.png",
                         chunk_start_seconds  = chunk.start_timestamp,
                     )
@@ -1354,7 +1382,7 @@ class ChunkEncoder:
             if self._measure_attempts:
                 _write_attempt_sidecar(
                     output_file, all_metrics,
-                    self._sampling, attempt_frames,
+                    sampling, attempt_frames,
                 )
 
             next_q = record_attempt(
@@ -1366,7 +1394,8 @@ class ChunkEncoder:
                     file_size_bytes = output_file.stat().st_size,
                 ),
                 all_metrics, attempt_frames, attempt_targets_met,
-                reused=False,
+                reused      = False,
+                remeasured  = existing is not None,
             )
             if next_q is None:
                 break

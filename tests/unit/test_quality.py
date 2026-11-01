@@ -5,9 +5,12 @@ from decimal import Decimal
 from typing import ClassVar
 
 import pytest
+from hypothesis import given
+from hypothesis import strategies as st
 
+from pyqenc.constants import MIN_READINGS_AFTER_SKIP
 from pyqenc.models import CodecConfig, QualityTarget
-from pyqenc.quality import QualitySearch, QualitySearchBase, _score_attempt
+from pyqenc.quality import QualitySearch, QualitySearchBase, _score_attempt, effective_sampling
 from pyqenc.quality_metrics import MetricStatKey, MetricType, TargetedMetrics
 
 
@@ -1515,3 +1518,69 @@ class TestRunMetricsCommandGolden:
             "-map_chapters", "-1",
             "-f", "null", "-",
         ]
+
+
+class TestEffectiveSampling:
+    """The per-chunk sampling override keeping the VMAF reading floor."""
+
+    def test_short_chunk_reduces_sampling_to_one(self) -> None:
+        """A 24-frame chunk cannot keep sampling 5 (5 readings, 4 after the
+        skip) — every frame is measured instead."""
+        assert effective_sampling(24, 5) == 1
+
+    def test_boundary_chunks_step_down_one_factor_at_a_time(self) -> None:
+        """The override is the largest factor that still leaves 21 scored
+        readings: 100 frames keep 4 (sampling 5 would leave 20 after the
+        skip), 105 keep 5 exactly (21 readings)."""
+        assert effective_sampling(100, 5) == 4
+        assert effective_sampling(105, 5) == 5
+
+    def test_long_chunk_keeps_the_configured_factor(self) -> None:
+        """A chunk with frames to spare is never reduced."""
+        assert effective_sampling(2400, 3) == 3
+
+    def test_unknown_or_tiny_frame_counts_measure_every_frame(self) -> None:
+        """No known count (0) or a sub-floor chunk clamps to 1 rather than
+        to 0 — sampling is a positive factor."""
+        assert effective_sampling(0, 5) == 1
+        assert effective_sampling(1, 5) == 1
+        assert effective_sampling(1, 1) == 1
+
+    @given(
+        frames = st.integers(min_value=0, max_value=5000),
+        config = st.integers(min_value=1, max_value=50),
+    )
+    def test_effective_never_exceeds_config_nor_reaches_zero(self, frames: int, config: int) -> None:
+        """The effective factor is a valid sampling: at least 1, never above
+        the configured factor."""
+        eff = effective_sampling(frames, config)
+        assert 1 <= eff <= config
+
+    @given(
+        frames = st.integers(min_value=0, max_value=5000),
+        config = st.integers(min_value=1, max_value=50),
+    )
+    def test_effective_factor_honors_the_reading_floor_or_saturates(
+        self, frames: int, config: int,
+    ) -> None:
+        """Whenever the factor exceeds 1, the chunk still yields at least
+        MIN_READINGS_AFTER_SKIP + 1 scored readings (the +1 absorbs the
+        skipped first VMAF reading); a saturated 1 means the chunk is shorter
+        than the floor allows."""
+        eff = effective_sampling(frames, config)
+        if eff > 1:
+            assert -(-frames // eff) >= MIN_READINGS_AFTER_SKIP + 1
+
+    @given(
+        frames = st.integers(min_value=0, max_value=5000),
+        config = st.integers(min_value=1, max_value=50),
+    )
+    def test_effective_factor_is_the_largest_floor_honoring_one(
+        self, frames: int, config: int,
+    ) -> None:
+        """No larger factor honors the floor: stepping the effective factor up
+        one more (when still under the config) breaks the reading guarantee —
+        the override is maximal, not merely sufficient."""
+        eff = effective_sampling(frames, config)
+        if eff < config:
+            assert -(-frames // (eff + 1)) <= MIN_READINGS_AFTER_SKIP

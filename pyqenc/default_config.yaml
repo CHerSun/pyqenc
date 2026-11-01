@@ -75,6 +75,8 @@ optimization:
 measurement:
   sampling: 1  # measure every N-th frame; 1 = every frame; higher = faster but less precise
                # applies to quality checks during encoding, merge verification, and measure command
+               # per-chunk override: short chunks automatically get a lower factor (keeps
+               # >=20 VMAF readings for the statistics after the first-frame exclusion)
   concurrency: 1  # max videos 'pyqenc measure' processes simultaneously (one task per video:
                   # screenshots + measurement); clamped to CPU count; no benefit unless CPU is idling.
 

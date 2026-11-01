@@ -85,6 +85,13 @@ class MetricInfo(ABC):
                            (``.log`` stats files or the ``.json`` VMAF report).
         std_cutoff_max:    Upper bound on the values entering the std statistic
                            (``None`` = every value); PSNR caps at its clip ceiling.
+        skip_first_reading: Exclude the first per-frame value from the
+                           statistics step only (the plotted series keeps it).
+                           VMAF: the session's first scored frame has no
+                           previous frame for the temporal motion feature, so
+                           its score is structurally different from every
+                           other reading; single-reading series keep it
+                           (never an empty series).
     """
 
     name:                 str
@@ -103,6 +110,7 @@ class MetricInfo(ABC):
     subsample_via_filter: bool
     log_extension:        str
     std_cutoff_max:       float | None
+    skip_first_reading:   bool = False
 
     @abstractmethod
     def parse_log(self, path: Path) -> list[float]:
@@ -383,6 +391,7 @@ _METRIC_INFO: dict[MetricType, MetricInfo] = {
         subsample_via_filter = False,  # VMAF uses n_subsample internally
         log_extension     = ".json",
         std_cutoff_max    = None,
+        skip_first_reading = True,  # the session's first frame has no motion predecessor
     ),
     MetricType.SSIM: _SsimMetricInfo(
         name              = "SSIM",
