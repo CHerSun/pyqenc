@@ -54,10 +54,6 @@ class SpaceGuard:
     Per-filesystem keying (``os.stat`` device id): directories on different
     volumes keep independent ledgers, and a check always reads the free
     space of the exact filesystem the item writes to.
-
-    The largest item size seen via :meth:`observe` feeds callers that must
-    guess an unknown next size (the attempt reserve: a multiple of the
-    worst attempt so far).
     """
 
     def __init__(self, min_free: int, probe: FreeSpaceProbe = _disk_free) -> None:
@@ -73,28 +69,11 @@ class SpaceGuard:
         self._probe     = probe
         self._lock      = threading.Lock()
         self._reserved: dict[object, int] = {}
-        self._worst_seen = 0
 
     @property
     def min_free(self) -> int:
         """The configured floor in bytes."""
         return self._min_free
-
-    @property
-    def worst_seen(self) -> int:
-        """The largest item size reported to :meth:`observe` so far."""
-        with self._lock:
-            return self._worst_seen
-
-    def observe(self, size_bytes: int) -> None:
-        """Record a produced item's size for the unknown-size callers.
-
-        Args:
-            size_bytes: The item's size in bytes (ignored when smaller than
-                        the current worst).
-        """
-        with self._lock:
-            self._worst_seen = max(self._worst_seen, size_bytes)
 
     @contextmanager
     def ensure(self, target_dir: Path, need: int) -> Generator[None]:

@@ -107,17 +107,6 @@ class TestSpaceGuardHappy:
         ):
             pass
 
-    def test_worst_seen_feeds_the_self_tuning_reserve(self) -> None:
-        """observe records the largest item size; callers reserve a multiple
-        of it for unknown-size items (the attempt reserve)."""
-        guard = _guard(free=10**9)
-        assert guard.worst_seen == 0
-        guard.observe(500)
-        guard.observe(200)
-        assert guard.worst_seen == 500
-        guard.observe(900)
-        assert guard.worst_seen == 900
-
 
 class TestSpaceGuardProperties:
     @given(

@@ -26,6 +26,13 @@ FLAC_BOUND_BYTES_PER_SAMPLE = 4
 """Per-sample byte width assumed by the FLAC worst-case size bound — the widest
 depth ffmpeg's flac encoder accepts (32-bit covers 16- and 24-bit sources)."""
 
+ATTEMPT_RESERVE_BYTES = 300 * 1024 * 1024
+"""Flat per-attempt space reserve (the free-space floor's ``need`` for a fresh
+encode). Deliberately scale-blind: attempt sizes vary by orders of magnitude
+across chunks, and predicting them was ruled not worth the tracking — a flat
+reserve keeps the concurrency accounting honest, and ``min_free_space``
+absorbs the variance of any single attempt outrunning it."""
+
 # Vertical delimiters
 LINE_WIDTH  = 72
 """Horizontal line width for log blocks."""

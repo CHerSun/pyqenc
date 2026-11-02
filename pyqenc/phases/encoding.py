@@ -24,6 +24,7 @@ from pyqenc.app_metrics import AppMetricKey, AppMetricsCollector, ConvergenceUpd
 from pyqenc.constants import (
     APP_METRIC_KEY_MEASURE,
     APPROXIMATE_INDICATOR_SYMBOL,
+    ATTEMPT_RESERVE_BYTES,
     BRACKET_LEFT,
     BRACKET_RIGHT,
     ENCODED_OUTPUT_DIR,
@@ -846,9 +847,9 @@ class ChunkEncoder:
                               must run a single-point quality domain where the
                               search never consumes metrics.
             space_guard:       The run's free-space floor. Every fresh encode
-                              passes through it before ffmpeg starts (the
-                              reserve: twice the worst attempt size seen so
-                              — self-tuning from zero, no config).
+                              passes through it before ffmpeg starts, with a
+                              flat per-attempt reserve
+                              (:data:`ATTEMPT_RESERVE_BYTES`).
         """
         self.quality_measurer = quality_measurer
         self.work_dir          = work_dir
@@ -1296,16 +1297,16 @@ class ChunkEncoder:
                 attempt_frames = sidecar.frame_count if sidecar is not None else 0
             else:
                 # Encode — real work. The free-space floor gates every fresh
-                # encode: the reserve is twice the worst attempt size seen
-                # this run (a self-tuning guess — the next attempt's size is
-                # unknowable beforehand; the first attempt takes a plain
-                # floor check).
+                # encode with a flat reserve: attempt sizes vary by orders of
+                # magnitude across chunks and prediction was ruled not worth
+                # the tracking — the reserve keeps the concurrency accounting
+                # honest, min_free_space absorbs a single attempt outrunning it.
                 _any_real_work = True
                 output_file    = self._get_attempt_path(
                     chunk.safe_name(), strategy, quality=current_q
                 )
                 with self._space_guard.ensure(
-                    output_dir, need=2 * self._space_guard.worst_seen,
+                    output_dir, need=ATTEMPT_RESERVE_BYTES,
                 ), self._collector.time(self._metric_prefix, strategy.display_name()):
                     run_result = self._encode_with_ffmpeg(
                         chunk, strategy, current_q, output_file
@@ -1398,20 +1399,18 @@ class ChunkEncoder:
                     sampling, attempt_frames,
                 )
 
-            attempt_size = output_file.stat().st_size
             next_q = record_attempt(
                 AttemptMetadata(
                     path            = output_file,
                     chunk_id        = chunk.safe_name(),
                     strategy        = strategy.display_name(),
                     quality         = current_q,
-                    file_size_bytes = attempt_size,
+                    file_size_bytes = output_file.stat().st_size,
                 ),
                 all_metrics, attempt_frames, attempt_targets_met,
                 reused      = False,
                 remeasured  = existing is not None,
             )
-            self._space_guard.observe(attempt_size)
             if next_q is None:
                 break
 
