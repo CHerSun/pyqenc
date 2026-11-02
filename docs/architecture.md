@@ -611,6 +611,12 @@ ffmpeg and modern codecs (x264, x265, SVT-AV1) already scale across all availabl
 
 Every bounded phase — optimization, encoding, audio, measure — runs the same `run_bounded` machinery: a pre-filtered, input-ordered job list consumed by bound workers, one result per job in input order, identical order at any value. Progress reporting and error containment are the job's own: count-based bars where items are many and substeps non-deterministic (encoding, optimization, audio — one duration-weighted advance per completed item), duration-based bars with in-job ticks where steps are few and deterministic (merge, measure). Dotted app-metrics sub-spans may overlap under concurrency and are judged against their internal sums, never against wall-clock.
 
+### Free-space floor over space estimation
+
+Upfront pipeline-wide space estimation was dropped (0.37.0): predicting every producing phase's output before the run was high-upkeep and never trustworthy. In its place, every produced item — encode attempt, audio output, merged video, materialized extract — passes a free-space floor check at its production site, immediately before the work starts (after any per-item cleanup, so freed space counts). The floor is the `min_free_space` config key (loose human format in — `2G`, `1 GiB` — exact bytes out; default `1 GiB`), and the check reads the free space of the exact filesystem the item writes to.
+
+Two check shapes share one `SpaceGuard.ensure` context manager: `need=0` for items whose size is unknowable beforehand (encode attempts — the reserve is twice the worst attempt seen so far, self-tuning from zero), and `need=N` for size-known items (merge: the sum of winner sizes, already an over-estimate; audio: bitrate × duration, or the documented FLAC PCM worst case; extraction: the source size for video, floor-only for audio tracks). Concurrency is handled by accounting, not reservation: in-flight needs stay on a per-filesystem in-memory ledger and are charged to every subsequent check, so bounded workers cannot collectively overshoot. A refused item raises `InsufficientSpaceError`, which the owning phase converts to a one-line `FAILED` result — the loud stop: already-produced artifacts stay valid and the run resumes after space is freed.
+
 ### Atomic writes everywhere
 
 All artifact and sidecar writes use `.tmp`-then-rename. A partial write (from a crash or kill signal) leaves a `.tmp` file that is ignored by artifact scanning — the artifact is treated as `ABSENT` and re-produced on the next run. No corruption, no manual cleanup needed.

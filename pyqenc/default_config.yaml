@@ -3,6 +3,11 @@
 # Loaded in layers: default_config.yaml → user's config → local folder config → command-line overrides
 # Lists are replaced. Dicts are merged. Values are overridden.
 
+min_free_space: 1 GiB  # free bytes that must remain on the work filesystem after every produced
+                       # item (attempts, audio outputs, merged videos). Loose format accepted:
+                       # "2G", "2000M", "1 GiB", or a bare byte count. Production stops loudly
+                       # when starting an item would break this floor.
+
 extraction:
   include: null   # regex — keep only matching streams; null = all
   exclude: null   # regex — drop matching streams; overrides include

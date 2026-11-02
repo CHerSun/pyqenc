@@ -68,6 +68,7 @@ from pyqenc.stream_model import (
     VideoStream,
     VideoStreamInfo,
 )
+from pyqenc.utils.disk_space import InsufficientSpaceError, SpaceGuard
 from pyqenc.utils.ffmpeg_runner import FFmpegInput, FFmpegRequest, run_ffmpeg
 from pyqenc.utils.fs import remove_stale_tmp_files
 from pyqenc.utils.log_format import fmt_size_mb
@@ -509,6 +510,7 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
         # video and audio streams are wanted as real files under extracted/
         # instead of being consumed virtually from the source.
         self._materialize: bool = materialize
+        self._space_guard = SpaceGuard(config.min_free_space)
 
         # Recovery stash — the run's stream inventory and sidecar currency.
         self._source_file: ProbedFile | None       = None
@@ -920,42 +922,48 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
 
         errors: list[str] = []
 
-        # Attachments extract as one mkvextract batch (their own numbering
-        # space, one call for every pair) before the per-row loop.
-        attachment_rows = [
-            a for a in artifacts
-            if a.state == ArtifactState.ABSENT and _is_attachment_row(a)
-        ]
-        if attachment_rows:
-            self._extract_attachments(attachment_rows, source, errors)
-
-        # Materialized audio tracks remux to containers before the per-row
-        # loop (the video row's components are handled per-row — it can be
-        # PARTIAL, carrying some components already).
-        track_rows: list[Artifact[AudioStream]] = []
-        if self._materialize:
-            track_rows = [
+        try:
+            # Attachments extract as one mkvextract batch (their own numbering
+            # space, one call for every pair) before the per-row loop.
+            attachment_rows = [
                 a for a in artifacts
-                if a.state != ArtifactState.COMPLETE and _is_audio_row(a)
+                if a.state == ArtifactState.ABSENT and _is_attachment_row(a)
             ]
-            for artifact in track_rows:
-                self._materialize_track(artifact, source, errors)
+            if attachment_rows:
+                self._extract_attachments(attachment_rows, source, errors)
 
-        for artifact in artifacts:
-            if artifact.state == ArtifactState.COMPLETE:
-                continue
-            if _is_video_row(artifact):
-                self._produce_video_components(artifact, work_dir, source, errors)
-            elif _is_subtitle_row(artifact):
-                self._extract_subtitle(artifact, source, errors)
-            elif _is_chapters_row(artifact):
-                self._extract_chapters(artifact, work_dir, source, errors)
-            elif _is_audio_row(artifact):
-                pass  # virtual in processing runs; materialized as one batch above
-            elif _is_attachment_row(artifact):
-                pass  # extracted as one batch before this loop
-            else:
-                assert_never(artifact)
+            # Materialized audio tracks remux to containers before the per-row
+            # loop (the video row's components are handled per-row — it can be
+            # PARTIAL, carrying some components already).
+            track_rows: list[Artifact[AudioStream]] = []
+            if self._materialize:
+                track_rows = [
+                    a for a in artifacts
+                    if a.state != ArtifactState.COMPLETE and _is_audio_row(a)
+                ]
+                for artifact in track_rows:
+                    self._materialize_track(artifact, source, errors)
+
+            for artifact in artifacts:
+                if artifact.state == ArtifactState.COMPLETE:
+                    continue
+                if _is_video_row(artifact):
+                    self._produce_video_components(artifact, work_dir, source, errors)
+                elif _is_subtitle_row(artifact):
+                    self._extract_subtitle(artifact, source, errors)
+                elif _is_chapters_row(artifact):
+                    self._extract_chapters(artifact, work_dir, source, errors)
+                elif _is_audio_row(artifact):
+                    pass  # virtual in processing runs; materialized as one batch above
+                elif _is_attachment_row(artifact):
+                    pass  # extracted as one batch before this loop
+                else:
+                    assert_never(artifact)
+        except InsufficientSpaceError as exc:
+            # The loud stop: one line and a FAILED phase; artifacts already
+            # complete stay valid for the recovery on a re-run.
+            logger.error("%s %s", FAILURE_SYMBOL_MINOR, exc.message)
+            return self._make_result(PhaseOutcome.FAILED, artifacts, exc.message)
 
         if errors:
             failed_count = sum(1 for a in artifacts if a.state != ArtifactState.COMPLETE)
@@ -1122,7 +1130,14 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
             output      = final,
         )
         logger.debug("Materializing track %d: %s", stream.info.track_id, final.name)
-        res = run_ffmpeg(request)
+        # The free-space floor gates the remux. The materialized video
+        # container is bounded by the whole source size (a stream copy of
+        # one stream can only be smaller); an audio track's container is
+        # bounded by that track alone — small and unknowable without new
+        # probing, so it takes the plain floor check.
+        need = source.stat().st_size if isinstance(stream, VideoStream) else 0
+        with self._space_guard.ensure(final.parent, need=need):
+            res = run_ffmpeg(request)
         if res.success and final.exists():
             artifact.state = ArtifactState.COMPLETE
         else:

@@ -200,6 +200,7 @@ class TestEncodeChunkQualitySearchV2Integration:
 
         from pyqenc.models import AttemptMetadata, QualityTarget
         from pyqenc.phases.encoding import ChunkEncoder, _ChunkEncodingResult
+        from pyqenc.utils.disk_space import SpaceGuard as _SpaceGuard
         from pyqenc.utils.visualization import QualityMeasurer
 
         strategy = self._make_strategy()
@@ -240,6 +241,7 @@ class TestEncodeChunkQualitySearchV2Integration:
             sampling           = 10,
             metric_prefix     = AppMetricKey.ENCODING,
             measure_attempts  = True,
+            space_guard       = _SpaceGuard(0),
         )
 
         reference = MagicMock()
@@ -270,6 +272,7 @@ class TestEncodeChunkQualitySearchV2Integration:
         from pyqenc.phases.encoding import ChunkEncoder
         from pyqenc.quality import QualityLogs, QualityMeasurement
         from pyqenc.quality_metrics import MetricType
+        from pyqenc.utils.disk_space import SpaceGuard as _SpaceGuard
         from pyqenc.utils.visualization import QualityMeasurer
 
         strategy = self._make_strategy()
@@ -302,6 +305,7 @@ class TestEncodeChunkQualitySearchV2Integration:
             sampling          = 10,
             metric_prefix     = AppMetricKey.ENCODING,
             measure_attempts  = True,
+            space_guard       = _SpaceGuard(0),
         )
 
         reference = MagicMock()

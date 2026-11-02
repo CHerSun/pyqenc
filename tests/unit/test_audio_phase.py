@@ -112,6 +112,7 @@ def _make_phase(tmp_path: Path, config: AudioConfig, tracks: list[AudioStream]) 
 
     app_config = MagicMock()
     app_config.audio = config
+    app_config.min_free_space = 0  # the floor never blocks chain-mechanics tests
 
     job_result = MagicMock()
     job_result.work_dir   = tmp_path
@@ -535,6 +536,7 @@ class TestBoundedExecution:
         job_result.file.payload.fingerprint = _STUB_SOURCE_FP
         app_config = MagicMock()
         app_config.audio = config
+        app_config.min_free_space = 0  # the floor never blocks chain-mechanics tests
         job_result.config = app_config
         job_mock = MagicMock()
         job_mock.result = job_result

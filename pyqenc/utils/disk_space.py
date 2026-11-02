@@ -1,215 +1,138 @@
-"""Disk space checking utilities."""
+"""Free-space guarding: a per-run floor under the work filesystem."""
 # CHerSun 2026
 
 import logging
+import os
 import shutil
-from dataclasses import dataclass
-from enum import StrEnum
+import threading
+from collections.abc import Callable, Generator
+from contextlib import contextmanager
 from pathlib import Path
 
-from pyqenc.constants import (
-    AVG_ATTEMPTS_PER_CHUNK,
-    BITS_PER_PIXEL_ENCODED,
-    OVERHEAD_PER_STRATEGY_FALLBACK,
-    OVERHEAD_TIGHT_MARGIN,
-    SUCCESS_SYMBOL_MINOR,
-)
-from pyqenc.stream_model import ProbedFile, VideoStream
-from pyqenc.utils.log_format import fmt_key_value_table
+from pyqenc.utils.log_format import fmt_size_mb
 
 logger = logging.getLogger(__name__)
 
+FreeSpaceProbe = Callable[[Path], int]
+"""Reads the bytes free on the filesystem containing a directory.
 
-@dataclass
-class DiskSpaceInfo:
-    """Information about disk space availability."""
-    total_gb:     float
-    used_gb:      float
-    free_gb:      float
-    percent_used: float
+The OS boundary seam — tests substitute a fake filesystem instead of
+touching a real volume."""
 
 
-class AvailableSpaceLevel(StrEnum):
-    SUFFICIENT   = "Sufficient"
-    INSUFFICIENT = "Tight"
-    TIGHT        = "Warning"
+def _disk_free(path: Path) -> int:
+    """Bytes free on the filesystem containing *path* (``shutil.disk_usage``)."""
+    return shutil.disk_usage(path).free
 
 
-@dataclass
-class SpaceEstimate:
-    """Estimated space requirements for pipeline.
+class InsufficientSpaceError(RuntimeError):
+    """Starting an item would break the configured free-space floor.
 
-    Attributes:
-        source_size_gb:  Size of the source video file in GB.
-        min_required_gb: Lower-bound estimate (minimum strategies).
-        max_required_gb: Upper-bound estimate with safety margin (maximum strategies).
-        available_gb:    Free space on the work directory filesystem.
-        level:           Whether available space is sufficient, tight, or insufficient.
+    Carries the human-facing message with the numbers; the owning phase
+    catches it and converts it to its ``FAILED`` result — the loud stop.
     """
-    source_size_gb:  float
-    min_required_gb: float
-    max_required_gb: float
-    available_gb:    float
-    level:           AvailableSpaceLevel
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.message = message
 
 
-def get_disk_space(path: Path) -> DiskSpaceInfo:
-    """Get disk space information for the given path.
+class SpaceGuard:
+    """The run's free-space floor: no item starts when it would break it.
 
-    Args:
-        path: Path to check disk space for.
+    One ``ensure`` call covers both check shapes: ``need=0`` when the item's
+    size is unknowable beforehand (a plain floor check) and ``need=N`` when
+    it is known or bounded (the floor must still hold *after* the item
+    lands). Concurrency-safe by accounting, not reservation: concurrent
+    items each add their ``need`` to a per-filesystem outstanding ledger for
+    the duration of the ``with`` block, so bounded workers cannot
+    collectively overshoot what each individually passed. The ledger is
+    in-memory only — it coordinates pyqenc's own concurrent productions and
+    reserves nothing against other processes; a mid-item ENOSPC is that
+    item's ordinary failure, not the guard's concern.
 
-    Returns:
-        DiskSpaceInfo with disk space details.
+    Per-filesystem keying (``os.stat`` device id): directories on different
+    volumes keep independent ledgers, and a check always reads the free
+    space of the exact filesystem the item writes to.
+
+    The largest item size seen via :meth:`observe` feeds callers that must
+    guess an unknown next size (the attempt reserve: a multiple of the
+    worst attempt so far).
     """
-    usage        = shutil.disk_usage(path)
-    total_gb     = usage.total / (1024 ** 3)
-    used_gb      = usage.used  / (1024 ** 3)
-    free_gb      = usage.free  / (1024 ** 3)
-    percent_used = (usage.used / usage.total) * 100
-    return DiskSpaceInfo(total_gb=total_gb, used_gb=used_gb, free_gb=free_gb, percent_used=percent_used)
 
+    def __init__(self, min_free: int, probe: FreeSpaceProbe = _disk_free) -> None:
+        """Store the floor and the free-space probe.
 
-def estimate_required_space(
-    stream:         VideoStream,
-    num_strategies: int = 1,
-) -> float:
-    """Estimate required disk space for pipeline execution.
+        Args:
+            min_free: The configured floor (``min_free_space``) — bytes that
+                      must stay free on the target filesystem after every
+                      item lands.
+            probe:    Bytes-free reader, injectable for tests.
+        """
+        self._min_free  = min_free
+        self._probe     = probe
+        self._lock      = threading.Lock()
+        self._reserved: dict[object, int] = {}
+        self._worst_seen = 0
 
-    The direct-from-source pipeline materializes only encoding attempts and
-    final outputs, so the estimate covers exactly those:
+    @property
+    def min_free(self) -> int:
+        """The configured floor in bytes."""
+        return self._min_free
 
-    - Attempts: ``total_pixels x (BITS_PER_PIXEL_ENCODED / 8) x AVG_ATTEMPTS_PER_CHUNK x num_strategies``
-    - Final output: ``total_pixels x (BITS_PER_PIXEL_ENCODED / 8) x num_strategies``
+    @property
+    def worst_seen(self) -> int:
+        """The largest item size reported to :meth:`observe` so far."""
+        with self._lock:
+            return self._worst_seen
 
-    Pixel data comes from the enumerated :class:`~pyqenc.stream_model.VideoStreamInfo`;
-    falls back to a source-size multiplier per strategy when it is unavailable.
+    def observe(self, size_bytes: int) -> None:
+        """Record a produced item's size for the unknown-size callers.
 
-    Args:
-        stream:         The source's video stream — file size and pixel data.
-        num_strategies: Number of encoding strategies to estimate for.
+        Args:
+            size_bytes: The item's size in bytes (ignored when smaller than
+                        the current worst).
+        """
+        with self._lock:
+            self._worst_seen = max(self._worst_seen, size_bytes)
 
-    Returns:
-        Estimated required space in GB.
-    """
-    assert isinstance(stream.file, ProbedFile), "source stream carries the probed job file"
-    source_size_gb = stream.file.fingerprint.size / (1024 ** 3)
-    total_pixels   = stream.info.total_pixels
+    @contextmanager
+    def ensure(self, target_dir: Path, need: int) -> Generator[None]:
+        """Admit one item to production, or refuse it loudly.
 
-    if total_pixels is not None:
-        logger.debug("Space estimate: pixel-based (%d Mpx total)", total_pixels // 1_000_000)
-        bytes_per_encoded_px = BITS_PER_PIXEL_ENCODED / 8
-        attempts_gb = total_pixels * bytes_per_encoded_px * AVG_ATTEMPTS_PER_CHUNK * num_strategies / (1024 ** 3)
-        final_gb    = total_pixels * bytes_per_encoded_px * num_strategies / (1024 ** 3)
-        total_gb    = attempts_gb + final_gb
-        logger.debug(
-            "Space estimate breakdown: attempts=%.2f GB, final=%.2f GB -> total=%.2f GB",
-            attempts_gb, final_gb, total_gb,
-        )
-        return total_gb
+        Refuses when ``free - outstanding - need < min_free`` on the
+        filesystem containing *target_dir*; on admission, ``need`` joins
+        that filesystem's outstanding ledger until the block exits.
 
-    logger.debug("Space estimate: falling back to source-size multipliers (no pixel data)")
-    return source_size_gb * OVERHEAD_PER_STRATEGY_FALLBACK * num_strategies
+        Args:
+            target_dir: The directory the item writes to (an existing
+                        directory on the target filesystem).
+            need:       The item's expected size in bytes — a known or
+                        bounded size, or ``0`` when unknowable (floor check
+                        only).
 
+        Yields:
+            Nothing; the block body performs the production.
 
-def check_disk_space(
-    stream:         VideoStream,
-    work_dir:       Path,
-    min_strategies: int = 1,
-    max_strategies: int = 1,
-) -> SpaceEstimate:
-    """Check if sufficient disk space is available for pipeline execution.
-
-    Calls ``estimate_required_space`` twice — once for the minimum strategy
-    count (lower bound) and once for the maximum (upper bound).  The
-    recommended threshold adds a ``OVERHEAD_TIGHT_MARGIN`` safety buffer on
-    top of the upper-bound estimate.
-
-    Args:
-        stream:         The source's video stream.
-        work_dir:       Working directory where files will be stored.
-        min_strategies: Minimum number of strategies (lower-bound estimate).
-        max_strategies: Maximum number of strategies (upper-bound estimate).
-
-    Returns:
-        ``SpaceEstimate`` with min/max required and available space.
-    """
-    min_required_gb = estimate_required_space(stream, min_strategies)
-    max_required_gb = estimate_required_space(stream, max_strategies)
-    assert isinstance(stream.file, ProbedFile), "source stream carries the probed job file"
-    source_size_gb  = stream.file.fingerprint.size / (1024 ** 3)
-    recommended_gb  = max_required_gb * OVERHEAD_TIGHT_MARGIN
-
-    work_dir.mkdir(parents=True, exist_ok=True)
-    disk_info = get_disk_space(work_dir)
-
-    sufficient:  bool = disk_info.free_gb >= min_required_gb
-    recommended: bool = disk_info.free_gb >= recommended_gb
-    level = (
-        AvailableSpaceLevel.INSUFFICIENT if not sufficient  else
-        AvailableSpaceLevel.TIGHT        if not recommended else
-        AvailableSpaceLevel.SUFFICIENT
-    )
-
-    return SpaceEstimate(
-        source_size_gb  = source_size_gb,
-        min_required_gb = min_required_gb,
-        max_required_gb = recommended_gb,
-        available_gb    = disk_info.free_gb,
-        level           = level,
-    )
-
-
-def log_disk_space_info(
-    stream:         VideoStream,
-    work_dir:       Path,
-    min_strategies: int = 1,
-    max_strategies: int = 1,
-) -> AvailableSpaceLevel:
-    """Check and log disk space information.
-
-    When ``min_strategies == max_strategies`` (fixed strategy count), logs a
-    single estimate value.  When they differ (optimization mode, where 1 to N
-    strategies may run), logs a ``{min} ... {max} GB`` range so the user
-    understands the uncertainty.
-
-    Args:
-        stream:         The source's video stream.
-        work_dir:       Working directory where files will be stored.
-        min_strategies: Minimum number of strategies (lower-bound estimate).
-        max_strategies: Maximum number of strategies (upper-bound estimate).
-
-    Returns:
-        ``AvailableSpaceLevel`` indicating whether space is sufficient.
-    """
-    estimate = check_disk_space(stream, work_dir, min_strategies, max_strategies)
-
-    is_range = min_strategies != max_strategies
-    if is_range:
-        # max_required_gb has the margin baked in; strip it back for the raw upper bound display.
-        raw_max         = estimate.max_required_gb / OVERHEAD_TIGHT_MARGIN
-        required_str    = f"{estimate.min_required_gb:.2f} ... {raw_max:.2f} GB"
-        recommended_str = f"{estimate.min_required_gb * OVERHEAD_TIGHT_MARGIN:.2f} ... {estimate.max_required_gb:.2f} GB"
-    else:
-        required_str    = f"{estimate.min_required_gb:.2f} GB"
-        recommended_str = f"{estimate.max_required_gb:.2f} GB"
-
-    kv_table = {
-        "Source video size":           f"{estimate.source_size_gb:.2f} GB",
-        "Estimated required space":    required_str,
-        "Estimated recommended space": recommended_str,
-        "Available space":             f"{estimate.available_gb:.2f} GB",
-    }
-    fmt_key_value_table(kv_table)
-
-    logger.info("")
-    if estimate.level == AvailableSpaceLevel.INSUFFICIENT:
-        logger.error("Insufficient disk space! Most likely you won't be able to finish processing. Consider freeing up more space or using `--cleanup` flag.")
-    elif estimate.level == AvailableSpaceLevel.TIGHT:
-        logger.warning("Disk space is limited. Consider freeing up more space or using `--cleanup` flag.")
-    elif estimate.level == AvailableSpaceLevel.SUFFICIENT:
-        logger.info("%s Sufficient disk space available.", SUCCESS_SYMBOL_MINOR)
-    logger.info("")
-
-    return estimate.level
-
+        Raises:
+            InsufficientSpaceError: When the floor would be broken. The
+                message names the numbers and the config knob; nothing is
+                reserved in that case.
+        """
+        device = os.stat(target_dir).st_dev
+        with self._lock:
+            free        = self._probe(target_dir)
+            outstanding = self._reserved.get(device, 0)
+            if free - outstanding - need < self._min_free:
+                raise InsufficientSpaceError(
+                    f"insufficient free space: {fmt_size_mb(free)} free, "
+                    f"{fmt_size_mb(need + outstanding)} to be written, "
+                    f"min_free_space floor {fmt_size_mb(self._min_free)} "
+                    "(lower 'min_free_space' in config or free disk space)"
+                )
+            self._reserved[device] = outstanding + need
+        try:
+            yield
+        finally:
+            with self._lock:
+                self._reserved[device] -= need

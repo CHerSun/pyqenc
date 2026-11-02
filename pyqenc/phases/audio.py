@@ -30,6 +30,7 @@ from pyqenc.audio.chain import (
     ChainExecutionError,
     ResolvedChain,
     chain_output_path,
+    estimate_output_bytes,
     execute_chain,
     resolve_chain,
 )
@@ -56,6 +57,7 @@ from pyqenc.state import ArtifactState
 from pyqenc.stream_model import AudioOutput, AudioStream, File
 from pyqenc.utils.alive import AdvanceState, ProgressBar
 from pyqenc.utils.concurrency import run_bounded
+from pyqenc.utils.disk_space import InsufficientSpaceError, SpaceGuard
 from pyqenc.utils.fs import remove_stale_tmp_files
 from pyqenc.utils.yaml_utils import load_model, save_model
 
@@ -186,6 +188,7 @@ class AudioPhase(Phase[AudioPhaseResult]):
         collector: AppMetricsCollector,
     ) -> None:
         super().__init__(config, phases, collector=collector)
+        self._space_guard = SpaceGuard(config.min_free_space)
 
     # ------------------------------------------------------------------
     # Phase hooks
@@ -500,6 +503,7 @@ class AudioPhase(Phase[AudioPhaseResult]):
 
         produced = 0
         failed = 0
+        audio_dir.mkdir(parents=True, exist_ok=True)
         with ProgressBar(len(pending), title="AUDIO", total_count=len(pending)) as advance:
 
             async def process(art: Artifact) -> None:
@@ -510,11 +514,16 @@ class AudioPhase(Phase[AudioPhaseResult]):
                 label = f"[{output.chain_name}] {output.stream.file.path.stem}"
                 logger.debug("Producing %s", label)
                 try:
-                    with self._collector.time(AppMetricKey.AUDIO, output.chain_name):
+                    with (
+                        self._space_guard.ensure(audio_dir, need=estimate_output_bytes(chain, output.stream)),
+                        self._collector.time(AppMetricKey.AUDIO, output.chain_name),
+                    ):
                         await execute_chain(chain, output.stream, audio_dir)
                     art.state = ArtifactState.COMPLETE
                     produced += 1
                     advance(1, AdvanceState.SUCCESS)
+                except InsufficientSpaceError:
+                    raise  # the loud stop — never contained per-job
                 except NotImplementedError as exc:
                     art.state = ArtifactState.ABSENT
                     failed += 1
@@ -526,7 +535,13 @@ class AudioPhase(Phase[AudioPhaseResult]):
                     logger.error("%s — chain failed: %s", label, exc)
                     advance(1, AdvanceState.FAILED)
 
-            asyncio.run(run_bounded(pending, audio_cfg.concurrency, process))
+            try:
+                asyncio.run(run_bounded(pending, audio_cfg.concurrency, process))
+            except InsufficientSpaceError as exc:
+                # The loud stop: one line and a FAILED phase; outputs already
+                # produced stay valid for the recovery on a re-run.
+                logger.error("%s %s", FAILURE_SYMBOL_MINOR, exc.message)
+                return self._make_result(PhaseOutcome.FAILED, artifacts, exc.message)
 
         reused = sum(1 for a in artifacts if a.state == ArtifactState.COMPLETE) - produced
 

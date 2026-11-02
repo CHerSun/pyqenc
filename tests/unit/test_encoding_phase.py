@@ -175,6 +175,8 @@ from pyqenc.phases.encoding import _ChunkEncodingResult
 from pyqenc.quality import QualityLogs as _QL
 from pyqenc.quality import QualityMeasurement as _QE
 from pyqenc.stream_model import VideoStreamChunk as _VSC
+from pyqenc.utils.disk_space import InsufficientSpaceError
+from pyqenc.utils.disk_space import SpaceGuard as _SpaceGuard
 from pyqenc.utils.ffmpeg_runner import FFmpegRunResult as _FFR
 from pyqenc.utils.visualization import QualityMeasurer as _QMeasurer
 
@@ -249,6 +251,7 @@ def _run_encode(
             sampling           = 10,
             metric_prefix     = AppMetricKey.ENCODING,
             measure_attempts  = True,
+            space_guard       = _SpaceGuard(0),
         )
     else:
         encoder = _ChunkEncoder(
@@ -262,6 +265,7 @@ def _run_encode(
             sampling           = 10,
             metric_prefix     = AppMetricKey.ENCODING,
             measure_attempts  = measure_attempts,
+            space_guard       = _SpaceGuard(0),
         )
 
     attempt = tmp_path / "encoding" / "test_strategy" / "chunk_001.q18.0.mkv"
@@ -358,6 +362,7 @@ class TestMeasureAttemptsSeam:
             sampling          = 10,
             metric_prefix     = AppMetricKey.ENCODING,
             measure_attempts = True,
+            space_guard     = _SpaceGuard(0),
         )
 
         # The unmeasured run's residue: the attempt video, nothing else.
@@ -532,6 +537,7 @@ def _run_encode_with_targets(
         sampling           = 10,
         metric_prefix     = AppMetricKey.ENCODING,
         measure_attempts  = measure_attempts,
+        space_guard       = _SpaceGuard(0),
     )
 
     attempt = tmp_path / "encoding" / "test_strategy" / "chunk_001.q18.0.mkv"
@@ -592,6 +598,7 @@ class TestAttemptFrameCountSourcing:
             sampling           = 10,
             metric_prefix     = AppMetricKey.ENCODING,
             measure_attempts  = True,
+            space_guard       = _SpaceGuard(0),
         )
 
     def _target(self):
@@ -670,6 +677,7 @@ class TestEffectiveSamplingThreading:
             sampling           = 10,
             metric_prefix     = AppMetricKey.ENCODING,
             measure_attempts  = True,
+            space_guard       = _SpaceGuard(0),
         )
 
     def _evaluator(self, tmp_path: Path) -> _MM:
@@ -1322,3 +1330,61 @@ class TestOneWinnerPerChunkGuard:
         _assert_one_winner_per_chunk(
             result, chunks, [_STRATEGY_OBJ, _STRATEGY_ALT],
         )
+
+
+# ---------------------------------------------------------------------------
+# The free-space floor at the encoder (TODO §156 rework, 2026-11)
+# ---------------------------------------------------------------------------
+
+
+class TestSpaceFloorGatesFreshEncodes:
+    def test_refused_attempt_raises_the_loud_stop_and_never_encodes(self, tmp_path: Path) -> None:
+        """A fresh encode that would break the floor raises
+        InsufficientSpaceError out of encode_chunk BEFORE ffmpeg launches —
+        the owning phase converts it to its one-line FAILED result instead of
+        a per-chunk failure cascade.
+
+        Bug guarded: without the gate, a nearly-full disk only surfaces as an
+        ffmpeg ENOSPC failure per chunk after the damage is done.
+        """
+        strategy = _fixed_strategy()
+        chunk    = _chunk_mock(tmp_path)
+
+        fake_eval = _MM(spec=_QE)
+        fake_eval.targets_met = True
+        fake_eval.logs        = _QL()
+        fake_eval.metrics     = _measured(vmaf_min=95.0, vmaf_median=96.5)
+        fake_eval.frame_count = 120
+        evaluator = _MM(spec=_QMeasurer)
+        evaluator.work_dir = tmp_path
+        evaluator.measure_chunk.return_value = fake_eval
+
+        # A full filesystem: 0 bytes free against a 1-byte floor — every
+        # fresh encode is refused (reused attempts never reach the gate).
+        broke_guard = _SpaceGuard(1, probe=lambda _dir: 0)
+        encoder = _ChunkEncoder(
+            quality_measurer = evaluator,
+            work_dir         = tmp_path,
+            plan             = _FIXED_PLAN,
+            collector        = _MM(spec=_AppMetricsCollector),
+            crop_params       = None,
+            cleanup_level     = CleanupLevel.NONE,
+            visual_hash       = True,
+            sampling          = 10,
+            metric_prefix     = AppMetricKey.ENCODING,
+            measure_attempts = True,
+            space_guard      = broke_guard,
+        )
+
+        encode_mock = _MM(return_value=_FFR(returncode=0, success=True, stderr_lines=[], frame_count=120))
+        with (
+            _patch.object(encoder, "_check_existing_encoding", return_value=None),
+            _patch.object(encoder, "_encode_with_ffmpeg", encode_mock),
+            pytest.raises(InsufficientSpaceError),
+        ):
+            encoder.encode_chunk(
+                chunk       = chunk,
+                strategy     = strategy,
+                quality_targets = [],
+            )
+        encode_mock.assert_not_called()
