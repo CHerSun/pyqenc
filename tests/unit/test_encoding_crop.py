@@ -18,6 +18,7 @@ from pyqenc.stream_model import (
     VideoStreamChunk,
     VideoStreamInfo,
 )
+from pyqenc.utils.disk_space import SpaceGuard
 from pyqenc.utils.ffmpeg_runner import (
     _PROGRESS_FLAGS,
     FFmpegRequest,
@@ -48,6 +49,7 @@ def _make_encoder(crop_params: CropParams | None = None) -> ChunkEncoder:
         sampling=1,
         metric_prefix=AppMetricKey.ENCODING,
         measure_attempts=True,
+        space_guard=SpaceGuard(0),
     )
 
 

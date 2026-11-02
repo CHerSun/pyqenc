@@ -86,6 +86,7 @@ from pyqenc.summary_tables import (
     render_comparison_table,
 )
 from pyqenc.utils.alive import AdvanceState, BarAdvance, ProgressBar
+from pyqenc.utils.disk_space import InsufficientSpaceError, SpaceGuard
 from pyqenc.utils.ffmpeg_runner import FrameCountError, get_frame_count
 from pyqenc.utils.fs import remove_stale_tmp_files, safe_stat_size
 from pyqenc.utils.log_format import fmt_key_value_table, fmt_metric_value
@@ -399,6 +400,7 @@ class MergePhase(Phase[MergePhaseResult]):
         """Store the shared constructor state and the per-run stash."""
         super().__init__(config, phases, collector=collector)
         self._pending_reasons: dict[str, str] = {}
+        self._space_guard = SpaceGuard(config.min_free_space)
 
     def _log_key_params(self) -> None:
         """Log the merge phase key input params."""
@@ -954,6 +956,12 @@ class MergePhase(Phase[MergePhaseResult]):
                     ))
                     advance(source_duration, AdvanceState.SUCCESS)
 
+                except InsufficientSpaceError as exc:
+                    # The loud stop: the floor is broken for every remaining
+                    # strategy — one line, one FAILED phase. Outputs already
+                    # promoted stay valid for the recovery on a re-run.
+                    logger.error("%s %s", FAILURE_SYMBOL_MINOR, exc.message)
+                    return self._make_result(PhaseOutcome.FAILED, final_rows, exc.message)
                 except Exception:  # one bad strategy must not kill the rest
                     logger.exception("Merging strategy %s error", strategy_name)
                     advance(0, AdvanceState.FAILED)
@@ -1067,7 +1075,16 @@ class MergePhase(Phase[MergePhaseResult]):
         cmd_mkvmerge: list[str | os.PathLike] = ["mkvmerge", f"@{options_file}"]
         logger.debug("mkvmerge command: %s", " ".join(str(a) for a in cmd_mkvmerge))
 
-        with self._collector.time(AppMetricKey.MERGE, "concat"):
+        # The free-space floor gates the concat: the need is the sum of the
+        # winners' sizes — a fact, not an estimate, and already an
+        # over-estimate of the merged file (N per-chunk container headers
+        # become one). No margin on top.
+        winners_size = sum(safe_stat_size(path) or 0 for path in strategy_chunks)
+
+        with (
+            self._space_guard.ensure(merged_dir, need=winners_size),
+            self._collector.time(AppMetricKey.MERGE, "concat"),
+        ):
             mkvmerge_result = subprocess.run(
                 cmd_mkvmerge, capture_output=True, text=True, check=False,
             )

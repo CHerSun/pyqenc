@@ -53,6 +53,8 @@ from pyqenc.constants import (
     FFMPEG_ARG_AF,
     FFMPEG_ARG_BITRATE_A,
     FFMPEG_ARG_CODEC_A,
+    FLAC_BOUND_BYTES_PER_SAMPLE,
+    FLAC_BOUND_RATE_HZ,
     FLAC_CODEC,
     FLAC_EXTENSION,
     OUTPUT_FORMAT_MUXERS,
@@ -189,6 +191,26 @@ def _encode_params_from(inst: EncodeInstance) -> EncodeParams:
 # Bitrate scaling
 # ---------------------------------------------------------------------------
 
+def _parse_bitrate_bps(per_channel: str) -> int | None:
+    """Parse a per-channel bitrate string into bits per second.
+
+    Args:
+        per_channel: The per-channel bitrate string (``64k``, ``0.5m``).
+
+    Returns:
+        The bitrate in bits per second, or ``None`` when unparsable.
+    """
+    raw = per_channel.strip().lower()
+    try:
+        if raw.endswith("k"):
+            return int(raw[:-1]) * 1000
+        if raw.endswith("m"):
+            return int(float(raw[:-1]) * 1_000_000)
+    except ValueError:
+        pass
+    return None
+
+
 def _scale_bitrate(per_channel: str, channels: int) -> str:
     """Scale a per-channel bitrate string by the output channel count.
 
@@ -204,15 +226,51 @@ def _scale_bitrate(per_channel: str, channels: int) -> str:
     Returns:
         The total bitrate string (e.g. ``128k``).
     """
-    raw = per_channel.strip().lower()
-    try:
-        if raw.endswith("k"):
-            return f"{int(raw[:-1]) * channels}k"
-        if raw.endswith("m"):
-            return f"{int(float(raw[:-1]) * 1000) * channels}k"
-    except ValueError:
+    bps = _parse_bitrate_bps(per_channel)
+    if bps is None:
         logger.warning("Cannot parse bitrate_per_channel %r; using as-is", per_channel)
-    return per_channel
+        return per_channel
+    return f"{bps * channels // 1000}k"
+
+
+def estimate_output_bytes(resolved: ResolvedChain, stream: AudioStream) -> int:
+    """Bound one (track, chain) output's size, for the free-space floor.
+
+    Lossy chains: the effective bitrate times the track's duration — the
+    per-channel bitrate scaled by the SOURCE channel count, which is never
+    below the downmixed output's, so the bound holds for every chain.
+
+    FLAC (the no-``encode`` default): the PCM worst case. xiph documents
+    FLAC as uncontrollable in bitrate — from around 100% of the input PCM
+    rate (noise) down to almost 0 (silence) — so the bound is the decoded
+    PCM size: the studio-standard 48 kHz rate (guaranteed unchanged by the
+    project's no-resample norm; loudnorm's 192 kHz slip is a bug, TODO
+    §160, deliberately not fed into bounds) times 4 bytes per sample, the
+    widest depth ffmpeg's flac encoder takes.
+
+    A track without a container duration (rare tag-less streams) or an
+    unparsable bitrate returns ``0`` — the caller degrades to a plain
+    floor check rather than blocking on a guess.
+
+    Args:
+        resolved: The chain about to run (its effective ``encode`` decides
+                  the bound's shape).
+        stream:   The source audio stream (channels, duration).
+
+    Returns:
+        The output's size bound in bytes.
+    """
+    duration = stream.info.duration_seconds
+    if duration is None:
+        return 0
+    assert stream.info.layout is not None, "layout guaranteed by ExtractionPhase"
+    channels = stream.info.layout.channels
+    if resolved.encode.codec == FLAC_CODEC:
+        return int(FLAC_BOUND_RATE_HZ * FLAC_BOUND_BYTES_PER_SAMPLE * channels * duration)
+    bps = _parse_bitrate_bps(resolved.encode.bitrate_per_channel)
+    if bps is None:
+        return 0
+    return int(bps * channels * duration / 8)
 
 
 # ---------------------------------------------------------------------------

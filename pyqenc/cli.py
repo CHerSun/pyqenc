@@ -251,7 +251,7 @@ def _add_chunking_arguments(parser: argparse.ArgumentParser) -> None:
              "Lower = more sensitive (more scene cuts); ~15-50 is the meaningful range.",
     )
     parser.add_argument(
-        "--min-scene-length",
+        "--scene-min-length",
         type=int,
         default=None,
         help="Minimum frames per chunk (default: from config)",

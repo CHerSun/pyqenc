@@ -24,6 +24,7 @@ from pyqenc.app_metrics import AppMetricKey, AppMetricsCollector, ConvergenceUpd
 from pyqenc.constants import (
     APP_METRIC_KEY_MEASURE,
     APPROXIMATE_INDICATOR_SYMBOL,
+    ATTEMPT_RESERVE_BYTES,
     BRACKET_LEFT,
     BRACKET_RIGHT,
     ENCODED_OUTPUT_DIR,
@@ -80,6 +81,7 @@ from pyqenc.stream_model import (
 from pyqenc.summary_tables import ANCHOR_GLYPH, CONVENTION_SEPARATOR
 from pyqenc.utils.alive import AdvanceState, ProgressBar
 from pyqenc.utils.concurrency import run_bounded
+from pyqenc.utils.disk_space import InsufficientSpaceError, SpaceGuard
 from pyqenc.utils.ffmpeg_runner import FFmpegRequest, FFmpegRunResult, run_ffmpeg
 from pyqenc.utils.fs import remove_stale_tmp_files, safe_stat_size
 from pyqenc.utils.log_format import (
@@ -809,6 +811,7 @@ class ChunkEncoder:
         sampling:  int,
         metric_prefix:     AppMetricKey,
         measure_attempts:  bool,
+        space_guard:       SpaceGuard,
     ):
         """Initialize chunk encoder.
 
@@ -843,6 +846,10 @@ class ChunkEncoder:
                               metrics-absence tolerance); callers exercising it
                               must run a single-point quality domain where the
                               search never consumes metrics.
+            space_guard:       The run's free-space floor. Every fresh encode
+                              passes through it before ffmpeg starts, with a
+                              flat per-attempt reserve
+                              (:data:`ATTEMPT_RESERVE_BYTES`).
         """
         self.quality_measurer = quality_measurer
         self.work_dir          = work_dir
@@ -854,6 +861,7 @@ class ChunkEncoder:
         self._sampling = sampling
         self._metric_prefix    = metric_prefix
         self._measure_attempts = measure_attempts
+        self._space_guard      = space_guard
 
     def _get_attempt_path(
         self,
@@ -1288,12 +1296,18 @@ class ChunkEncoder:
                 # decode.
                 attempt_frames = sidecar.frame_count if sidecar is not None else 0
             else:
-                # Encode — real work.
+                # Encode — real work. The free-space floor gates every fresh
+                # encode with a flat reserve: attempt sizes vary by orders of
+                # magnitude across chunks and prediction was ruled not worth
+                # the tracking — the reserve keeps the concurrency accounting
+                # honest, min_free_space absorbs a single attempt outrunning it.
                 _any_real_work = True
                 output_file    = self._get_attempt_path(
                     chunk.safe_name(), strategy, quality=current_q
                 )
-                with self._collector.time(self._metric_prefix, strategy.display_name()):
+                with self._space_guard.ensure(
+                    output_dir, need=ATTEMPT_RESERVE_BYTES,
+                ), self._collector.time(self._metric_prefix, strategy.display_name()):
                     run_result = self._encode_with_ffmpeg(
                         chunk, strategy, current_q, output_file
                     )
@@ -2286,6 +2300,7 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
             sampling          = self._config.measurement.sampling,
             metric_prefix     = AppMetricKey.ENCODING,
             measure_attempts  = probe_result.plan.measures_attempts,
+            space_guard       = SpaceGuard(self._config.min_free_space),
         )
 
         pending_count  = len(pairs.pending)
@@ -2307,19 +2322,27 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
                     c = chunks_by_id[chunk_id]
                     advance(c.end_timestamp - c.start_timestamp, AdvanceState.SKIPPED)
 
-            enc_result = asyncio.run(
-                _encode_pairs(
-                    encoder         = encoder,
-                    chunks          = chunks,
-                    strategies      = strategies,
-                    quality_targets = presentation_targets,
-                    concurrency     = self._config.encoding.concurrency,
-                    collector       = self._collector,
-                    phase_recovery  = pairs,
-                    metric_prefix   = AppMetricKey.ENCODING,
-                    advance         = advance,
+            try:
+                enc_result = asyncio.run(
+                    _encode_pairs(
+                        encoder         = encoder,
+                        chunks          = chunks,
+                        strategies      = strategies,
+                        quality_targets = presentation_targets,
+                        concurrency     = self._config.encoding.concurrency,
+                        collector       = self._collector,
+                        phase_recovery  = pairs,
+                        metric_prefix   = AppMetricKey.ENCODING,
+                        advance         = advance,
+                    )
                 )
-            )
+            except InsufficientSpaceError as exc:
+                # The loud stop: one line and a FAILED phase, not one failed
+                # pair per remaining chunk. In-flight attempts (executor
+                # threads) finish before asyncio.run returns; their outputs
+                # stay valid for the recovery on a re-run.
+                logger.error("%s %s", FAILURE_SYMBOL_MINOR, exc.message)
+                return self._make_result(PhaseOutcome.FAILED, [], exc.message)
             advance(0, AdvanceState.COMPLETE)
 
         if enc_result.failed_chunks:

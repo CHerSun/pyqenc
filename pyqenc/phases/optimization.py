@@ -31,6 +31,7 @@ from pyqenc.app_metrics import AppMetricKey
 from pyqenc.constants import (
     ENCODED_OUTPUT_DIR,
     ENCODING_WORKSPACE_DIR,
+    FAILURE_SYMBOL_MINOR,
     WARNING_SYMBOL,
 )
 from pyqenc.models import (
@@ -68,6 +69,7 @@ from pyqenc.summary_tables import (
     render_comparison_table,
 )
 from pyqenc.utils.alive import AdvanceState, ProgressBar
+from pyqenc.utils.disk_space import InsufficientSpaceError, SpaceGuard
 from pyqenc.utils.fs import safe_stat_size
 from pyqenc.utils.log_format import fmt_key_value_table
 from pyqenc.utils.visualization import QualityMeasurer
@@ -848,6 +850,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
                 sampling = self._config.measurement.sampling,
                 cleanup_level    = job_result.cleanup,
                 metric_prefix    = AppMetricKey.OPTIMIZATION,
+                space_guard      = SpaceGuard(self._config.min_free_space),
             )
             # Duration-weighted bar (Σ test-chunk durations × strategies),
             # advanced once per completed pair by that pair's duration.
@@ -878,23 +881,29 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
                         c = chunks_by_id[chunk_id]
                         advance(c.end_timestamp - c.start_timestamp, AdvanceState.SKIPPED)
 
-                asyncio.run(
-                    _encode_pairs(
-                        encoder           = encoder,
-                        chunks            = test_chunks,
-                        strategies        = strategies_to_test,
-                        # Fixed mode presents the test encodes no comparison
-                        # basis: config targets drive no verdict there, and
-                        # the anchor's target set does not exist until these
-                        # results do.
-                        quality_targets   = [] if fixed else plan.targets,
-                        concurrency       = self._config.encoding.concurrency,
-                        collector         = self._collector,
-                        phase_recovery    = phase_recovery,
-                        advance           = advance,
-                        metric_prefix     = AppMetricKey.OPTIMIZATION,
+                try:
+                    asyncio.run(
+                        _encode_pairs(
+                            encoder           = encoder,
+                            chunks            = test_chunks,
+                            strategies        = strategies_to_test,
+                            # Fixed mode presents the test encodes no comparison
+                            # basis: config targets drive no verdict there, and
+                            # the anchor's target set does not exist until these
+                            # results do.
+                            quality_targets   = [] if fixed else plan.targets,
+                            concurrency       = self._config.encoding.concurrency,
+                            collector         = self._collector,
+                            phase_recovery    = phase_recovery,
+                            advance           = advance,
+                            metric_prefix     = AppMetricKey.OPTIMIZATION,
+                        )
                     )
-                )
+                except InsufficientSpaceError as exc:
+                    # The loud stop — one line and a FAILED phase; in-flight
+                    # test encodes finish first and stay valid for recovery.
+                    logger.error("%s %s", FAILURE_SYMBOL_MINOR, exc.message)
+                    return self._make_result(PhaseOutcome.FAILED, [], exc.message)
                 advance(0, AdvanceState.COMPLETE)
 
         # The live ledger after processing — one source for the derived
@@ -1561,6 +1570,7 @@ def _make_encoder(
     sampling:        int,
     cleanup_level:    CleanupLevel,
     metric_prefix:    AppMetricKey,
+    space_guard:      SpaceGuard,
 ) -> ChunkEncoder:
     """Construct a ``ChunkEncoder`` for test encodes.
 
@@ -1582,6 +1592,8 @@ def _make_encoder(
         sampling:         Frame subsampling factor for quality metric generation.
         cleanup_level:    Run cleanup level for rolling attempt cleanup.
         metric_prefix:    Top-level key prefixing the encoder's dotted keys.
+        space_guard:      The run's free-space floor (test encodes pass
+                          through it like every fresh attempt).
 
     Returns:
         Configured ``ChunkEncoder`` instance.
@@ -1598,6 +1610,7 @@ def _make_encoder(
         sampling         = sampling,
         metric_prefix     = metric_prefix,
         measure_attempts  = True,
+        space_guard       = space_guard,
     )
 
 

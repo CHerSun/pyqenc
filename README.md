@@ -215,7 +215,7 @@ Config build order: built-in defaults → `~/.config/pyqenc/config.yaml` → `./
 
 **FFmpeg / MKVToolNix not found** — install them and ensure they're in your PATH (`ffmpeg -version`, `mkvmerge --version`).
 
-**Insufficient disk space** — the whole process typically needs several times the source size (attempts for several strategies + audio + merged outputs). Before encoding, pyqenc logs a space estimate (required and recommended ranges) against the available space. Use `--work-dir` to point to a larger disk if required.
+**Insufficient disk space** — the whole process typically needs several times the source size (attempts for several strategies + audio + merged outputs). Every produced item (encode attempt, audio output, merged video) is checked against the work filesystem's free space before it starts, and production stops loudly when an item would leave less than `min_free_space` (default `1 GiB`) free — so a run never consumes the last bytes of the disk. Everything already produced stays valid; free space and re-run to resume. Use `--work-dir` to point to a larger disk if required.
 
 **Slow encoding** — try a faster codec or faster codec preset (`fast`, `medium`). If CPU is not fully utilized - add `--concurrency 2` or higher (sets every knob — encoding, audio, and the standalone `measure` command; per-domain values live in the config file, values above the CPU count are clamped). OR switch to GPU-encoding. Besides concurrency all other options affect resulting quality and/or size. Effective encoding is slow and CPU-only. You can also choose to use fixed quality encoding instead of quality targeting - quality search is costly, convergence is in ~4.1 attempts currently.
 

@@ -18,23 +18,20 @@ CROP_SOURCE_MANUAL = "manual"
 CROP_SOURCE_DETECTED = "detected"
 """``probe.yaml`` crop provenance: the value came from black-border detection."""
 
-# Disk space estimation constants
-OVERHEAD_TIGHT_MARGIN = 1.2
-"""Multiplier applied to the max estimated space to derive the recommended space threshold.
-A 20% buffer on top of the upper-bound estimate."""
+FLAC_BOUND_RATE_HZ = 48_000
+"""Sample rate assumed by the FLAC worst-case size bound — the studio-standard
+rate the project's no-resample norm guarantees on the encoder input."""
 
-# Pixel-based space estimation constants
-BITS_PER_PIXEL_ENCODED = 0.10
-"""Estimated bits per pixel for encoded video output (attempts, final). Covers a wide range of
-content at typical quality targets. Tune this constant if estimates are consistently off."""
-AVG_ATTEMPTS_PER_CHUNK = 4.1
-"""Average number of quality search attempts per chunk per strategy. Used to estimate space consumed
-by intermediate attempt files during the encoding phase. Value was taken from metrics measured."""
+FLAC_BOUND_BYTES_PER_SAMPLE = 4
+"""Per-sample byte width assumed by the FLAC worst-case size bound — the widest
+depth ffmpeg's flac encoder accepts (32-bit covers 16- and 24-bit sources)."""
 
-# Fallback source-size multiplier (used only when stream pixel data is unavailable)
-OVERHEAD_PER_STRATEGY_FALLBACK = 2.5
-"""Fallback multiplier per encoding strategy relative to source size.
-Used only when pixel-based estimation is not possible (no VideoStreamInfo available)."""
+ATTEMPT_RESERVE_BYTES = 300 * 1024 * 1024
+"""Flat per-attempt space reserve (the free-space floor's ``need`` for a fresh
+encode). Deliberately scale-blind: attempt sizes vary by orders of magnitude
+across chunks, and predicting them was ruled not worth the tracking — a flat
+reserve keeps the concurrency accounting honest, and ``min_free_space``
+absorbs the variance of any single attempt outrunning it."""
 
 # Vertical delimiters
 LINE_WIDTH  = 72

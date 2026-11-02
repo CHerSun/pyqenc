@@ -47,7 +47,6 @@ from pyqenc.phases.extraction import ExtractionPhase
 from pyqenc.phases.job import JobPhase
 from pyqenc.stream_model import ExtendedVideoStream, VideoStream
 from pyqenc.utils.crop import detect_crop_parameters
-from pyqenc.utils.disk_space import log_disk_space_info
 from pyqenc.utils.ffmpeg_runner import FrameCountError, get_frame_count
 from pyqenc.utils.fs import remove_stale_tmp_file
 from pyqenc.utils.timestamps import count_frames
@@ -370,19 +369,6 @@ class ProbePhase(Phase[ProbePhaseResult]):
             stream      = video,
             frame_count = frame_count,
             crop        = crop,
-        )
-
-        # Disk-space estimate on the resolved stream (log-only). The plan
-        # lives here — the head of the video chain — so the strategy counts
-        # come from Probe's own context (the estimate moved here from
-        # Extraction together with the plan; audio-only registries never
-        # see it).
-        n_strategies = len(self._plan.strategies)
-        log_disk_space_info(
-            stream         = video,
-            work_dir       = self._deps[JobPhase].work_dir,
-            min_strategies = 1 if (self._plan.optimize or n_strategies == 0) else n_strategies,
-            max_strategies = max(1, n_strategies),
         )
 
         return self._make_result(

@@ -46,6 +46,7 @@ from pyqenc.models import (
     quality_alignment_error,
 )
 from pyqenc.utils.naming import is_filesystem_safe_name
+from pyqenc.utils.sizes import SizeYaml
 
 _logger = logging.getLogger(__name__)
 
@@ -478,6 +479,8 @@ class AppConfig(BaseModel):
         optimization: Strategy-selection tuning (tolerance, test basis).
         audio:        Audio processing settings (filter palette, chains, select).
         measurement:  Measurement phase settings (sampling factor).
+        min_free_space: Bytes that must stay free on the work filesystem
+                      after every produced item (the free-space floor).
         codecs:       Map of codec name → :class:`~pyqenc.models.CodecConfig`.
         profiles:     Map of profile name → :class:`ProfileConfig`.
 
@@ -502,6 +505,7 @@ class AppConfig(BaseModel):
     optimization: OptimizationConfig
     audio:        AudioConfig
     measurement:  MeasurementConfig
+    min_free_space: SizeYaml
     codecs:       dict[str, CodecConfig]
     profiles:     dict[str, ProfileConfig]
 

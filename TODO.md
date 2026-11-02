@@ -28,16 +28,6 @@
 
 ---
 
-## 33. (low) Disk-space estimation — single Probe-hosted call, log-only
-
-- A size-estimation module exists (`utils/disk_space.py`, `SpaceEstimate`, pixel/bpp heuristics). The original JobPhase-era invocation (cached `job.yaml` metadata, commented-out insufficient-space branch) is fully gone — no estimate code remains in `job.py`.
-- Timeline: JobPhase (original) → ExtractionPhase (`2026-09-25 file-stream-model` Task 4, on the enumerated `VideoStreamInfo`) → ProbePhase (`2026-10-05`, cc63e55): the estimate reads `plan.strategies` and Probe owns the plan (the video chain's entry context; audio consumption is negligible next to the strategy-multiplied video work, and the audio registry carries no plan). USER: "space estimation needs a complete rework. But right now - just a fast solution."
-
-**Questions to think about:** per-phase re-estimates later in the pipeline?
-Keep log-only?
-
----
-
 ## 38. Single source of truth enforced via explicitly required function arguments
 
 One of my key mottos is - one source of truth. For config - that's default_config.yaml, which must provide all needed values.
@@ -74,22 +64,6 @@ With all params being configurable in the config, including ability to disable t
 Why? Movies regularly get too long chunks. Long chunk encoding kills the quality knob searching.
 
 ---
-
-## 50. Better space estimations
-
-In general I like how space estimation looks. Maybe we don't need required/recommended if we already have a min-max values.
-The numbers on space estimations look to be quite off the actual. We need some way to better estimate space knowing the config (cleanup levels, bitrates, etc; what to do with targets?) and streams available (number of audio streams; video stream presence, etc).
-
-> 2026-09-28 12:13 [[96mINFO[0m] Source video size            0.35 GB
-> 2026-09-28 12:13 [[96mINFO[0m] Estimated required space     1.49 ... 4.48 GB
-> 2026-09-28 12:13 [[96mINFO[0m] Estimated recommended space  1.79 ... 5.38 GB
-> 2026-09-28 12:13 [[96mINFO[0m] Available space              198.82 GB
-
-Just a few thoughts:
-- maybe the phase itself should give estimation? Like finalize, but the first call instead to ask for space estimation. Not sure, looks difficult
-- maybe for targets we should add profiles. Something like targets profile "high", "medium", "low", with their own sets of targets each. But also a hint on approximate bits per pixel? like 0.1 for medium, 0.15 for high, 0.08 for low?
-- need a research there
-- 2026-10-05 (user): "Honestly, space estimation needs a complete rework. But right now - just a fast solution" — the current form (Probe-hosted, plan-aware, log-only; see §33) is explicitly a placeholder; fold any rework of this item with §33's open questions (required vs recommended ranges, config-awareness, where in the pipeline it runs).
 
 ## 51. (HIGH) QualitySearchV3 is outright broken
 
@@ -989,14 +963,6 @@ no custom ffmpeg builds allowed. Should safely fall back to CPU-based on failure
 
 ---
 
-## 156. (fast) remove space estimation
-
-proper space estimation is troublesome to get - need to preview all producing phases, profiles / targets, etc. Too cumbersome, too much upkeep. And current space estimation is pretty much useless.
-instead check free space before each item is produced - if lower then config-defined - stop. We don't want to consume absolutely every byte (could lead to system problems).
-for merge item production - it produces large items. We can calculate how much space is required beforehand (sum size of winners for the strategy) - so check that + config-defined.
-
----
-
 ## 157. pyright drift — 25 errors in visualization/metrics utilities
 
 - 2026-10-31 check (`uvx pyright --pythonpath .venv\Scripts\python.exe pyqenc`): 25 errors, 0 in app_config/cli/models — all in `utils/visualization.py` (22: matplotlib/pandas stubbing — `Axes`/`MultipleLocator`/`Line2D` not-exported families, min/max over pandas generators, one possibly-unbound), `quality_metrics.py` (2: `.clip` on float), `utils/alive.py` (1).
@@ -1040,7 +1006,26 @@ And the key difference is settings (global) vs input-based (dependencies of the 
 
 ---
 
-## Last known = 159
+## 160. loudnorm resamples output to 192 kHz — must preserve source rate
+
+ffmpeg's loudnorm filter in linear (two-pass) mode outputs 192 kHz audio regardless of the
+input rate. Per project norms, filters must not change sample rate / bit depth / channel
+count unless explicitly requested — loudnorm is the offender. The chain executor must add a
+post-filter resample back to the source rate (or otherwise pin it), so the processed audio
+keeps the original parameters. Discovered via the free-space work: the FLAC worst-case size
+bound deliberately ignores the 192 kHz intermediate (uses the source rate), because the
+resample itself is a bug to fix here, not behavior to account for.
+
+---
+
+## 161. CLI subcommands lack proper description
+
+They currently hold all their arguments, but not explanation to human. Like, what is `video` for? or `extract`?
+No examples too.
+
+---
+
+## Last known = 161
 
 Keep this updated, so we can keep continuous numbering even on last todo item deletion.
 Keep this the last entry for easy human updates.
