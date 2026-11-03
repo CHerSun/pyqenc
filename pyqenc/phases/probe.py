@@ -177,18 +177,23 @@ class ProbePhaseResult(PhaseResult):
         return self.stream.payload.scale
 
     def probe_fingerprint(self) -> Fingerprint:
-        """The opaque probe-facts key: frame count + crop + resolved scale.
+        """The opaque probe-facts key: frame count + crop + the applied scale filter.
 
         THE downstream invalidation key over the probe's pixel-shaping facts
         (replacing the structured field-wise facet comparison) — persisted by
         the optimization and merge sidecars and compared with ``==``, like
-        every strategy fingerprint. The frame count comes from the live
-        upstream result (unknown stays unknown on both sides). Opaque by
-        design: the change SITE (the probe rewrite) logs what changed.
+        every strategy fingerprint. The scale enters as its APPLIED filter
+        (``to_ffmpeg_filter()``), not the resolved model: the mode label is
+        not pixel-shaping — contain and cover reaching the same dimensions
+        apply the identical filter and must key identically (only ``exact``
+        differs at equal dimensions, via its ``setsar=1``). The frame count
+        comes from the live upstream result (unknown stays unknown on both
+        sides). Opaque by design: the change SITE (the probe rewrite) logs
+        what changed.
         """
         return fingerprinter.of_text(
             f"{self.stream.payload.frame_count if self.stream is not None else 0}"
-            f"|{self.crop}|{self.scale}"
+            f"|{self.crop}|{self.scale.to_ffmpeg_filter()}"
         )
 
 

@@ -30,8 +30,10 @@ from pyqenc.models import (
     ArtifactState,
     CleanupLevel,
     CropParams,
+    Fingerprint,
     PhaseOutcome,
     ResolvedScale,
+    ScaleAlgorithm,
     ScaleMode,
     SizedFingerprint,
 )
@@ -39,7 +41,7 @@ from pyqenc.phase import Artifact, PhaseRegistry
 from pyqenc.phases.extraction import ExtractionPhase, ExtractionPhaseResult
 from pyqenc.phases.job import JobPhase, JobPhaseResult
 from pyqenc.phases.probe import ProbePhase, ProbePhaseResult, ProbeSidecar
-from pyqenc.stream_model import ProbedFile, VideoStream, VideoStreamInfo
+from pyqenc.stream_model import ExtendedVideoStream, ProbedFile, VideoStream, VideoStreamInfo
 from pyqenc.utils.yaml_utils import load_model, save_model
 from tests.test_metrics_integration import (
     _dotted_groups,
@@ -356,6 +358,58 @@ class TestDeriveResultingResolution:
             info = VideoStreamInfo(track_id=0),
         )
         assert _derive_resulting_resolution(video, CropParams(), ResolvedScale()) is None
+
+
+class TestProbeFingerprint:
+    """The downstream key's equivalence classes over the pixel-shaping facts."""
+
+    @staticmethod
+    def _fingerprint(scale: ResolvedScale) -> Fingerprint:
+        """Fingerprint of a minimal completed result carrying the scale."""
+        result = ProbePhaseResult(
+            outcome = PhaseOutcome.COMPLETED,
+            message = "",
+            plan    = _PLAN,
+            stream  = Artifact(payload=ExtendedVideoStream(
+                stream      = _make_video_stream(Path("s.mkv")),
+                frame_count = 1000,
+                crop        = CropParams(top=22, bottom=22),
+                scale       = scale,
+            ), state=ArtifactState.COMPLETE),
+        )
+        fp = result.probe_fingerprint()
+        assert isinstance(fp, Fingerprint)
+        return fp
+
+    def test_happy_path_contain_and_cover_at_same_dims_key_identically(self) -> None:
+        """Bug guarded: the mode label is not pixel-shaping — contain and
+        cover reaching the same dimensions apply the identical filter, so a
+        mode switch between them must not invalidate anything downstream."""
+        contain = ResolvedScale(mode=ScaleMode.CONTAIN, width=446, height=240, algorithm=ScaleAlgorithm.LANCZOS)
+        cover = ResolvedScale(mode=ScaleMode.COVER, width=446, height=240, algorithm=ScaleAlgorithm.LANCZOS)
+        assert self._fingerprint(contain) == self._fingerprint(cover)
+
+    def test_happy_path_off_and_no_stream_key_like_empty(self) -> None:
+        """OFF (the "" filter) and a failed probe (no stream) share the
+        empty-shaping shape with concrete zero-crop facts."""
+        off = self._fingerprint(ResolvedScale())
+        assert self._fingerprint(ResolvedScale()) == off  # reflexive
+
+    def test_exact_at_same_dims_differs_via_setsar(self) -> None:
+        """Exact redefines geometry (setsar=1) at equal dimensions — the one
+        mode switch that IS a product change and must invalidate."""
+        contain = ResolvedScale(mode=ScaleMode.CONTAIN, width=446, height=240, algorithm=ScaleAlgorithm.LANCZOS)
+        exact = ResolvedScale(mode=ScaleMode.EXACT, width=446, height=240, algorithm=ScaleAlgorithm.LANCZOS)
+        assert self._fingerprint(contain) != self._fingerprint(exact)
+
+    def test_algorithm_and_dimension_changes_differ(self) -> None:
+        """The applied transformation's other two components each key."""
+        base = ResolvedScale(mode=ScaleMode.CONTAIN, width=446, height=240, algorithm=ScaleAlgorithm.LANCZOS)
+        other_alg = ResolvedScale(mode=ScaleMode.CONTAIN, width=446, height=240, algorithm=ScaleAlgorithm.BICUBIC)
+        other_dims = ResolvedScale(mode=ScaleMode.CONTAIN, width=448, height=240, algorithm=ScaleAlgorithm.LANCZOS)
+        base_fp = self._fingerprint(base)
+        assert base_fp != self._fingerprint(other_alg)
+        assert base_fp != self._fingerprint(other_dims)
 
 
 # ---------------------------------------------------------------------------
