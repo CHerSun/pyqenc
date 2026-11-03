@@ -231,15 +231,26 @@ class TestMeasuresAttempts:
         plan = _resolve_with_override(["h265-aq"], (Decimal("18"), Decimal("18")))
         assert plan.measures_attempts is True
 
-    def test_fixed_no_measure_with_optimize_multi_keeps_attempts(self) -> None:
-        """Optimize on + multiple strategies: the comparison judges attempts —
-        they stay measured; only merged outputs skip."""
+    def test_fixed_no_measure_skips_attempts_even_with_elimination(self) -> None:
+        """The elimination feeds on the optimization phase's own measured
+        test population, never on full-video attempts — opted-out reporting
+        (no judged tables, no merged measurement) leaves them unconsumed."""
         plan = _config_with_strategies("h265-aq", "h264").build_encoding_plan(
             optimize=True, measure=False, quality=(Decimal("18"), Decimal("18")),
         )
         assert plan.fixed_quality is True
         assert len(plan.strategies) == 2
-        assert plan.measures_attempts is True
+        assert plan.measures_attempts is False
+
+    def test_fixed_no_optimize_skips_attempt_measurement(self) -> None:
+        """No elimination runs, so no anchor exists to judge attempts — they
+        encode unmeasured even with measurements on (the merged-output
+        measurement remains)."""
+        plan = _config_with_strategies("h265-aq", "h264").build_encoding_plan(
+            optimize=False, measure=True, quality=(Decimal("18"), Decimal("18")),
+        )
+        assert plan.fixed_quality is True
+        assert plan.measures_attempts is False
 
     def test_fixed_no_measure_no_elimination_skips_attempts(self) -> None:
         """No elimination applies (--no-optimize or a single strategy): the

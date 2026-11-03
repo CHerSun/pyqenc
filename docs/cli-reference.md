@@ -64,8 +64,8 @@ These options apply to `auto` and `video` (the video chain resolvers).
 | `--targets TARGETS`       | Quality targets: a target profile name or raw pairs (see [Quality Target Format](#quality-target-format))                                                                       | `default_target_profile` from config (`high`) |
 | `--strategies STRATEGIES` | Encoding strategies (see [Strategy Format](#strategy-format))                                                                                                                  | from config (`h264*,h265*`)        |
 | `-q, --quality V`         | Quality knob override for every matched strategy: a single value (`18`) pins it — a [fixed-quality run](./quality-targeting.md#fixed-quality-mode-q) with the per-chunk search disabled; a pair (`18:24`, `18-24`, `18..24`, order-free) constrains the search band. Replaces profile-level `quality_range` | off (config ranges) |
-| `--no-optimize`           | Disable optimization — produce output for all strategies (no elimination; measurements still run, including the optimization-phase anchor that feeds the winner-limiter table) | `False` (optimization enabled)     |
-| `--no-measure`            | Skip quality measurements — always the merged-output one, plus attempt measurement and the optimization phase when nothing consumes them; see [Measurement Opt-Out](#measurement-opt-out---no-measure) | `False` (measurements enabled)    |
+| `--no-optimize`           | Disable optimization — produce output for all strategies. Fixed runs skip the optimization phase and attempt measurements entirely (nothing eliminates, no anchor judges the attempts); the merged-output measurement stays unless `--no-measure` | `False` (optimization enabled)     |
+| `--no-measure`            | Skip quality measurements — always the merged-output one, plus all attempt measurements on fixed runs; see [Measurement Opt-Out](#measurement-opt-out---no-measure) | `False` (measurements enabled)    |
 | `--sampling N`            | Frame sampling for quality measurement: every N-th frame. Lower = more precise but slower. Measurements precision directly affect encoding results. sampling=1 is recommended. Short chunks automatically use a lower factor (keeps >=20 VMAF readings after the first-frame exclusion from the statistics). | from config (`1`)                  |
 | `--no-visual-hash`        | Disable emoji visual-hash prefix on chunk log lines                                                                                                                            | off                                |
 | `--scale W[xH]`           | Scale the encoded output to this resolution (the archive-shrink tool). Crop is applied first; no upscaling (except a deliberate `exact`); a target the source already satisfies is a no-op. The scaler is `encoding.scale_algorithm` from config (`lanczos`) | off                                |
@@ -74,18 +74,19 @@ These options apply to `auto` and `video` (the video chain resolvers).
 ### Measurement Opt-Out (`--no-measure`)
 
 One rule decides every skip: measurement runs iff something consumes it — a
-decision (the per-chunk search steering, optimization's strategy comparison)
-or reporting. `--no-measure` opts out of the reporting half.
+decision (the per-chunk search steering, the elimination's test population)
+or reporting (judged attempts, the merged-output measurement). `--no-measure`
+opts out of the reporting half.
 
 - **Searched runs:** merged-output measurement is skipped; everything else is
   unchanged — the search itself still measures (it steers by the results).
-- **Fixed runs:** merged-output measurement is always skipped. Attempt
-  measurement and the optimization phase are both skipped when no elimination
-  applies — `--no-optimize` or a single strategy (nothing judges the
-  attempts: no optimization phase, no anchor). With optimize on and multiple
-  strategies the comparison runs normally (dominance pruning, anchor
-  election, judged attempts, winner-limiter table) and only the merged-output
-  measurement is skipped.
+- **Fixed runs:** attempts are measured only for the judged reporting an
+  anchor makes meaningful — optimize and measurement both on. `--no-optimize`
+  skips the optimization phase entirely: attempts encode unmeasured while the
+  merged-output measurement remains. `--no-measure` skips attempts on every
+  fixed run; the phase itself still runs when an elimination needs it
+  (optimize on, multiple strategies), feeding on its own measured test
+  population while attempts and merged outputs go unmeasured.
 
 Runs with unmeasured attempts write no attempt or winner sidecars — winners
 are video-only, and same-flag reruns resume from them directly. A later run

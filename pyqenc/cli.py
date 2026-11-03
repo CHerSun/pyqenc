@@ -328,7 +328,11 @@ def _add_quality_arguments(parser: argparse.ArgumentParser) -> None:
         action="store_false",
         dest="optimize",
         default=True,
-        help="Disable optimization phase and produce output for all strategies.",
+        help=(
+            "Disable optimization phase and produce output for all strategies. "
+            "Fixed runs skip attempt measurements too (no elimination, no "
+            "anchor to judge them); the merged-output measurement stays."
+        ),
     )
     parser.add_argument(
         "-N", "--no-measure",
@@ -339,9 +343,9 @@ def _add_quality_arguments(parser: argparse.ArgumentParser) -> None:
             "Skip quality measurements: always the merged-output measurement "
             "(its target verdicts and missed-target warnings are not produced "
             "either; run 'pyqenc measure <output>' afterwards for quality "
-            "metrics), plus attempt measurement and the optimization phase "
-            "when nothing consumes them — a fixed run with --no-optimize or "
-            "a single strategy. The per-chunk search itself always measures; "
+            "metrics), plus attempt measurement on fixed runs (a multi-"
+            "strategy elimination still measures its own small test "
+            "population). The per-chunk search itself always measures; "
             "it steers by the results."
         ),
     )

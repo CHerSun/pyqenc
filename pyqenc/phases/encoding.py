@@ -2002,9 +2002,10 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
         Fixed compared runs judge the anchor targets (config targets are
         search-tuned vocabulary); searched runs judge the configured
         targets.  Uncompared fixed runs carry no basis — the empty set
-        extinguishes the winning-limiter table.  Measurement-skipping
-        runs (``--no-measure --no-optimize``) judge nothing: no anchor
-        was elected and no attempt metrics exist to judge.
+        extinguishes the winning-limiter table.  Fixed runs with unmeasured
+        attempts (``--no-measure``, or ``--no-optimize`` running anchorless)
+        judge nothing: no anchor was elected and no attempt metrics exist
+        to judge.
 
         Returns:
             The judging target set.

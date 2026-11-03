@@ -317,22 +317,32 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         strategies = plan.strategies
 
         if plan.fixed_quality:
-            self._log_fixed_quality_banner(strategies, measure=plan.measure)
-            # §123: fixed runs keep the test population — single-strategy
-            # and `--no-optimize` included (the latter with dominance
-            # pruning disabled at selection); the anchor mechanics and its
-            # anchor targets behave identically to any compared fixed run.
-            # The `--no-measure` exception: the phase runs only when a
-            # decision is needed (optimize on, multiple strategies) — an
-            # anchor nothing judges (attempts unmeasured, merge unmeasured)
-            # is not a decision.
-            if plan.measure or (plan.optimize and len(strategies) > 1):
-                return None
-            logger.info(
-                "measurement opted out and no strategy decision is needed — "
-                "optimization phase skipped; run 'pyqenc measure <output>' "
-                "afterwards for quality metrics"
+            self._log_fixed_quality_banner(
+                strategies, optimize=plan.optimize, measure=plan.measure,
             )
+            # §123: fixed runs keep the test population — single-strategy
+            # included (measured runs); the anchor mechanics and its anchor
+            # targets behave identically to any compared fixed run. Two
+            # skip cases, both anchorless: `--no-optimize` (nothing
+            # eliminates — attempts encode unmeasured, the merged-output
+            # measurement remains) and the measurement opt-out with no
+            # elimination needing the population (a single strategy; with
+            # multiple strategies the elimination still runs on its own
+            # measured test population even opted out).
+            if plan.optimize and (plan.measure or len(strategies) > 1):
+                return None
+            if plan.measure:
+                logger.info(
+                    "optimization disabled — no elimination: every selected "
+                    "strategy encodes the full video; attempts encode "
+                    "unmeasured, the merged-output measurement remains"
+                )
+            else:
+                logger.info(
+                    "measurement opted out and no strategy decision is needed — "
+                    "optimization phase skipped; run 'pyqenc measure <output>' "
+                    "afterwards for quality metrics"
+                )
             return self._all_strategies(dry_run)
 
         # All-strategies mode: triggered by the optimize flag being off or a
@@ -349,7 +359,13 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
 
         return self._all_strategies(dry_run)
 
-    def _log_fixed_quality_banner(self, strategies: list[Strategy], *, measure: bool) -> None:
+    def _log_fixed_quality_banner(
+        self,
+        strategies: list[Strategy],
+        *,
+        optimize: bool,
+        measure: bool,
+    ) -> None:
         """The fixed-mode WARNING banner (Req 5).
 
         One prominent block per fixed run on both optimization paths,
@@ -378,6 +394,11 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         if measure:
             logger.warning(
                 "  - merged-output measurement remains the final quality check"
+            )
+        elif optimize and len(strategies) > 1:
+            logger.warning(
+                "  - attempts encode unmeasured (reporting opted out); the "
+                "strategy elimination still measures its own test population"
             )
         logger.warning("")
 

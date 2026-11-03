@@ -761,15 +761,15 @@ class EncodingPlan(BaseModel):
         """Whether encoding attempts get quality measurements.
 
         The search always steers by measurements; a fixed run measures its
-        attempts only when an elimination-driven comparison judges them
-        (optimize on, multiple strategies) — without the optimization phase
-        there is no anchor to judge against, so a measurement-opted-out run
-        with nothing to eliminate measures nothing.
+        attempts only for the judged reporting an anchor makes meaningful
+        (optimize and measurement both on). The elimination itself never
+        consumes them — it feeds on the optimization phase's own measured
+        test population — so ``--no-optimize`` (no anchor) and the
+        measurement opt-out (no reporting) each skips them alone.
         """
         return (
             (not self._fixed_quality)
-            or self.measure
-            or (self.optimize and len(self.strategies) > 1)
+            or (self.optimize and self.measure)
         )
 
     def targeted(self, metrics: MeasuredMetrics) -> TargetedMetrics:
