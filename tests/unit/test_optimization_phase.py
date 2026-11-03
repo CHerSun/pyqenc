@@ -44,7 +44,7 @@ from pyqenc.quality_metrics import MetricStatKey, TargetedMetrics
 from pyqenc.quality_metrics import MetricStatKey as _K
 from pyqenc.quality_metrics import MetricType as _MT
 from pyqenc.quality_metrics import StatisticType as _ST
-from pyqenc.state import ArtifactState, ProbeFacet
+from pyqenc.state import ArtifactState
 from pyqenc.stream_model import ProbedFile
 from pyqenc.summary_tables import StrategyRow
 from pyqenc.utils.yaml_utils import save_model, write_yaml_atomic
@@ -190,7 +190,7 @@ def _persist_optimization(
         chunks      = fingerprinter.of_ids(
             a.payload.safe_name() for a in chunking.result.chunks
         ),
-        probe       = ProbeFacet.from_probe(probe.result),
+        probe       = probe.result.probe_fingerprint(),
         sampling    = phase._config.measurement.sampling,
         test_chunks = test_chunks if test_chunks is not None else ["chunk-001", "chunk-002"],
         summary     = summary,
@@ -932,7 +932,6 @@ class TestStrategyFingerprintWipe:
             SearchOptimizationSidecar,
             current_optimization_sidecar,
         )
-        from pyqenc.state import ProbeFacet
 
         # force=True grants the permission the fatal band demands.
         phase, work_dir = _make_phase(
@@ -961,7 +960,7 @@ class TestStrategyFingerprintWipe:
             chunks      = fingerprinter.of_ids(
                 a.payload.safe_name() for a in chunking.result.chunks
             ),
-            probe       = ProbeFacet.from_probe(probe.result),
+            probe       = probe.result.probe_fingerprint(),
             sampling    = phase._config.measurement.sampling,
             test_chunks = [c.safe_name() for c in chunks],
             summary     = [],

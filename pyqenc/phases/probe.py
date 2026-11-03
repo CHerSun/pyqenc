@@ -30,9 +30,15 @@ from pyqenc.models import (
     CropParams,
     CropYaml,
     EncodingPlan,
+    Fingerprint,
     PhaseOutcome,
     Resolution,
+    ResolvedScale,
+    ScaleMode,
+    ScaleYaml,
     SizedFingerprintYaml,
+    fingerprinter,
+    resolve_scale,
 )
 from pyqenc.phase import (
     Artifact,
@@ -63,9 +69,10 @@ if TYPE_CHECKING:
 class ProbeSidecar(BaseModel):
     """Sidecar model for ``probe.yaml`` (the slow facet).
 
-    Written by ``ProbePhase`` after resolving frame count and crop.  Contains
-    only the delta over the extraction inventory: ``frame_count``, ``crop``,
-    the crop's provenance, and the source identity key.
+    Written by ``ProbePhase`` after resolving frame count, crop, and the
+    output scale.  Contains only the delta over the extraction inventory:
+    ``frame_count``, ``crop``, the crop's provenance, the resolved scale,
+    and the source identity key.
 
     ``frame_count=0`` is the sentinel for "could not be determined" — no valid
     video has zero frames.  ``crop`` is non-optional: an empty
@@ -76,28 +83,36 @@ class ProbeSidecar(BaseModel):
     loads). Unset optional fields are omitted by the ``save_model``
     ``exclude_none`` convention (never silently dropped when set).
 
+    ``scale`` is the probe-resolved output scale (non-optional, ``off`` by
+    default) — a run-level pixel-shaping key like the crop: a changed
+    resolved value invalidates the cached sidecar via the same cheap
+    rewrite as a differing ``--crop`` override. The persisted form is the
+    one-line storage string (``scale: contain 1920x800 lanczos``).
+
     ``crop_source`` is HUMAN-FACING provenance (was the committed crop a
     manual override or a detection?) — it never participates in any
-    comparison (Req 23); downstream facet keys compare the frame count and
-    the crop values only. ``None`` for sidecars written before the field.
+    comparison (Req 23); downstream probe keys compare the frame count,
+    the crop values, and the resolved scale only. ``None`` for sidecars
+    written before the field.
 
     ``source`` is the identity key (the fingerprint pair, no path — Req 31) —
     REQUIRED: every write path carries it; a sidecar missing it fails
     validation → absent → the facet re-probes (Req 32 amended 2026-10-10).
 
     ``resulting_resolution`` is the HUMAN-FACING output dimensions
-    (``"<w>x<h>"``), derived at write time via the mathematical operator
-    ``Resolution(source) - crop`` — the encode's only dimension-changing
-    filter is the crop, so the value holds by construction. A display
-    fact only: never an invalidation key, never a completeness input
-    (removed from attempt/winner sidecars 2026-10-09); ``None`` when the
-    source resolution is unknown or for sidecars written before the
-    field.
+    (``"<w>x<h>"``), derived at write time as
+    ``Resolution(source) - crop``, then the resolved scale's output
+    dimensions when scaling is applied — the encode's only
+    dimension-changing filters are the crop and the scale, so the value
+    holds by construction. A display fact only: never an invalidation key,
+    never a completeness input; ``None`` when the source resolution is
+    unknown or for sidecars written before the field.
     """
 
     source:      SizedFingerprintYaml
     frame_count: int
     crop:        CropYaml = CropParams()
+    scale:       ScaleYaml = ResolvedScale()
     crop_source: str | None         = None
     resulting_resolution: str | None = None
 
@@ -105,8 +120,12 @@ class ProbeSidecar(BaseModel):
 logger = logging.getLogger(__name__)
 
 
-def _derive_resulting_resolution(video: VideoStream, crop: CropParams) -> str | None:
-    """The output dimensions (``source - crop``, the single derivation).
+def _derive_resulting_resolution(
+    video: VideoStream,
+    crop: CropParams,
+    scale: ResolvedScale,
+) -> str | None:
+    """The output dimensions (``source - crop``, then the scale).
 
     Human-facing display fact (the "Probe: done" line, ``probe.yaml``) —
     nothing keys on it. ``None`` when the source resolution is unknown;
@@ -115,7 +134,10 @@ def _derive_resulting_resolution(video: VideoStream, crop: CropParams) -> str | 
     """
     if not video.info.resolution:
         return None
-    return str(Resolution.parse(video.info.resolution) - crop)
+    cropped = Resolution.parse(video.info.resolution) - crop
+    if scale.mode != ScaleMode.OFF:
+        return f"{scale.width}x{scale.height}"
+    return str(cropped)
 
 
 
@@ -147,6 +169,28 @@ class ProbePhaseResult(PhaseResult):
         if self.stream is None:
             return CropParams()
         return self.stream.payload.crop
+
+    @property
+    def scale(self) -> ResolvedScale:
+        """Resolved output scale — derived from the stream artifact; ``OFF`` when absent."""
+        if self.stream is None:
+            return ResolvedScale()
+        return self.stream.payload.scale
+
+    def probe_fingerprint(self) -> Fingerprint:
+        """The opaque probe-facts key: frame count + crop + resolved scale.
+
+        THE downstream invalidation key over the probe's pixel-shaping facts
+        (replacing the structured field-wise facet comparison) — persisted by
+        the optimization and merge sidecars and compared with ``==``, like
+        every strategy fingerprint. The frame count comes from the live
+        upstream result (unknown stays unknown on both sides). Opaque by
+        design: the change SITE (the probe rewrite) logs what changed.
+        """
+        return fingerprinter.of_text(
+            f"{self.stream.payload.frame_count if self.stream is not None else 0}"
+            f"|{self.crop}|{self.scale}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -278,16 +322,31 @@ class ProbePhase(Phase[ProbePhaseResult]):
                 or self._crop_params != self._probe_sidecar.crop
             )
         )
+        # The resolved scale keys like the crop: a stale persisted value (the
+        # plan's request resolved differently against the cached crop) leaves
+        # the row pending — a cheap scale-only rewrite at execute, the frame
+        # count and detected crop stay cached.
+        scale_stale = False
+        if self._probe_sidecar is not None and not crop_override_active:
+            try:
+                scale_stale = (
+                    self._probe_sidecar.scale
+                    != self._resolve_output_scale(self._probe_sidecar.crop)
+                )
+            except ValueError as exc:
+                raise RecoveryError(f"Infeasible scale request: {exc}") from exc
 
-        if self._probe_sidecar is None or crop_override_active:
-            # Absent/wiped (full probe needed), or a differing manual --crop
-            # override invalidates the cached crop (cheap rewrite: the frame
-            # count stays cached). The row is ABSENT with the unknown-sentinel
+        if self._probe_sidecar is None or crop_override_active or scale_stale:
+            # Absent/wiped (full probe needed), a differing manual --crop
+            # override, or a stale resolved scale invalidates the cached
+            # facet (cheap rewrite: the frame count and detected crop stay
+            # cached). The row is ABSENT with the unknown-sentinel
             # composition — the slow facet is unresolved until probed.
             placeholder = ExtendedVideoStream(
                 stream      = self._video_stream,
                 frame_count = 0,
                 crop        = CropParams(),
+                scale       = ResolvedScale(),
             )
             return Recovery.from_artifacts([
                 Artifact(payload=placeholder, state=ArtifactState.ABSENT),
@@ -297,6 +356,7 @@ class ProbePhase(Phase[ProbePhaseResult]):
             stream      = self._video_stream,
             frame_count = self._probe_sidecar.frame_count,
             crop        = self._probe_sidecar.crop,
+            scale       = self._probe_sidecar.scale,
         )
         return Recovery.from_artifacts([
             Artifact(payload=self._resolved, state=ArtifactState.COMPLETE),
@@ -353,14 +413,35 @@ class ProbePhase(Phase[ProbePhaseResult]):
         else:
             frame_count = self._count_source_frames()
 
+        # Resolve the output scale against the resolved crop; log the applied
+        # shape (the no-op and infeasible cases resolve/log themselves).
+        try:
+            scale = self._resolve_output_scale(crop)
+        except ValueError as exc:
+            raise RecoveryError(f"Infeasible scale request: {exc}") from exc
+        if scale.mode != ScaleMode.OFF:
+            logger.info("Scale: %s", scale)
+            request = self._plan.scale
+            assert request is not None  # an applied scale implies a request
+            if (
+                scale.mode == ScaleMode.EXACT
+                and (scale.width, scale.height) != (request.width, request.height)
+            ):
+                logger.warning(
+                    "Exact scale target %dx%d moved to %dx%d by the codec "
+                    "granularity grid",
+                    request.width, request.height, scale.width, scale.height,
+                )
+
         # Persist and stash the payload. crop_source and
         # resulting_resolution are human-facing facts only — never keys
         # (Req 23); source is the identity key.
         job_result = self._deps[JobPhase]
-        resulting_resolution = _derive_resulting_resolution(video, crop)
+        resulting_resolution = _derive_resulting_resolution(video, crop, scale)
         save_model(probe_yaml, ProbeSidecar(
             frame_count          = frame_count,
             crop                 = crop,
+            scale                = scale,
             source               = job_result.file.payload.fingerprint,
             crop_source          = crop_source,
             resulting_resolution = resulting_resolution,
@@ -369,6 +450,7 @@ class ProbePhase(Phase[ProbePhaseResult]):
             stream      = video,
             frame_count = frame_count,
             crop        = crop,
+            scale       = scale,
         )
 
         return self._make_result(
@@ -415,6 +497,40 @@ class ProbePhase(Phase[ProbePhaseResult]):
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _resolve_output_scale(self, crop: CropParams | None) -> ResolvedScale:
+        """Resolve the plan's scale request against the live source stream.
+
+        The granularity is the run's strategies' minimum — one output
+        resolution for the whole run, valid for every codec in it.
+
+        Args:
+            crop: The crop the scale applies on top of (the override or the
+                  cached/detected value at the call site).
+
+        Returns:
+            The :class:`~pyqenc.models.ResolvedScale`.
+
+        Raises:
+            ValueError: If a scale request exists but the source resolution
+                is unknown, or the request is infeasible (below granularity,
+                unreachable box).
+        """
+        video = self._video_stream
+        assert video is not None  # recovery guarantees a video stream
+        if self._plan.scale is None:
+            return ResolvedScale()
+        if not video.info.resolution:
+            raise ValueError(
+                "cannot resolve --scale: the source resolution is unknown"
+            )
+        return resolve_scale(
+            Resolution.parse(video.info.resolution),
+            video.info.sample_aspect_ratio,
+            crop or CropParams(),
+            self._plan.scale,
+            min(s.codec.resolution_granularity for s in self._plan.strategies),
+        )
 
     def _count_source_frames(self) -> int:
         """The source frame count: timestamps.txt count, null-count fallback.

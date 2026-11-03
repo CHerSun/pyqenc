@@ -41,9 +41,14 @@ from pyqenc.models import (
     CleanupLevel,
     CropParams,
     EncodingPlan,
+    Fingerprint,
+    FingerprintYaml,
     PhaseOutcome,
     QualityTarget,
+    ResolvedScale,
     Strategy,
+    comparison_scale,
+    join_filter_chain,
 )
 from pyqenc.phase import (
     Artifact,
@@ -146,12 +151,21 @@ class AttemptSidecar(BaseModel):
     the quality is the attempt's ADDRESS — the file name is the cache
     key, the search's proposed q rides the pick-up metadata, and no
     consumer ever read the persisted value back.
+
+    ``probe`` records which probe facts (frame count / crop / resolved
+    scale) produced the attempt — the substrate for a future
+    preserve-where-meaningful invalidation revision (TODO §159); today
+    the optimization ladder wipes the shared namespace wholesale on a
+    probe-facts change, so the recorded value never differs at read
+    time. REQUIRED: a sidecar missing it is a pre-scale-format attempt
+    and re-encodes.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     sampling:    int                # effective subsampling factor the metrics were measured at
     frame_count: int                # frames of the attempt file (0 = unknown)
+    probe:       FingerprintYaml    # probe-facts key the attempt was produced under
     metrics:     MeasuredMetricsYaml = Field(default_factory=MeasuredMetrics)
 
 
@@ -310,6 +324,7 @@ def _write_attempt_sidecar(
     metrics:          MeasuredMetrics,
     sampling: int,
     frame_count:      int,
+    probe_fingerprint: Fingerprint,
 ) -> None:
     """Atomically write a per-attempt sidecar alongside an encoded attempt.
 
@@ -321,18 +336,20 @@ def _write_attempt_sidecar(
     the cache key), and no consumer ever read it back (dropped 2026-10-09).
 
     Args:
-        attempt_path:     Path to the encoded attempt ``.mkv`` file.
+        attempt_path:     The encoded attempt ``.mkv`` file.
         metrics:          ALL measured quality metrics (not filtered to targets).
         sampling: Frame subsampling factor used when metrics were measured.
         frame_count:      Frames of the attempt file — a fact of the file from
                           whoever last decoded it whole (encode or measure run);
                           ``0`` = could not be determined.
+        probe_fingerprint: The probe-facts key the attempt was produced under.
     """
     sidecar = attempt_path.with_suffix(".yaml")
     save_model(sidecar, AttemptSidecar(
         metrics     = metrics,
         sampling    = sampling,
         frame_count = frame_count,
+        probe       = probe_fingerprint,
     ))
 
 
@@ -806,6 +823,8 @@ class ChunkEncoder:
         plan:              EncodingPlan,
         collector:         AppMetricsCollector,
         crop_params:       CropParams | None,
+        scale:             ResolvedScale,
+        probe_fingerprint: Fingerprint,
         cleanup_level:     CleanupLevel,
         visual_hash:       bool,
         sampling:  int,
@@ -827,6 +846,10 @@ class ChunkEncoder:
             collector:         Metrics collector for per-attempt timing.
             crop_params:       Crop parameters to apply to every chunk attempt
                               (``None`` = no crop).
+            scale:             The probe-resolved output scale applied after
+                              the crop on every chunk attempt (``OFF`` = none).
+            probe_fingerprint: The probe-facts key the attempt sidecars record
+                              (which pixel-shaping inputs produced them).
             cleanup_level:     Controls deletion of intermediate attempt files after
                               a pair converges.
             visual_hash:       When ``True``, prepend a deterministic emoji to every
@@ -856,6 +879,8 @@ class ChunkEncoder:
         self._plan             = plan
         self._collector        = collector
         self._crop_params      = crop_params
+        self._scale            = scale
+        self._probe_fingerprint = probe_fingerprint
         self._cleanup_level    = cleanup_level
         self._visual_hash      = visual_hash
         self._sampling = sampling
@@ -1051,8 +1076,12 @@ class ChunkEncoder:
         """
         output_file.parent.mkdir(parents=True, exist_ok=True)
 
-        # "" when the crop is empty — the filter exists iff it changes pixels
-        vf_chain = self._crop_params.to_ffmpeg_filter() if self._crop_params else ""
+        # Segments exist iff they change pixels — the crop first, the scale on
+        # top of it (the probe-resolved order).
+        vf_chain = join_filter_chain([
+            self._crop_params.to_ffmpeg_filter() if self._crop_params else "",
+            self._scale.to_ffmpeg_filter(),
+        ])
 
         request = FFmpegRequest(
             inputs      = [
@@ -1358,10 +1387,12 @@ class ChunkEncoder:
             # verdict — single-point domains accept the attempt unconditionally.
             if self._measure_attempts:
                 with self._collector.time(self._metric_prefix, APP_METRIC_KEY_MEASURE):
+                    ref_scale, _attempt_scale = comparison_scale(self._scale)
                     measurement = self.quality_measurer.measure_chunk(
                         encoded              = output_file,
                         reference            = chunk.as_input(),
                         ref_crop             = self._crop_params or CropParams(),
+                        ref_scale            = ref_scale,
                         output_dir           = output_file.parent,
                         duration_seconds     = chunk.duration_seconds,
                         fps_value            = chunk.stream.stream.info.fps_fraction,
@@ -1394,6 +1425,7 @@ class ChunkEncoder:
                 _write_attempt_sidecar(
                     output_file, all_metrics,
                     sampling, attempt_frames,
+                    self._probe_fingerprint,
                 )
 
             next_q = record_attempt(
@@ -2292,6 +2324,8 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
             plan              = probe_result.plan,
             collector         = self._collector,
             crop_params       = probe_result.crop,
+            scale             = probe_result.scale,
+            probe_fingerprint = probe_result.probe_fingerprint(),
             cleanup_level     = self._deps[JobPhase].cleanup,
             visual_hash       = self._config.encoding.visual_hash,
             sampling          = self._config.measurement.sampling,

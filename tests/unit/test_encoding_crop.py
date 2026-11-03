@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 
 from pyqenc.app_config import load_app_config
 from pyqenc.app_metrics import AppMetricKey
-from pyqenc.models import CleanupLevel, CodecConfig, CropParams, Strategy
+from pyqenc.models import CleanupLevel, CodecConfig, CropParams, ResolvedScale, Strategy, fingerprinter
 from pyqenc.phases.encoding import ChunkEncoder
 from pyqenc.stream_model import (
     CropParams as _CP,
@@ -44,6 +44,8 @@ def _make_encoder(crop_params: CropParams | None = None) -> ChunkEncoder:
         plan=_PLAN,
         collector=NoOpAppMetricsCollector(),
         crop_params=crop_params,
+        scale=ResolvedScale(),
+        probe_fingerprint=fingerprinter.of_text('test-probe'),
         cleanup_level=CleanupLevel.NONE,
         visual_hash=False,
         sampling=1,

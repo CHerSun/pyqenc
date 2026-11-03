@@ -646,6 +646,10 @@ def _cmd_pipeline(args: argparse.Namespace) -> int:
             "Source:":         args.source,
             "Work directory:": args.work_dir,
             "Cropping:":       f"manual ({crop_params})" if crop_params else "automatic",
+            "Scaling:":        (
+                f"{plan.scale.mode.value} {plan.scale.width}"
+                + (f"x{plan.scale.height}" if plan.scale.height is not None else "")
+            ) if plan.scale is not None else "none",
             "Strategies:":     strategy_display,
             "Targets:":        ", ".join(str(t) for t in plan.targets),
             "Work mode:":      "DRY-RUN (no changes will be made)" if not execute else "EXECUTE",

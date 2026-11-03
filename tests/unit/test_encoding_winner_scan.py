@@ -15,7 +15,7 @@ from unittest.mock import MagicMock
 import yaml
 
 from pyqenc.app_config import load_app_config
-from pyqenc.models import CropParams, PhaseOutcome, QualityTarget
+from pyqenc.models import CropParams, PhaseOutcome, QualityTarget, fingerprinter
 from pyqenc.phase import Artifact, ArtifactState, PhaseRegistry
 from pyqenc.phases.encoding import (
     EncodingPhase,
@@ -132,6 +132,7 @@ class TestSidecarFrameCount:
         attempt = tmp_path / "chunk.q18.0.mkv"
         _write_attempt_sidecar(
             attempt, _mm(vmaf_min=94.5), 3, 2400,
+            fingerprinter.of_text("test-probe"),
         )
         data = yaml.safe_load(attempt.with_suffix(".yaml").read_text(encoding="utf-8"))
         assert data["frame_count"] == 2400
@@ -141,6 +142,7 @@ class TestSidecarFrameCount:
         attempt = tmp_path / "chunk.q18.0.mkv"
         _write_attempt_sidecar(
             attempt, _mm(vmaf_min=94.5), 3, 0,
+            fingerprinter.of_text("test-probe"),
         )
         data = yaml.safe_load(attempt.with_suffix(".yaml").read_text(encoding="utf-8"))
         assert data["frame_count"] == 0

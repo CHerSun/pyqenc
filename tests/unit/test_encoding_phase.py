@@ -169,6 +169,7 @@ from unittest.mock import patch as _patch
 import yaml as _yaml
 
 from pyqenc.app_metrics import AppMetricsCollector as _AppMetricsCollector
+from pyqenc.models import ResolvedScale, fingerprinter
 from pyqenc.models import Strategy as _Strategy
 from pyqenc.phases.encoding import ChunkEncoder as _ChunkEncoder
 from pyqenc.phases.encoding import _ChunkEncodingResult
@@ -246,6 +247,8 @@ def _run_encode(
             plan              = _FIXED_PLAN,
             collector         = _MM(spec=_AppMetricsCollector),
             crop_params       = None,
+        scale=ResolvedScale(),
+        probe_fingerprint=fingerprinter.of_text('test-probe'),
             cleanup_level     = CleanupLevel.NONE,
             visual_hash       = True,
             sampling           = 10,
@@ -260,6 +263,8 @@ def _run_encode(
             plan              = _FIXED_PLAN,
             collector         = _MM(spec=_AppMetricsCollector),
             crop_params       = None,
+        scale=ResolvedScale(),
+        probe_fingerprint=fingerprinter.of_text('test-probe'),
             cleanup_level     = CleanupLevel.NONE,
             visual_hash       = True,
             sampling           = 10,
@@ -357,6 +362,8 @@ class TestMeasureAttemptsSeam:
             plan             = _FIXED_PLAN,
             collector        = _MM(spec=_AppMetricsCollector),
             crop_params       = None,
+        scale=ResolvedScale(),
+        probe_fingerprint=fingerprinter.of_text('test-probe'),
             cleanup_level     = CleanupLevel.NONE,
             visual_hash       = True,
             sampling          = 10,
@@ -532,6 +539,8 @@ def _run_encode_with_targets(
         plan              = _FIXED_PLAN,
         collector         = _MM(spec=_AppMetricsCollector),
         crop_params       = None,
+        scale=ResolvedScale(),
+        probe_fingerprint=fingerprinter.of_text('test-probe'),
         cleanup_level     = CleanupLevel.NONE,
         visual_hash       = True,
         sampling           = 10,
@@ -581,6 +590,7 @@ class TestAttemptFrameCountSourcing:
                 "metrics": {"vmaf_min": 95.0},
                 "sampling": sampling,
                 "frame_count": frame_count,
+                "probe": str(fingerprinter.of_text("test-probe")),
             }),
             encoding="utf-8",
         )
@@ -593,6 +603,8 @@ class TestAttemptFrameCountSourcing:
             plan              = _FIXED_PLAN,
             collector         = _MM(spec=_AppMetricsCollector),
             crop_params       = None,
+            scale             = ResolvedScale(),
+            probe_fingerprint = fingerprinter.of_text("test-probe"),
             cleanup_level     = CleanupLevel.NONE,
             visual_hash       = True,
             sampling           = 10,
@@ -672,6 +684,8 @@ class TestEffectiveSamplingThreading:
             plan              = _FIXED_PLAN,
             collector         = _MM(spec=_AppMetricsCollector),
             crop_params       = None,
+        scale=ResolvedScale(),
+        probe_fingerprint=fingerprinter.of_text('test-probe'),
             cleanup_level     = CleanupLevel.NONE,
             visual_hash       = True,
             sampling           = 10,
@@ -1368,6 +1382,8 @@ class TestSpaceFloorGatesFreshEncodes:
             plan             = _FIXED_PLAN,
             collector        = _MM(spec=_AppMetricsCollector),
             crop_params       = None,
+        scale=ResolvedScale(),
+        probe_fingerprint=fingerprinter.of_text('test-probe'),
             cleanup_level     = CleanupLevel.NONE,
             visual_hash       = True,
             sampling          = 10,

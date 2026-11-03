@@ -1034,7 +1034,6 @@ class TestOptimizationPhaseTiming:
             current_optimization_sidecar,
         )
         from pyqenc.phases.probe import ProbePhase
-        from pyqenc.state import ProbeFacet
 
         job      = phase._phases[JobPhase]
         probe    = phase._phases[ProbePhase]
@@ -1048,7 +1047,7 @@ class TestOptimizationPhaseTiming:
             chunks      = fingerprinter.of_ids(
                 a.payload.safe_name() for a in chunking.result.chunks
             ),
-            probe       = ProbeFacet.from_probe(probe.result),
+            probe       = probe.result.probe_fingerprint(),
             sampling    = phase._config.measurement.sampling,
             test_chunks = [a.payload.safe_name() for a in chunking.result.chunks],
             summary     = [
