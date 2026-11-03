@@ -86,7 +86,10 @@ encoding:
     # - "vulkan*"       # Vulkan: requires GPU with Vulkan support
   concurrency: 1          # max simultaneous (chunk, strategy) encode+measure jobs; clamped to CPU count; no benefit unless CPU is idling.
   visual_hash: true        # emoji prefix on chunk log lines for visual identification
-  scale_algorithm: lanczos # swscale scaler for --scale runs; the target itself is per-run CLI intent
+  scale_algorithm: lanczos # swscale scaler for --scale runs
+                        # valid: fast_bilinear, bilinear, bicubic (ffmpeg default), experimental,
+                        #        neighbor, area, bicublin, gauss, sinc, lanczos, spline
+                        # the target itself is per-run CLI intent (--scale), never config
 
 optimization:
   # Runs unless disabled per-run with --no-optimize (the plan carries the mode, not this config).
@@ -311,6 +314,7 @@ codecs:
     quality_range: [6, 34]       # Codec full range: 0-51. Balanced: 6-34
     quality_granularity: 1       # int
     default_quality: 18
+    resolution_granularity: 2   # pixel granularity of output dimensions (4:2:0 needs even)
     default_preset: p7
     presets: [p1, p2, p3, p4, p5, p6, p7]
     encoder_args:
@@ -334,6 +338,7 @@ codecs:
     quality_range: [99.5, 0.5]   # Mbit/s; reversed (higher = better); upper bound is a practical cap
     quality_max_step: 10.0
     default_quality: 20.0
+    resolution_granularity: 2   # pixel granularity of output dimensions (4:2:0 needs even)
     default_preset: p7
     presets: [p1, p2, p3, p4, p5, p6, p7]
     encoder_args:
@@ -358,6 +363,7 @@ codecs:
     quality_range: [6, 40]       # Codec full range: -1-255. -1 is auto, must be excluded. Balanced: 6-40
     quality_granularity: 1       # int
     default_quality: 20
+    resolution_granularity: 2   # pixel granularity of output dimensions (4:2:0 needs even)
     default_preset: any          # hevc_vulkan has no presets
     presets: ["any"]
     pre_input_args:

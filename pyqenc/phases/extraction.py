@@ -41,7 +41,7 @@ from pyqenc.constants import (
     TEMP_SUFFIX,
     TIMESTAMPS_FILENAME,
 )
-from pyqenc.models import PhaseOutcome, SizedFingerprintYaml
+from pyqenc.models import ArtifactState, PhaseOutcome, SizedFingerprintYaml
 from pyqenc.phase import (
     Artifact,
     FinalizeContext,
@@ -53,7 +53,6 @@ from pyqenc.phase import (
     claim_expected_name,
 )
 from pyqenc.phases.job import JobPhase
-from pyqenc.state import ArtifactState
 from pyqenc.stream_model import (
     AttachmentStream,
     AttachmentStreamInfo,

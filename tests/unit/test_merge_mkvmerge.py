@@ -43,6 +43,7 @@ from pyqenc.app_config import load_app_config
 from pyqenc.app_metrics import NoOpAppMetricsCollector
 from pyqenc.constants import EXTRACTED_DIR, MERGED_OUTPUT_DIR, TIMESTAMPS_FILENAME
 from pyqenc.models import (
+    ArtifactState,
     CleanupLevel,
     PhaseOutcome,
     SizedFingerprint,
@@ -60,7 +61,6 @@ from pyqenc.phases.merge import MergePhase
 from pyqenc.phases.optimization import OptimizationPhase, OptimizationPhaseResult
 from pyqenc.phases.probe import ProbePhase, ProbePhaseResult
 from pyqenc.quality_metrics import MeasuredMetrics, MetricStatKey, TargetedMetrics
-from pyqenc.state import ArtifactState
 from pyqenc.stream_model import (
     ExtendedVideoStream,
     MergedVideo,

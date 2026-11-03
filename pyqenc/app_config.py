@@ -41,6 +41,7 @@ from pyqenc.models import (
     CodecConfig,
     EncodingPlan,
     QualityTarget,
+    ScaleAlgorithm,
     ScaleMode,
     ScaleSpec,
     Strategy,
@@ -233,9 +234,9 @@ class EncodingConfig(BaseModel):
         visual_hash:            Whether to display emoji visual hash in chunk
                                 logs.
         scale_algorithm:        The swscale scaler applied when the run scales
-                                output resolution (``--scale``) — a single
-                                token (e.g. ``"lanczos"``); the target itself
-                                is per-run CLI intent with no config home.
+                                output resolution (``--scale``); the target
+                                itself is per-run CLI intent with no config
+                                home.
     """
 
     model_config = ConfigDict(validate_assignment=True)
@@ -245,21 +246,7 @@ class EncodingConfig(BaseModel):
     strategies:             list[str]
     concurrency:            _Concurrency
     visual_hash:            bool
-    scale_algorithm:        str
-
-    @model_validator(mode="after")
-    def _validate_scale_algorithm(self) -> Self:
-        """The algorithm lands inside the ffmpeg scale filter — one token.
-
-        Raises:
-            ValueError: On an empty or multi-token algorithm.
-        """
-        if not self.scale_algorithm or any(c in self.scale_algorithm for c in " \t:,"):
-            raise ValueError(
-                f"encoding.scale_algorithm {self.scale_algorithm!r} must be a "
-                f"single token without spaces, ':' or ','"
-            )
-        return self
+    scale_algorithm:        ScaleAlgorithm
 
     @model_validator(mode="after")
     def _validate_target_profiles(self) -> Self:

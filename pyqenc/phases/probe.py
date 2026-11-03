@@ -32,7 +32,6 @@ from pyqenc.models import (
     EncodingPlan,
     Fingerprint,
     PhaseOutcome,
-    Resolution,
     ResolvedScale,
     ScaleMode,
     ScaleYaml,
@@ -132,12 +131,12 @@ def _derive_resulting_resolution(
     a malformed source string raises (it is an ffprobe-built fact —
     loud is correct there).
     """
-    if not video.info.resolution:
+    dims = video.info.resolution_dims()
+    if dims is None:
         return None
-    cropped = Resolution.parse(video.info.resolution) - crop
     if scale.mode != ScaleMode.OFF:
         return f"{scale.width}x{scale.height}"
-    return str(cropped)
+    return str(dims - crop)
 
 
 
@@ -520,12 +519,13 @@ class ProbePhase(Phase[ProbePhaseResult]):
         assert video is not None  # recovery guarantees a video stream
         if self._plan.scale is None:
             return ResolvedScale()
-        if not video.info.resolution:
+        dims = video.info.resolution_dims()
+        if dims is None:
             raise ValueError(
                 "cannot resolve --scale: the source resolution is unknown"
             )
         return resolve_scale(
-            Resolution.parse(video.info.resolution),
+            dims,
             video.info.sample_aspect_ratio,
             crop or CropParams(),
             self._plan.scale,

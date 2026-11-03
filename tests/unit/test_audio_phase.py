@@ -123,8 +123,8 @@ def _make_phase(tmp_path: Path, config: AudioConfig, tracks: list[AudioStream]) 
     job_mock = MagicMock()
     job_mock.result = job_result
 
+    from pyqenc.models import ArtifactState
     from pyqenc.phase import Artifact, PhaseRegistry
-    from pyqenc.state import ArtifactState
 
     extraction_result = MagicMock()
     extraction_result.audio_streams = [
@@ -527,8 +527,8 @@ class TestBoundedExecution:
         tracks = [_track(tmp_path, "t1")]
         registry: dict = {}
 
+        from pyqenc.models import ArtifactState
         from pyqenc.phase import Artifact
-        from pyqenc.state import ArtifactState
 
         job_result = MagicMock()
         job_result.work_dir = tmp_path

@@ -33,7 +33,7 @@ from pyqenc.constants import (
     SUCCESS_SYMBOL_MINOR,
     WARNING_SYMBOL,
 )
-from pyqenc.models import CleanupLevel, PhaseOutcome
+from pyqenc.models import ArtifactState, CleanupLevel, PhaseOutcome
 from pyqenc.phase import (
     Artifact,
     FinalizeContext,
@@ -46,7 +46,6 @@ from pyqenc.phase import (
     claim_expected_name,
 )
 from pyqenc.runner import Runner
-from pyqenc.state import ArtifactState
 from tests.test_metrics_integration import _recorded_metrics, _top_level_keys
 
 _APP_CONFIG: AppConfig = load_app_config(default_only=True)

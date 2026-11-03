@@ -37,6 +37,7 @@ from pyqenc.constants import (
     THRESHOLD_ATTEMPTS_WARNING,
 )
 from pyqenc.models import (
+    ArtifactState,
     AttemptMetadata,
     CleanupLevel,
     CropParams,
@@ -71,7 +72,6 @@ from pyqenc.quality_metrics import (
     TargetedMetrics,
     TargetedMetricsYaml,
 )
-from pyqenc.state import ArtifactState
 from pyqenc.stream_model import (
     DecimalYaml,
     EncodedChunk,
@@ -822,7 +822,7 @@ class ChunkEncoder:
         work_dir:          Path,
         plan:              EncodingPlan,
         collector:         AppMetricsCollector,
-        crop_params:       CropParams | None,
+        crop_params:       CropParams,
         scale:             ResolvedScale,
         probe_fingerprint: Fingerprint,
         cleanup_level:     CleanupLevel,
@@ -844,8 +844,9 @@ class ChunkEncoder:
                               full→targeted narrowing front the winner write
                               consumes.
             collector:         Metrics collector for per-attempt timing.
-            crop_params:       Crop parameters to apply to every chunk attempt
-                              (``None`` = no crop).
+            crop_params:       The committed crop applied to every chunk
+                              attempt — concrete past the probe (empty means
+                              no crop; ``None``/"auto" exists only pre-probe).
             scale:             The probe-resolved output scale applied after
                               the crop on every chunk attempt (``OFF`` = none).
             probe_fingerprint: The probe-facts key the attempt sidecars record
@@ -1079,7 +1080,7 @@ class ChunkEncoder:
         # Segments exist iff they change pixels — the crop first, the scale on
         # top of it (the probe-resolved order).
         vf_chain = join_filter_chain([
-            self._crop_params.to_ffmpeg_filter() if self._crop_params else "",
+            self._crop_params.to_ffmpeg_filter(),
             self._scale.to_ffmpeg_filter(),
         ])
 
@@ -1391,7 +1392,7 @@ class ChunkEncoder:
                     measurement = self.quality_measurer.measure_chunk(
                         encoded              = output_file,
                         reference            = chunk.as_input(),
-                        ref_crop             = self._crop_params or CropParams(),
+                        ref_crop             = self._crop_params,
                         ref_scale            = ref_scale,
                         output_dir           = output_file.parent,
                         duration_seconds     = chunk.duration_seconds,

@@ -26,7 +26,6 @@ from pyqenc.constants import (
 )
 from pyqenc.models import (
     CropParams,
-    Resolution,
     ResolvedScale,
     ScaleMode,
     ScaleSpec,
@@ -450,10 +449,11 @@ def _resolve_scale(
         The :class:`~pyqenc.models.ResolvedScale`.
     """
     stream = _load_video_stream(source_video)
-    if not stream.info.resolution:
+    dims = stream.info.resolution_dims()
+    if dims is None:
         return ResolvedScale()
     return resolve_scale(
-        Resolution.parse(stream.info.resolution),
+        dims,
         stream.info.sample_aspect_ratio,
         crop,
         spec,
@@ -490,25 +490,26 @@ def _load_video_stream(path: Path) -> VideoStream:
     return VideoStream(file=File(path=path), info=info)
 
 
-def _effective_resolution(
+def _cropped_resolution(
     stream:     VideoStream,
     crop_params: CropParams,
 ) -> tuple[int, int]:
-    """Compute effective (width, height) after crop.
+    """Compute the (width, height) after crop.
 
     Args:
         stream:      Video stream with a probed ``resolution`` string.
         crop_params: Crop to apply (may be empty/no-op).
 
     Returns:
-        ``(effective_width, effective_height)`` as integers.
+        ``(cropped_width, cropped_height)`` as integers.
 
     Raises:
         ValueError: If the stream's resolution is unavailable or unparseable.
     """
-    if not stream.info.resolution:
+    dims = stream.info.resolution_dims()
+    if dims is None:
         raise ValueError(f"Resolution unavailable for {stream.file.path}")
-    cropped = Resolution.parse(stream.info.resolution) - crop_params
+    cropped = dims - crop_params
     return cropped.width, cropped.height
 
 
@@ -538,7 +539,7 @@ def _check_resolution_match(
                     suggestion for ``--crop`` / ``--scale`` arguments.
     """
     if scale_dims is not None:
-        tgt_w, tgt_h = _effective_resolution(distorted_stream, CropParams())
+        tgt_w, tgt_h = _cropped_resolution(distorted_stream, CropParams())
         if tgt_w * scale_dims[1] == tgt_h * scale_dims[0]:
             return  # same aspect — a pure rescale onto the common grid
         raise ValueError(
@@ -550,9 +551,9 @@ def _check_resolution_match(
             f"aspect or measure without --scale."
         )
 
-    src_w, src_h = _effective_resolution(source_stream, crop_params)
+    src_w, src_h = _cropped_resolution(source_stream, crop_params)
     # Target is never cropped — pass empty CropParams
-    tgt_w, tgt_h = _effective_resolution(distorted_stream, CropParams())
+    tgt_w, tgt_h = _cropped_resolution(distorted_stream, CropParams())
 
     if src_w == tgt_w and src_h == tgt_h:
         return  # match — nothing to do

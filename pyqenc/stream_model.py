@@ -66,6 +66,7 @@ from pyqenc.constants import (
 )
 from pyqenc.models import (
     CropParams,
+    Resolution,
     ResolvedScale,
     ScaleYaml,
     SizedFingerprint,
@@ -307,6 +308,24 @@ class VideoStreamInfo(StreamInfo):
         if res is None or self.fps is None or self.duration_seconds is None or self.fps <= 0:
             return None
         return res[0] * res[1] * int(self.fps * self.duration_seconds)
+
+    def resolution_dims(self) -> Resolution | None:
+        """The probed dimensions as a :class:`~pyqenc.models.Resolution`.
+
+        The single parse site for the raw ``resolution`` string — every
+        dimension consumer (crop subtraction, scale resolution) goes through
+        here, never ``Resolution.parse`` on the string again.
+
+        Returns:
+            The dimensions, or ``None`` when the facet is missing or
+            unparseable.
+        """
+        if not self.resolution:
+            return None
+        parsed = self._parse_resolution(self.resolution)
+        if parsed is None:
+            return None
+        return Resolution(width=parsed[0], height=parsed[1])
 
     @classmethod
     def from_ffprobe(cls, raw: dict) -> Self:

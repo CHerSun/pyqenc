@@ -41,7 +41,7 @@ from pyqenc.constants import (
     SUCCESS_SYMBOL_MINOR,
     TEMP_SUFFIX,
 )
-from pyqenc.models import FingerprintYaml, PhaseOutcome, SizedFingerprint, SizedFingerprintYaml
+from pyqenc.models import ArtifactState, FingerprintYaml, PhaseOutcome, SizedFingerprint, SizedFingerprintYaml
 from pyqenc.phase import (
     Artifact,
     Phase,
@@ -53,7 +53,6 @@ from pyqenc.phase import (
 )
 from pyqenc.phases.extraction import ExtractionPhase
 from pyqenc.phases.job import JobPhase
-from pyqenc.state import ArtifactState
 from pyqenc.stream_model import AudioOutput, AudioStream, File
 from pyqenc.utils.alive import AdvanceState, ProgressBar
 from pyqenc.utils.concurrency import run_bounded

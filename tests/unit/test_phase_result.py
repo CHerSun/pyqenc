@@ -22,9 +22,8 @@ completeness ``COMPLETE``) never appears in ``artifacts``, ``pending``, or
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from pyqenc.models import PhaseOutcome, Strategy
+from pyqenc.models import ArtifactState, PhaseOutcome, Strategy
 from pyqenc.phase import Artifact, PhaseResult
-from pyqenc.state import ArtifactState
 
 # ---------------------------------------------------------------------------
 # Helpers

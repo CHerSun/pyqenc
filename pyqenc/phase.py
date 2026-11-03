@@ -43,8 +43,7 @@ from typing import TYPE_CHECKING, ClassVar, Self
 
 from pyqenc.app_metrics import AppMetricKey
 from pyqenc.constants import FAILURE_SYMBOL_MINOR, SUCCESS_SYMBOL_MINOR, WARNING_SYMBOL
-from pyqenc.models import CleanupLevel, CropParams, PhaseOutcome, Strategy
-from pyqenc.state import ArtifactState
+from pyqenc.models import ArtifactState, CleanupLevel, CropParams, PhaseOutcome, Strategy
 from pyqenc.utils.log_format import emit_phase_banner, emit_phase_start, log_recovery_line
 
 if TYPE_CHECKING:

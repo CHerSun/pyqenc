@@ -11,13 +11,14 @@ from pyqenc.models import (
     CropParams,
     Resolution,
     ResolvedScale,
+    ScaleAlgorithm,
     ScaleMode,
     ScaleSpec,
     comparison_scale,
     resolve_scale,
 )
 
-ALG = "lanczos"
+ALG = ScaleAlgorithm.LANCZOS
 
 
 def _spec(target: str, mode: ScaleMode = ScaleMode.CONTAIN) -> ScaleSpec:
@@ -47,13 +48,13 @@ class TestScaleSpec:
         with pytest.raises(ValueError, match="requires an explicit height"):
             _spec("1920", ScaleMode.EXACT)
 
-    def test_error_handling_off_and_algorithm_token(self) -> None:
-        """OFF never appears in a spec; the algorithm must be a single token."""
+    def test_error_handling_off_and_unknown_algorithm(self) -> None:
+        """OFF never appears in a spec; the algorithm is the closed swscale
+        set — an unknown name fails validation listing the valid ones."""
         with pytest.raises(ValueError, match="never encodes absence"):
             ScaleSpec(mode=ScaleMode.OFF, width=1920, height=None, algorithm=ALG)
-        for bad_alg in ("", "two words", "a:b", "a,b"):
-            with pytest.raises(ValueError, match="single token"):
-                ScaleSpec(mode=ScaleMode.CONTAIN, width=1920, height=None, algorithm=bad_alg)
+        with pytest.raises(Exception, match="'fast_bilinear', 'bilinear', 'bicubic'"):
+            ScaleSpec(mode=ScaleMode.CONTAIN, width=1920, height=None, algorithm="not-a-scaler")
 
 
 class TestResolvedScale:
@@ -64,7 +65,7 @@ class TestResolvedScale:
         for value in (
             ResolvedScale(),
             ResolvedScale(mode=ScaleMode.CONTAIN, width=1920, height=800, algorithm=ALG),
-            ResolvedScale(mode=ScaleMode.EXACT, width=720, height=576, algorithm="bicubic"),
+            ResolvedScale(mode=ScaleMode.EXACT, width=720, height=576, algorithm=ScaleAlgorithm.BICUBIC),
         ):
             assert ResolvedScale.parse(str(value)) == value
 
@@ -73,7 +74,7 @@ class TestResolvedScale:
         with pytest.raises(ValueError, match="OFF carries no dimensions"):
             ResolvedScale(mode=ScaleMode.OFF, width=1920, height=800, algorithm=ALG)
         with pytest.raises(ValueError, match="requires positive dimensions"):
-            ResolvedScale(mode=ScaleMode.CONTAIN, width=1920, height=800, algorithm="")
+            ResolvedScale(mode=ScaleMode.CONTAIN, width=1920, height=800, algorithm=None)
 
     def test_happy_path_filter_segments(self) -> None:
         """Off is no segment; applied modes emit scale (plus setsar under exact)."""

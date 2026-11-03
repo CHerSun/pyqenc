@@ -21,7 +21,7 @@ from pydantic import BaseModel
 from scenedetect import ContentDetector, detect
 
 from pyqenc.app_metrics import AppMetricKey
-from pyqenc.models import PhaseOutcome, SceneBoundary, SizedFingerprintYaml
+from pyqenc.models import ArtifactState, PhaseOutcome, SceneBoundary, SizedFingerprintYaml
 from pyqenc.phase import (
     Artifact,
     FinalizeContext,
@@ -33,7 +33,6 @@ from pyqenc.phase import (
 )
 from pyqenc.phases.job import JobPhase
 from pyqenc.phases.probe import ProbePhase
-from pyqenc.state import ArtifactState
 from pyqenc.stream_model import (
     ExtendedVideoStream,
     VideoStreamChunk,

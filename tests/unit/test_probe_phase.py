@@ -27,6 +27,7 @@ from unittest.mock import patch
 from pyqenc.app_config import load_app_config
 from pyqenc.app_metrics import NoOpAppMetricsCollector
 from pyqenc.models import (
+    ArtifactState,
     CleanupLevel,
     CropParams,
     PhaseOutcome,
@@ -38,7 +39,6 @@ from pyqenc.phase import Artifact, PhaseRegistry
 from pyqenc.phases.extraction import ExtractionPhase, ExtractionPhaseResult
 from pyqenc.phases.job import JobPhase, JobPhaseResult
 from pyqenc.phases.probe import ProbePhase, ProbePhaseResult, ProbeSidecar
-from pyqenc.state import ArtifactState
 from pyqenc.stream_model import ProbedFile, VideoStream, VideoStreamInfo
 from pyqenc.utils.yaml_utils import load_model, save_model
 from tests.test_metrics_integration import (

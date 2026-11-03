@@ -22,7 +22,7 @@ from hypothesis import strategies as st
 from pyqenc.app_config import load_app_config
 from pyqenc.app_metrics import NoOpAppMetricsCollector
 from pyqenc.constants import EXTRACTED_DIR, TIMESTAMPS_FILENAME
-from pyqenc.models import CleanupLevel, PhaseOutcome, SizedFingerprint
+from pyqenc.models import ArtifactState, CleanupLevel, PhaseOutcome, SizedFingerprint
 from pyqenc.phase import Artifact, PhaseRegistry
 from pyqenc.phases.extraction import (
     ExtractionPhase,
@@ -30,12 +30,10 @@ from pyqenc.phases.extraction import (
     _extract_timestamps,
 )
 from pyqenc.phases.job import JobPhase, JobPhaseResult
-from pyqenc.state import ArtifactState
 from pyqenc.stream_model import ProbedFile, VideoStream, VideoStreamInfo
 
 _STUB_SOURCE_FP = SizedFingerprint(token="0" * 32, size=64)
 """Stub source identity — phases read the job File's fingerprint."""
-
 
 
 def _merge_encoded_chunk(path, chunk_id: str, strategy_name: str):
@@ -82,7 +80,6 @@ def _merge_encoded_chunk(path, chunk_id: str, strategy_name: str):
     )
 
 
-
 def _extended_stream(path: Path, frame_count: int):
     """An ExtendedVideoStream for the source (fast facet + frame count)."""
     from fractions import Fraction
@@ -112,9 +109,6 @@ def _extended_stream(path: Path, frame_count: int):
 
 _APP_CONFIG = load_app_config(default_only=True)
 _PLAN       = _APP_CONFIG.build_encoding_plan(optimize=True, measure=True)
-
-
-
 
 
 def _make_extraction_phase(
@@ -483,8 +477,8 @@ def test_frame_count_preservation(frame_count: int) -> None:
 
         encoding = EncodingPhase(config, registry, collector=collector)
         encoded_chunk = _merge_encoded_chunk(chunk, "chunk1", "h265+slow")
+        from pyqenc.models import ArtifactState as _St
         from pyqenc.phase import Artifact as _Art
-        from pyqenc.state import ArtifactState as _St
         encoding.result = EncodingPhaseResult(
             outcome   = PhaseOutcome.COMPLETED,
             message   = "encoding complete",
@@ -629,7 +623,6 @@ def test_pts_accuracy(pts_values: list[float]) -> None:
     import tempfile
 
     from pyqenc.phases.extraction import _extract_timestamps
-
 
 
     # The implementation receives integer ms values directly (from mkvextract or

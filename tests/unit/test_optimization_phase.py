@@ -21,6 +21,7 @@ import pytest
 
 from pyqenc.app_config import AppConfig, load_app_config
 from pyqenc.models import (
+    ArtifactState,
     CleanupLevel,
     CropParams,
     EncodingPlan,
@@ -44,7 +45,6 @@ from pyqenc.quality_metrics import MetricStatKey, TargetedMetrics
 from pyqenc.quality_metrics import MetricStatKey as _K
 from pyqenc.quality_metrics import MetricType as _MT
 from pyqenc.quality_metrics import StatisticType as _ST
-from pyqenc.state import ArtifactState
 from pyqenc.stream_model import ProbedFile
 from pyqenc.summary_tables import StrategyRow
 from pyqenc.utils.yaml_utils import save_model, write_yaml_atomic

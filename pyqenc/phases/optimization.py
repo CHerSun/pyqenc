@@ -35,6 +35,7 @@ from pyqenc.constants import (
     WARNING_SYMBOL,
 )
 from pyqenc.models import (
+    ArtifactState,
     CleanupLevel,
     CropParams,
     EncodingPlan,
@@ -61,7 +62,6 @@ from pyqenc.phases.chunking import ChunkingPhase
 from pyqenc.phases.job import JobPhase
 from pyqenc.phases.probe import ProbePhase
 from pyqenc.quality_metrics import FIXED_COMPARISON_PAIRS, MetricMap, TargetedMetrics
-from pyqenc.state import ArtifactState
 from pyqenc.stream_model import DecimalYaml, EncodedChunk, VideoStreamChunk
 from pyqenc.stream_model import File as StreamFile
 from pyqenc.summary_tables import (
@@ -1572,7 +1572,7 @@ def _make_encoder(
     work_dir:         Path,
     plan:             EncodingPlan,
     collector:        AppMetricsCollector,
-    crop_params:      CropParams | None,
+    crop_params:      CropParams,
     scale:            ResolvedScale,
     probe_fingerprint: Fingerprint,
     visual_hash:      bool,
@@ -1626,6 +1626,5 @@ def _make_encoder(
         measure_attempts  = True,
         space_guard       = space_guard,
     )
-
 
 

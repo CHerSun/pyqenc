@@ -377,6 +377,39 @@ class PhaseOutcome(Enum):
     FAILED     = "failed"
 
 
+class ArtifactState(Enum):
+    """Completeness (readiness) of a single pipeline artifact.
+
+    Completeness answers one question: are all expected components present, so
+    the artifact is ready to be worked on by later stages?  It is orthogonal to
+    selection — whether the current run *wants* the artifact — which lives on
+    ``Artifact.wanted``, not here.
+
+    Attributes:
+        ABSENT:   The artifact's components are not present.  Either nothing has
+                  been produced yet, or whatever exists is trivially
+                  reproducible with no investment worth protecting.  There is no
+                  separate state for cheaply reproducible leftovers — they are
+                  simply ABSENT.  ``.tmp`` files are NOT PARTIAL — they are
+                  transient crash remnants cleaned up at phase startup before
+                  recovery runs, leaving the artifact ABSENT.
+        PARTIAL:  A protected investment.  Expensive or valuable work is partly
+                  done, but the artifact is NOT yet ready to be worked on by
+                  later stages because a required component is missing; it is
+                  kept to avoid discarding that investment and to allow
+                  resuming.  Examples of this principle: the primary file is
+                  present but its sidecar is missing, or quality attempts exist
+                  but no winning attempt has been finalised.
+        COMPLETE: All of the artifact's expected components are present, so the
+                  artifact is fully ready to be worked on by later stages
+                  (sidecar present where applicable).
+    """
+
+    ABSENT   = "absent"
+    PARTIAL  = "partial"    # renamed from ARTIFACT_ONLY
+    COMPLETE = "complete"
+
+
 # ---------------------------------------------------------------------------
 # Strategy
 # ---------------------------------------------------------------------------
@@ -1150,6 +1183,40 @@ stays explicitly typed; only the yaml boundary changes form."""
 # Output scale
 # ---------------------------------------------------------------------------
 
+class ScaleAlgorithm(str, Enum):
+    """The swscale scaler applied by the scale filter (``flags=`` option).
+
+    The closed set of ffmpeg's swscale algorithms — config values outside it
+    fail validation at load with the valid names listed (ffmpeg itself would
+    otherwise reject them late, at the first encode).
+
+    Attributes:
+        FAST_BILINEAR: Fast bilinear (lowest quality, fastest).
+        BILINEAR:      Bilinear.
+        BICUBIC:       Bicubic — ffmpeg's own default.
+        EXPERIMENTAL:  Experimental.
+        NEIGHBOR:      Nearest neighbor.
+        AREA:          Averaging area.
+        BICUBLIN:      Luma bicubic, chroma bilinear.
+        GAUSS:         Gaussian approximation.
+        SINC:          Sinc.
+        LANCZOS:       Lanczos (sinc/sinc) — the archival default.
+        SPLINE:        Natural bicubic spline.
+    """
+
+    FAST_BILINEAR = "fast_bilinear"
+    BILINEAR      = "bilinear"
+    BICUBIC       = "bicubic"
+    EXPERIMENTAL  = "experimental"
+    NEIGHBOR      = "neighbor"
+    AREA          = "area"
+    BICUBLIN      = "bicublin"
+    GAUSS         = "gauss"
+    SINC          = "sinc"
+    LANCZOS       = "lanczos"
+    SPLINE        = "spline"
+
+
 class ScaleMode(str, Enum):
     """How a scale target maps onto the cropped source dimensions.
 
@@ -1188,8 +1255,8 @@ class ScaleSpec(BaseModel):
                    output width under ``exact``).
         height:    Target height in pixels; ``None`` means unbounded (the
                    ``W``-only box form). Required by ``cover`` and ``exact``.
-        algorithm: The swscale scaler name (e.g. ``"lanczos"``) — a single
-                   token, sourced from config at the plan boundary.
+        algorithm: The swscale scaler, sourced from config at the plan
+                   boundary.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -1197,7 +1264,7 @@ class ScaleSpec(BaseModel):
     mode:      ScaleMode
     width:     int
     height:    int | None = None
-    algorithm: str
+    algorithm: ScaleAlgorithm
 
     @model_validator(mode="after")
     def _validate_spec(self) -> Self:
@@ -1205,7 +1272,7 @@ class ScaleSpec(BaseModel):
 
         Raises:
             ValueError: On a non-positive dimension, a mode that needs the
-                height, ``OFF`` as a spec mode, or a multi-token algorithm.
+                height, or ``OFF`` as a spec mode.
         """
         if self.mode == ScaleMode.OFF:
             raise ValueError("ScaleSpec never encodes absence — use plan.scale = None")
@@ -1213,21 +1280,16 @@ class ScaleSpec(BaseModel):
             raise ValueError(f"Scale dimensions must be positive (got {self.width}x{self.height})")
         if self.height is None and self.mode in (ScaleMode.COVER, ScaleMode.EXACT):
             raise ValueError(f"Scale mode {self.mode.value!r} requires an explicit height")
-        if not self.algorithm or any(c in self.algorithm for c in " \t:,"):
-            raise ValueError(
-                f"Scale algorithm {self.algorithm!r} must be a single token without "
-                f"spaces, ':' or ',' — it lands inside the ffmpeg scale filter"
-            )
         return self
 
     @classmethod
-    def parse(cls, target: str, *, mode: ScaleMode, algorithm: str) -> Self:
+    def parse(cls, target: str, *, mode: ScaleMode, algorithm: ScaleAlgorithm) -> Self:
         """Parse a CLI ``--scale`` value (``"W"`` or ``"WxH"``) into a spec.
 
         Args:
             target:    The raw target string.
             mode:      The mapping mode from ``--scale-mode``.
-            algorithm: The configured scaler name.
+            algorithm: The configured scaler.
 
         Returns:
             The :class:`ScaleSpec`.
@@ -1266,15 +1328,16 @@ class ResolvedScale(BaseModel):
         mode:      The applied mode; ``OFF`` when nothing is applied.
         width:     Resolved output width (``0`` iff ``OFF``).
         height:    Resolved output height (``0`` iff ``OFF``).
-        algorithm: The applied scaler name (empty iff ``OFF``).
+        algorithm: The applied scaler (``None`` iff ``OFF`` — nothing is
+                   applied).
     """
 
     model_config = ConfigDict(frozen=True)
 
-    mode:      ScaleMode = ScaleMode.OFF
-    width:     int       = 0
-    height:    int       = 0
-    algorithm: str       = ""
+    mode:      ScaleMode            = ScaleMode.OFF
+    width:     int                  = 0
+    height:    int                  = 0
+    algorithm: ScaleAlgorithm | None = None
 
     @model_validator(mode="after")
     def _validate_resolved(self) -> Self:
@@ -1285,9 +1348,9 @@ class ResolvedScale(BaseModel):
                 with non-positive ones / a missing algorithm).
         """
         off = self.mode == ScaleMode.OFF
-        if off and (self.width or self.height or self.algorithm):
+        if off and (self.width or self.height or self.algorithm is not None):
             raise ValueError("ResolvedScale OFF carries no dimensions or algorithm")
-        if not off and (self.width <= 0 or self.height <= 0 or not self.algorithm):
+        if not off and (self.width <= 0 or self.height <= 0 or self.algorithm is None):
             raise ValueError(
                 f"ResolvedScale {self.mode.value!r} requires positive dimensions "
                 f"and an algorithm"
@@ -1298,7 +1361,8 @@ class ResolvedScale(BaseModel):
         """The storage/display form: ``"off"`` or ``"<mode> <W>x<H> <algorithm>"``."""
         if self.mode == ScaleMode.OFF:
             return ScaleMode.OFF.value
-        return f"{self.mode.value} {self.width}x{self.height} {self.algorithm}"
+        assert self.algorithm is not None  # the invariant validator guarantees it
+        return f"{self.mode.value} {self.width}x{self.height} {self.algorithm.value}"
 
     @classmethod
     def parse(cls, value: str) -> Self:
@@ -1325,23 +1389,25 @@ class ResolvedScale(BaseModel):
         dims = parts[1].split("x")
         if len(dims) != 2:
             raise ValueError(f"Invalid resolved scale {value!r}: bad dimensions {parts[1]!r}")
-        return cls(mode=mode, width=int(dims[0]), height=int(dims[1]), algorithm=parts[2])
+        try:
+            algorithm = ScaleAlgorithm(parts[2])
+        except ValueError:
+            raise ValueError(f"Invalid resolved scale {value!r}: unknown algorithm {parts[2]!r}") from None
+        return cls(mode=mode, width=int(dims[0]), height=int(dims[1]), algorithm=algorithm)
 
     def to_ffmpeg_filter(self) -> str:
         """Convert to the ffmpeg scale filter segments.
 
         Returns:
-            ``""`` when off; else ``scale=W:H[:flags=<algorithm>]`` with a
+            ``""`` when off; else ``scale=W:H:flags=<algorithm>`` with a
             trailing ``setsar=1`` segment under ``exact`` — a segment exists
             in a chain iff it changes pixels.
         """
         if self.mode == ScaleMode.OFF:
             return ""
-        scale = f"scale={self.width}:{self.height}"
-        if self.algorithm:
-            scale += f":flags={self.algorithm}"
+        assert self.algorithm is not None  # the invariant validator guarantees it
         return join_filter_chain([
-            scale,
+            f"scale={self.width}:{self.height}:flags={self.algorithm.value}",
             "setsar=1" if self.mode == ScaleMode.EXACT else "",
         ])
 

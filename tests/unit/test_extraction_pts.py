@@ -32,7 +32,7 @@ import yaml
 from pyqenc.app_config import load_app_config
 from pyqenc.app_metrics import NoOpAppMetricsCollector
 from pyqenc.constants import EXTRACTED_DIR, TIMESTAMPS_FILENAME
-from pyqenc.models import CleanupLevel, PhaseOutcome, SizedFingerprint
+from pyqenc.models import ArtifactState, CleanupLevel, PhaseOutcome, SizedFingerprint
 from pyqenc.phase import Artifact, PhaseRegistry
 from pyqenc.phases.extraction import (
     ExtractionPhase,
@@ -40,7 +40,6 @@ from pyqenc.phases.extraction import (
     _extract_timestamps,
 )
 from pyqenc.phases.job import JobPhase, JobPhaseResult
-from pyqenc.state import ArtifactState
 from pyqenc.stream_model import File, ProbedFile
 from pyqenc.utils.ffmpeg_runner import (
     _PROGRESS_FLAGS,
