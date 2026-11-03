@@ -398,7 +398,7 @@ Rulings still open before any spec:
 - Quality floor on the shrink path — unbounded, the loop starves the easiest chunks (config-targets vocabulary exists; fixed runs currently ignore targets).
 - Which stats get the motion adjustment (and the VMAF double-count); the floor becomes a per-chunk band (motion-tolerance factor in config).
 - Termination set: within tolerance, best-so-far acceptance, min-expected-gain threshold (near convergence each re-encode buys little), unreachability exit (knob range/floors exhausted → stop, report).
-- Scope: single-strategy or the post-optimization winner — fixed-mode strategy comparison assumes nominally equal knobs, per-chunk deviation breaks that premise. Composes with §133 (massive reductions are downscale territory; knob evolution handles moderate deltas).
+- Scope: single-strategy or the post-optimization winner — fixed-mode strategy comparison assumes nominally equal knobs, per-chunk deviation breaks that premise. Composes with `--scale` (massive reductions are downscale territory; knob evolution handles moderate deltas).
 - What "size" is: target file size − audio size (known upfront) − container overhead = the video budget the loop steers.
 - Measurement is implied by the mode (flag-semantics doctrine: measure iff consumed).
 
@@ -595,28 +595,7 @@ the ruler-less table discussion)
 
 ---
 
-## 133. Downscaling of videos for encoding
 
-User scenario: got 4k source, encoding produces a 50 GB output - too huge for user's archiving policy. User wants to keep archiving size under 15 GB.
-
-Possible resolution: allow downscaling of the videos.
-
-Scope: encoding and in-run measurements. No upscaling (nowhere to get extra info from, so no reason to increase size as part of pyqenc).
-
-Extra considerations:
-
-- downscaling is applied after crop (on top of it)
-- aspect ratio must be preserved (and here's a question of stored vs presented resolution)
-- a single scale (`--width <value>`?) or a box (`--downscale <width>[,<height>]` or `--scale`?) to fit in?
-- separate from `measure` intent - where we allow scaling either way (up or down) - but only to have the same measuring scale.
-- downscaling algorithm used? probably in config.
-- noop if either not specified by the user, or the same as the source.
-- nullable is probably ok (and omitted on none from sidecars - default behvaior already)
-- a change invalidates all investment (winners, attempts, merged too) - both for algorithm used and for the scale change
-- resolution granularity for the codec (different codecs have different requirements; some older ones needed like 16 granularity; newer ones are often 2 or 4 granularity).
-  we define resulting colorspace in the codec, so probably resolution granularity should also be part of codec
-
----
 
 ## 134. Names and constants
 
@@ -828,12 +807,7 @@ transitions like the four in the §83 rework e2e.
 
 ---
 
-## 144. Crop params
 
-Need to check effect of empty crop params (0,0,0,0) on measure / encoding.
-If we should omit them both in the class' method and in outside consumers.
-
----
 
 ## 145. structlog
 
@@ -1004,6 +978,13 @@ Just maybe extend to the concepts of re-producing vs re-measuring?
 
 And the key difference is settings (global) vs input-based (dependencies of the phase).
 
+Rider (2026-11-03, from the §133 design rounds): attempts gain the probe fingerprint as a
+recorded sidecar field (which pixel-shaping facts produced them) — record-only for now, ladder
+behavior unchanged. The revision this item wants should use it: preserve or demote attempts on
+pixel-shaping key changes where the old products remain meaningful, instead of the force-wiped
+whole-namespace outcome (user: wiping encoding investments is the least favorite behavior;
+attempts are the costly layer per the weight list above).
+
 ---
 
 ## 160. loudnorm resamples output to 192 kHz — must preserve source rate
@@ -1021,7 +1002,7 @@ resample itself is a bug to fix here, not behavior to account for.
 ## 161. CLI subcommands lack proper description
 
 They currently hold all their arguments, but not explanation to human. Like, what is `video` for? or `extract`?
-No examples too.
+No examples too. Everything is put at the main level `pyqenc -h` only.
 
 ---
 

@@ -68,6 +68,8 @@ These options apply to `auto` and `video` (the video chain resolvers).
 | `--no-measure`            | Skip quality measurements — always the merged-output one, plus attempt measurement and the optimization phase when nothing consumes them; see [Measurement Opt-Out](#measurement-opt-out---no-measure) | `False` (measurements enabled)    |
 | `--sampling N`            | Frame sampling for quality measurement: every N-th frame. Lower = more precise but slower. Measurements precision directly affect encoding results. sampling=1 is recommended. Short chunks automatically use a lower factor (keeps >=20 VMAF readings after the first-frame exclusion from the statistics). | from config (`1`)                  |
 | `--no-visual-hash`        | Disable emoji visual-hash prefix on chunk log lines                                                                                                                            | off                                |
+| `--scale W[xH]`           | Scale the encoded output to this resolution (the archive-shrink tool). Crop is applied first; no upscaling (except a deliberate `exact`); a target the source already satisfies is a no-op. The scaler is `encoding.scale_algorithm` from config (`lanczos`) | off                                |
+| `--scale-mode MODE`       | How `--scale` maps onto the cropped source: `contain` (default) fits inside the box preserving the displayed aspect; `cover` scales down to the minimum size reaching the box on both axes; `exact` uses `WxH` verbatim — aspect may change by design (the fix-distorted-aspect tool) and the output snaps to square pixels | `contain`                          |
 
 ### Measurement Opt-Out (`--no-measure`)
 
@@ -344,5 +346,5 @@ Outputs go under `<work-dir>/measure/`:
 | `--screenshots N`  | Number of screenshots per video (caps the total in interval mode)            | `20`                 |
 | `--every INTERVAL` | Screenshot interval (e.g. `"30s"`, `"5m"`) instead of count mode             | —                    |
 | `--include-edges`  | Include frame 0 and the last frame in screenshot positions (count mode only) | off                  |
-| `--width W`        | Scale both videos to width W before metric computation                       | no scaling           |
+| `--scale W[xH]`    | Scale both videos to this resolution for a common measuring scale (crop applied to the source first; screenshots unaffected); `--scale-mode` selects the mapping, exactly like on `auto`/`video` | no scaling           |
 | `--crop PARAMS`    | Crop parameters (same format as `auto`)                                      | auto from probe.yaml |
