@@ -14,7 +14,7 @@ from decimal import ROUND_HALF_EVEN, Decimal
 from pathlib import Path
 
 from pyqenc.constants import MIN_READINGS_AFTER_SKIP
-from pyqenc.models import CropParams, QualityTarget
+from pyqenc.models import CropParams, QualityTarget, join_filter_chain
 from pyqenc.quality_metrics import (
     MeasuredMetrics,
     MetricType,
@@ -57,7 +57,8 @@ async def run_metrics(
     reference:         FFmpegInput,
     crop_distorted:    CropParams,
     crop_reference:    CropParams,
-    width:             int,
+    scale_distorted:   tuple[int, int] | None,
+    scale_reference:   tuple[int, int] | None,
     use_gpu:           bool,
     sampling:          int,
     output_prefix:     str,
@@ -89,8 +90,14 @@ async def run_metrics(
                            ``-ss``/``-t``), so the window is fully bound to the
                            input and the output timeline starts at ~0.
         crop_distorted:    Crop parameters for the distorted input.
-        crop_reference:    Crop parameters for the reference input.
-        width:             Scale both inputs to this width (0 = no scaling).
+        crop_reference:   Crop parameters for the reference input.
+        scale_distorted:  Explicit output dimensions to scale the distorted
+                           input to (``None`` = no scaling).
+        scale_reference:  Explicit output dimensions to scale the reference
+                           input to (``None`` = no scaling). Explicit
+                           dimensions per side, never width-auto: quantized
+                           heights can diverge from an auto height by a pixel
+                           and framesync hard-fails on dimension mismatch.
         use_gpu:           Use GPU-accelerated VMAF (``libvmaf_cuda``).
         sampling:          Frame subsampling factor (1 = every frame).
         output_prefix:     Simple filename prefix (no path separators) for metric
@@ -131,9 +138,10 @@ async def run_metrics(
     branches: list[MetricType] = [m for m in MetricType if m in active and m != MetricType.VIF]
     n_branches = len(branches)
 
-    width_str = f",scale={width}:-1" if width else ""
-    crop_d    = crop_distorted.to_ffmpeg_filter()
-    crop_r    = crop_reference.to_ffmpeg_filter()
+    crop_d     = crop_distorted.to_ffmpeg_filter()   # "" when empty — the filter exists iff it changes pixels
+    crop_r     = crop_reference.to_ffmpeg_filter()
+    scale_d    = f"scale={scale_distorted[0]}:{scale_distorted[1]}" if scale_distorted else ""
+    scale_r    = f"scale={scale_reference[0]}:{scale_reference[1]}" if scale_reference else ""
 
     # The re-timing rate: the caller-known truth when available (both inputs
     # are the same content), else each input's self-declared rate.
@@ -147,19 +155,19 @@ async def run_metrics(
     # both sides, so pairing is index-perfect.
     if n_branches == 1:
         # No split needed — single branch uses [main]/[ref] directly
-        sel = f",select='not(mod(n,{sampling}))',setpts=N/({retime_rate}*TB)" if (
+        sel = f"select='not(mod(n,{sampling}))',setpts=N/({retime_rate}*TB)" if (
             sampling > 1 and branches[0].info.subsample_via_filter
-        ) else f",setpts=N/({retime_rate}*TB)"
-        f_dist = f"[0:v]{crop_d}{width_str}{sel}[main]"
-        f_ref  = f"[1:v]{crop_r}{width_str}{sel}[ref]"
+        ) else f"setpts=N/({retime_rate}*TB)"
+        f_dist = f"[0:v]{join_filter_chain([crop_d, scale_d, sel])}[main]"
+        f_ref  = f"[1:v]{join_filter_chain([crop_r, scale_r, sel])}[ref]"
         branch_labels_d = ["main"]
         branch_labels_r = ["ref"]
     else:
         # Split into N branches; each branch gets its own label
         split_labels_d = "".join(f"[d{i}]" for i in range(n_branches))
         split_labels_r = "".join(f"[r{i}]" for i in range(n_branches))
-        f_dist_base = f"[0:v]{crop_d}{width_str},split={n_branches}{split_labels_d}"
-        f_ref_base  = f"[1:v]{crop_r}{width_str},split={n_branches}{split_labels_r}"
+        f_dist_base = f"[0:v]{join_filter_chain([crop_d, scale_d, f'split={n_branches}{split_labels_d}'])}"
+        f_ref_base  = f"[1:v]{join_filter_chain([crop_r, scale_r, f'split={n_branches}{split_labels_r}'])}"
 
         # Per-branch select/setpts
         branch_parts_d: list[str] = []

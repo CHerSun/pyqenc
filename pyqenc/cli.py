@@ -38,6 +38,8 @@ from pyqenc.constants import (
 from pyqenc.models import (
     CleanupLevel,
     CropParams,
+    ScaleMode,
+    ScaleSpec,
 )
 from pyqenc.runner import RunResult
 from pyqenc.utils.ffmpeg_runner import kill_all_ffmpeg
@@ -326,7 +328,11 @@ def _add_quality_arguments(parser: argparse.ArgumentParser) -> None:
         action="store_false",
         dest="optimize",
         default=True,
-        help="Disable optimization phase and produce output for all strategies.",
+        help=(
+            "Disable optimization phase and produce output for all strategies. "
+            "Fixed runs skip attempt measurements too (no elimination, no "
+            "anchor to judge them); the merged-output measurement stays."
+        ),
     )
     parser.add_argument(
         "-N", "--no-measure",
@@ -337,9 +343,9 @@ def _add_quality_arguments(parser: argparse.ArgumentParser) -> None:
             "Skip quality measurements: always the merged-output measurement "
             "(its target verdicts and missed-target warnings are not produced "
             "either; run 'pyqenc measure <output>' afterwards for quality "
-            "metrics), plus attempt measurement and the optimization phase "
-            "when nothing consumes them — a fixed run with --no-optimize or "
-            "a single strategy. The per-chunk search itself always measures; "
+            "metrics), plus attempt measurement on fixed runs (a multi-"
+            "strategy elimination still measures its own small test "
+            "population). The per-chunk search itself always measures; "
             "it steers by the results."
         ),
     )
@@ -358,6 +364,41 @@ def _add_quality_arguments(parser: argparse.ArgumentParser) -> None:
         "--no-visual-hash",
         action="store_true",
         help="Disable emoji visual hash prefix on chunk log lines (default: enabled).",
+    )
+    _add_scale_arguments(parser)
+
+
+def _add_scale_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add the output-scale arguments (plan-coupled on encoding intents; the
+    measuring scale on the measure intent — one flag, one meaning)."""
+    parser.add_argument(
+        "--scale",
+        type=str,
+        default=None,
+        metavar="W[xH]",
+        help=(
+            "Scale the output to this resolution: W pins the width (height "
+            "free), WxH a box (or the exact target under --scale-mode exact). "
+            "Crop is applied first; the mapping mode decides how the target "
+            "is reached. No upscaling (except a deliberate --scale-mode "
+            "exact); a target the source already satisfies is a no-op. "
+            "Omit for no scaling. On the measure intent both compared videos "
+            "are scaled to the computed resolution for a common measuring "
+            "scale (screenshots unaffected)."
+        ),
+    )
+    parser.add_argument(
+        "--scale-mode",
+        type=str,
+        default=ScaleMode.CONTAIN.value,
+        choices=[m.value for m in ScaleMode if m != ScaleMode.OFF],
+        help=(
+            "How --scale maps onto the cropped source: contain (default) fits "
+            "inside the box preserving aspect; cover scales down to the "
+            "minimum size that reaches the box on both axes; exact uses the "
+            "WxH target verbatim — aspect may change by design (the "
+            "fix-distorted-aspect tool) and the output snaps to square pixels."
+        ),
     )
 
 
@@ -457,6 +498,8 @@ def _build_plan(args: argparse.Namespace, config: AppConfig) -> EncodingPlan:
         strategies = _parse_strategies(getattr(args, "strategies", None)),
         targets    = _parse_targets(getattr(args, "targets", None)),
         quality    = _parse_quality_override(getattr(args, "quality", None)),
+        scale_target = getattr(args, "scale", None),
+        scale_mode   = ScaleMode(getattr(args, "scale_mode", ScaleMode.CONTAIN.value)),
     )
 
 
@@ -607,6 +650,10 @@ def _cmd_pipeline(args: argparse.Namespace) -> int:
             "Source:":         args.source,
             "Work directory:": args.work_dir,
             "Cropping:":       f"manual ({crop_params})" if crop_params else "automatic",
+            "Scaling:":        (
+                f"{plan.scale.mode.value} {plan.scale.width}"
+                + (f"x{plan.scale.height}" if plan.scale.height is not None else "")
+            ) if plan.scale is not None else "none",
             "Strategies:":     strategy_display,
             "Targets:":        ", ".join(str(t) for t in plan.targets),
             "Work mode:":      "DRY-RUN (no changes will be made)" if not execute else "EXECUTE",
@@ -814,16 +861,7 @@ def _create_measure_subcommand(subparsers: argparse._SubParsersAction) -> None:
             "Directly affects reliability of metrics. A tradeoff between precision and speed."
         ),
     )
-    p.add_argument(
-        "--width",
-        type=int,
-        default=None,
-        metavar="W",
-        help=(
-            "Scale both source and distorted video to width W (preserving aspect ratio) during "
-            "metric computation. Crop is applied first. Does not affect screenshots."
-        ),
-    )
+    _add_scale_arguments(p)
     p.add_argument(
         "--screenshots",
         type=int,
@@ -874,6 +912,14 @@ def _cmd_measure(args: argparse.Namespace) -> int:
         if cli_sampling is not None:
             _config.measurement.sampling = cli_sampling
 
+        scale_spec = None
+        if args.scale is not None:
+            scale_spec = ScaleSpec.parse(
+                args.scale,
+                mode     = ScaleMode(args.scale_mode),
+                algorithm= _config.encoding.scale_algorithm,
+            )
+
         measure_quality(
             source_video             = args.source,
             work_dir                 = args.work_dir,
@@ -884,7 +930,7 @@ def _cmd_measure(args: argparse.Namespace) -> int:
             screenshot_count         = args.screenshots,
             screenshot_interval      = args.every,
             screenshot_include_edges = args.screenshot_include_edges,
-            width                    = args.width,
+            scale                    = scale_spec,
         )
         return 0
     except FileNotFoundError as e:

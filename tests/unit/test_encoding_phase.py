@@ -12,9 +12,9 @@ from decimal import Decimal
 from pathlib import Path
 
 from pyqenc.app_config import load_app_config
+from pyqenc.models import ArtifactState
 from pyqenc.phases.encoding import AttemptSidecar, _recover_pairs
 from pyqenc.quality_metrics import MeasuredMetrics, MetricStatKey
-from pyqenc.state import ArtifactState
 from pyqenc.stream_model import EncodedChunk as _EC
 from pyqenc.utils.yaml_utils import load_model, write_yaml_atomic
 
@@ -169,6 +169,7 @@ from unittest.mock import patch as _patch
 import yaml as _yaml
 
 from pyqenc.app_metrics import AppMetricsCollector as _AppMetricsCollector
+from pyqenc.models import ResolvedScale, fingerprinter
 from pyqenc.models import Strategy as _Strategy
 from pyqenc.phases.encoding import ChunkEncoder as _ChunkEncoder
 from pyqenc.phases.encoding import _ChunkEncodingResult
@@ -245,7 +246,9 @@ def _run_encode(
             work_dir          = tmp_path,
             plan              = _FIXED_PLAN,
             collector         = _MM(spec=_AppMetricsCollector),
-            crop_params       = None,
+            crop_params       = CropParams(),
+        scale=ResolvedScale(),
+        probe_fingerprint=fingerprinter.of_text('test-probe'),
             cleanup_level     = CleanupLevel.NONE,
             visual_hash       = True,
             sampling           = 10,
@@ -259,7 +262,9 @@ def _run_encode(
             work_dir          = tmp_path,
             plan              = _FIXED_PLAN,
             collector         = _MM(spec=_AppMetricsCollector),
-            crop_params       = None,
+            crop_params       = CropParams(),
+        scale=ResolvedScale(),
+        probe_fingerprint=fingerprinter.of_text('test-probe'),
             cleanup_level     = CleanupLevel.NONE,
             visual_hash       = True,
             sampling           = 10,
@@ -356,7 +361,9 @@ class TestMeasureAttemptsSeam:
             work_dir         = tmp_path,
             plan             = _FIXED_PLAN,
             collector        = _MM(spec=_AppMetricsCollector),
-            crop_params       = None,
+            crop_params       = CropParams(),
+        scale=ResolvedScale(),
+        probe_fingerprint=fingerprinter.of_text('test-probe'),
             cleanup_level     = CleanupLevel.NONE,
             visual_hash       = True,
             sampling          = 10,
@@ -406,6 +413,7 @@ class TestMeasureAttemptsSeam:
 # ---------------------------------------------------------------------------
 
 from pyqenc.app_metrics import AppMetricKey, NoOpAppMetricsCollector
+from pyqenc.models import ArtifactState as _PAState
 from pyqenc.models import CleanupLevel, CropParams, PhaseOutcome, QualityTarget
 from pyqenc.phase import Artifact as _PAArtifact
 from pyqenc.phase import PhaseRegistry
@@ -420,7 +428,6 @@ from pyqenc.phases.encoding import (
 from pyqenc.phases.job import JobPhase
 from pyqenc.phases.optimization import OptimizationPhase, OptimizationPhaseResult
 from pyqenc.phases.probe import ProbePhase, ProbePhaseResult
-from pyqenc.state import ArtifactState as _PAState
 from pyqenc.stream_model import ExtendedVideoStream
 
 
@@ -531,7 +538,9 @@ def _run_encode_with_targets(
         work_dir          = tmp_path,
         plan              = _FIXED_PLAN,
         collector         = _MM(spec=_AppMetricsCollector),
-        crop_params       = None,
+        crop_params       = CropParams(),
+        scale=ResolvedScale(),
+        probe_fingerprint=fingerprinter.of_text('test-probe'),
         cleanup_level     = CleanupLevel.NONE,
         visual_hash       = True,
         sampling           = 10,
@@ -581,6 +590,7 @@ class TestAttemptFrameCountSourcing:
                 "metrics": {"vmaf_min": 95.0},
                 "sampling": sampling,
                 "frame_count": frame_count,
+                "probe": str(fingerprinter.of_text("test-probe")),
             }),
             encoding="utf-8",
         )
@@ -592,7 +602,9 @@ class TestAttemptFrameCountSourcing:
             work_dir          = tmp_path,
             plan              = _FIXED_PLAN,
             collector         = _MM(spec=_AppMetricsCollector),
-            crop_params       = None,
+            crop_params       = CropParams(),
+            scale             = ResolvedScale(),
+            probe_fingerprint = fingerprinter.of_text("test-probe"),
             cleanup_level     = CleanupLevel.NONE,
             visual_hash       = True,
             sampling           = 10,
@@ -671,7 +683,9 @@ class TestEffectiveSamplingThreading:
             work_dir          = tmp_path,
             plan              = _FIXED_PLAN,
             collector         = _MM(spec=_AppMetricsCollector),
-            crop_params       = None,
+            crop_params       = CropParams(),
+        scale=ResolvedScale(),
+        probe_fingerprint=fingerprinter.of_text('test-probe'),
             cleanup_level     = CleanupLevel.NONE,
             visual_hash       = True,
             sampling           = 10,
@@ -827,7 +841,7 @@ class TestEncodingPresentationTargets:
             ),
             frame_count=240, crop=CropParams(),
         )
-        probe = ProbePhase(config, {}, collector=NoOpAppMetricsCollector(), crop_params=None, plan=plan)
+        probe = ProbePhase(config, {}, collector=NoOpAppMetricsCollector(), crop_params=CropParams(), plan=plan)
         probe.result = ProbePhaseResult(
             outcome=PhaseOutcome.COMPLETED, message="stub",
             plan=plan,
@@ -1097,7 +1111,7 @@ class TestWinningLimiterBasisLine:
             stream=VideoStream(file=_File(path=src), info=info),
             frame_count=240, crop=CropParams(),
         )
-        probe = ProbePhase(config, {}, collector=NoOpAppMetricsCollector(), crop_params=None, plan=plan)
+        probe = ProbePhase(config, {}, collector=NoOpAppMetricsCollector(), crop_params=CropParams(), plan=plan)
         probe.result = ProbePhaseResult(
             outcome=PhaseOutcome.COMPLETED, message="stub",
             plan=plan,
@@ -1367,7 +1381,9 @@ class TestSpaceFloorGatesFreshEncodes:
             work_dir         = tmp_path,
             plan             = _FIXED_PLAN,
             collector        = _MM(spec=_AppMetricsCollector),
-            crop_params       = None,
+            crop_params       = CropParams(),
+        scale=ResolvedScale(),
+        probe_fingerprint=fingerprinter.of_text('test-probe'),
             cleanup_level     = CleanupLevel.NONE,
             visual_hash       = True,
             sampling          = 10,

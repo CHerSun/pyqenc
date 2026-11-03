@@ -27,16 +27,18 @@ from unittest.mock import patch
 from pyqenc.app_config import load_app_config
 from pyqenc.app_metrics import NoOpAppMetricsCollector
 from pyqenc.models import (
+    ArtifactState,
     CleanupLevel,
     CropParams,
     PhaseOutcome,
+    ResolvedScale,
+    ScaleMode,
     SizedFingerprint,
 )
 from pyqenc.phase import Artifact, PhaseRegistry
 from pyqenc.phases.extraction import ExtractionPhase, ExtractionPhaseResult
 from pyqenc.phases.job import JobPhase, JobPhaseResult
 from pyqenc.phases.probe import ProbePhase, ProbePhaseResult, ProbeSidecar
-from pyqenc.state import ArtifactState
 from pyqenc.stream_model import ProbedFile, VideoStream, VideoStreamInfo
 from pyqenc.utils.yaml_utils import load_model, save_model
 from tests.test_metrics_integration import (
@@ -332,8 +334,18 @@ class TestDeriveResultingResolution:
         from pyqenc.phases.probe import _derive_resulting_resolution
 
         video = _make_video_stream(tmp_path / "source.mkv")
-        result = _derive_resulting_resolution(video, CropParams(top=22, bottom=22))
+        result = _derive_resulting_resolution(video, CropParams(top=22, bottom=22), ResolvedScale())
         assert result == "1920x1036"
+
+    def test_derives_scaled_dimensions_when_applied(self, tmp_path: Path):
+        """An applied scale replaces the cropped dimensions — the scale's
+        output dims ARE the resulting resolution."""
+        from pyqenc.phases.probe import _derive_resulting_resolution
+
+        video = _make_video_stream(tmp_path / "source.mkv")
+        scaled = ResolvedScale(mode=ScaleMode.CONTAIN, width=1280, height=691, algorithm="lanczos")
+        result = _derive_resulting_resolution(video, CropParams(top=22, bottom=22), scaled)
+        assert result == "1280x691"
 
     def test_unknown_source_resolution_gives_none(self, tmp_path: Path):
         """A stream without probed dimensions yields None, never a guess."""
@@ -343,7 +355,7 @@ class TestDeriveResultingResolution:
             file = ProbedFile(fingerprint=_STUB_SOURCE_FP, path=tmp_path / "s.mkv"),
             info = VideoStreamInfo(track_id=0),
         )
-        assert _derive_resulting_resolution(video, CropParams()) is None
+        assert _derive_resulting_resolution(video, CropParams(), ResolvedScale()) is None
 
 
 # ---------------------------------------------------------------------------

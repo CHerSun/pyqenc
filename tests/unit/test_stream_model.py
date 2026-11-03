@@ -338,10 +338,11 @@ class TestUniqueSliceDumps:
 
     def test_extended_adds_only_the_slow_facet(self) -> None:
         """Beyond the composed reference, the object owns exactly the slow
-        facet — frame_count and crop; the probe sidecar persists this slice
-        and re-composes the base stream at load."""
+        facet — frame_count, crop, and the resolved scale; the probe
+        sidecar persists this slice and re-composes the base stream at
+        load."""
         dumped = _extended().model_dump(exclude_none=True)
-        assert set(dumped) - {"stream"} == {"frame_count", "crop"}
+        assert set(dumped) - {"stream"} == {"frame_count", "crop", "scale"}
 
 
 class TestSidecarByteIdentity:

@@ -26,8 +26,8 @@ from pyqenc.constants import (
     THICK_LINE,
     VISUAL_HASH_EMOJIS_WIDE,
 )
+from pyqenc.models import ArtifactState
 from pyqenc.quality_metrics import MetricStatKey, TargetedMetrics
-from pyqenc.state import ArtifactState
 
 if TYPE_CHECKING:
     from decimal import Decimal
@@ -275,6 +275,5 @@ def fmt_size_mb(size_bytes: int) -> str:
     mb = size_bytes / (1024 * 1024)
     # Format with comma thousands separator then swap to narrow no-break space (U+202F). Use single decimal place for <1000 MB values.
     return f"{mb:,.1f}".replace(",", "\u202f") if mb < 1000 else f"{mb:,.0f}".replace(",", "\u202f")
-
 
 

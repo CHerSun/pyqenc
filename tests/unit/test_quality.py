@@ -1443,7 +1443,8 @@ class TestRunMetricsCommandGolden:
                     reference       = FFmpegInput(path=reference, start_seconds=584.917, duration_seconds=116.5),
                     crop_distorted  = CropParams(),
                     crop_reference  = CropParams(),
-                    width           = 0,
+                    scale_distorted = None,
+                    scale_reference = None,
                     use_gpu         = False,
                     sampling        = 1,
                     output_prefix   = "uuid",
@@ -1452,8 +1453,8 @@ class TestRunMetricsCommandGolden:
 
         assert len(captured) == 1
         graph = (
-            "[0:v]crop=iw-0:ih-0:0:0,setpts=N/(FRAME_RATE*TB)[main];"
-            "[1:v]crop=iw-0:ih-0:0:0,setpts=N/(FRAME_RATE*TB)[ref];"
+            "[0:v]setpts=N/(FRAME_RATE*TB)[main];"
+            "[1:v]setpts=N/(FRAME_RATE*TB)[ref];"
             "[main][ref]psnr=stats_file=uuidpsnr.log"
         )
         argv = [str(a) for a in compose_command(captured[0])[0]]
@@ -1500,7 +1501,8 @@ class TestRunMetricsCommandGolden:
                     reference       = FFmpegInput(path=reference),
                     crop_distorted  = CropParams(),
                     crop_reference  = CropParams(),
-                    width           = 0,
+                    scale_distorted = None,
+                    scale_reference = None,
                     use_gpu         = False,
                     sampling        = 1,
                     output_prefix   = "uuid",
@@ -1508,12 +1510,64 @@ class TestRunMetricsCommandGolden:
                 )
             )
 
-        graph = "[0:v]crop=iw-0:ih-0:0:0,setpts=N/(23.976023976023978*TB)[main];[1:v]crop=iw-0:ih-0:0:0,setpts=N/(23.976023976023978*TB)[ref];[main][ref]psnr=stats_file=uuidpsnr.log"
+        graph = "[0:v]setpts=N/(23.976023976023978*TB)[main];[1:v]setpts=N/(23.976023976023978*TB)[ref];[main][ref]psnr=stats_file=uuidpsnr.log"
         argv = [str(a) for a in compose_command(captured[0])[0]]
         assert argv == [
             "ffmpeg", *_PROGRESS_FLAGS, "-y",
             "-i", str(distorted),
             "-i", str(reference),
+            "-filter_complex", graph,
+            "-map_chapters", "-1",
+            "-f", "null", "-",
+        ]
+
+    def test_golden_argv_with_reference_crop(self, tmp_path) -> None:
+        """A set crop appears as a segment on its own side only — the
+        distorted side stays filter-free (its crop is empty by construction)."""
+        import asyncio
+        from unittest.mock import patch
+
+        from pyqenc.models import CropParams
+        from pyqenc.quality import run_metrics
+        from pyqenc.utils.ffmpeg_runner import (
+            _PROGRESS_FLAGS,
+            FFmpegInput,
+            FFmpegRunResult,
+            compose_command,
+        )
+
+        captured: list = []
+
+        async def fake_async(request, **_kwargs):
+            captured.append(request)
+            return FFmpegRunResult(returncode=0, success=True)
+
+        with patch("pyqenc.quality.run_ffmpeg_async", side_effect=fake_async):
+            asyncio.run(
+                run_metrics(
+                    metrics         = {MetricType.PSNR},
+                    distorted       = FFmpegInput(path=tmp_path / "enc" / "dist.mkv"),
+                    reference       = FFmpegInput(path=tmp_path / "chunks" / "ref.mkv"),
+                    crop_distorted  = CropParams(),
+                    crop_reference  = CropParams(top=22, bottom=22),
+                    scale_distorted = None,
+                    scale_reference = None,
+                    use_gpu         = False,
+                    sampling        = 1,
+                    output_prefix   = "uuid",
+                )
+            )
+
+        graph = (
+            "[0:v]setpts=N/(FRAME_RATE*TB)[main];"
+            "[1:v]crop=iw-0:ih-44:0:22,setpts=N/(FRAME_RATE*TB)[ref];"
+            "[main][ref]psnr=stats_file=uuidpsnr.log"
+        )
+        argv = [str(a) for a in compose_command(captured[0])[0]]
+        assert argv == [
+            "ffmpeg", *_PROGRESS_FLAGS, "-y",
+            "-i", str(tmp_path / "enc" / "dist.mkv"),
+            "-i", str(tmp_path / "chunks" / "ref.mkv"),
             "-filter_complex", graph,
             "-map_chapters", "-1",
             "-f", "null", "-",

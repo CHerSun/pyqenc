@@ -21,6 +21,7 @@ import pytest
 
 from pyqenc.app_config import AppConfig, load_app_config
 from pyqenc.models import (
+    ArtifactState,
     CleanupLevel,
     CropParams,
     EncodingPlan,
@@ -44,7 +45,6 @@ from pyqenc.quality_metrics import MetricStatKey, TargetedMetrics
 from pyqenc.quality_metrics import MetricStatKey as _K
 from pyqenc.quality_metrics import MetricType as _MT
 from pyqenc.quality_metrics import StatisticType as _ST
-from pyqenc.state import ArtifactState, ProbeFacet
 from pyqenc.stream_model import ProbedFile
 from pyqenc.summary_tables import StrategyRow
 from pyqenc.utils.yaml_utils import save_model, write_yaml_atomic
@@ -190,7 +190,7 @@ def _persist_optimization(
         chunks      = fingerprinter.of_ids(
             a.payload.safe_name() for a in chunking.result.chunks
         ),
-        probe       = ProbeFacet.from_probe(probe.result),
+        probe       = probe.result.probe_fingerprint(),
         sampling    = phase._config.measurement.sampling,
         test_chunks = test_chunks if test_chunks is not None else ["chunk-001", "chunk-002"],
         summary     = summary,
@@ -568,11 +568,14 @@ class TestAllStrategiesMode:
 
 
 class TestMeasureOptOut:
-    """The ``--no-measure`` opt-out on the optimization phase's skip decision.
+    """The fixed-mode optimization-phase skip: measurements kept on both
+    sides of the flag where a consumer exists, skipped where none does.
 
-    The phase is skipped when no decision is needed — ``--no-optimize`` or a
-    single strategy — AND measurement was opted out; measurement kept (the
-    default) preserves §123: fixed runs always run the test population.
+    ``--no-optimize`` skips the phase entirely (nothing eliminates — no
+    anchor, attempts encode unmeasured, merged measurement remains); the
+    measurement opt-out additionally skips the degenerate single-strategy
+    population, while a multi-strategy elimination still runs its own
+    measured test population (§123 keeps the anchor for measured runs).
     """
 
     _SKIP_MESSAGE = "all-strategies mode — skipping optimization"
@@ -619,14 +622,21 @@ class TestMeasureOptOut:
         )
         assert result.message != self._SKIP_MESSAGE
 
-    def test_measure_keeps_no_optimize_running_phase(self, tmp_path: Path) -> None:
-        """§123 unchanged: ``--no-optimize`` alone still runs the anchor
-        machinery (winner-limiter tuning data stays available)."""
-        result = self._run_fixed(
-            tmp_path, optimize=False, measure=True,
-            strategy_names=["h265-aq+slow", "h264+slow"],
-        )
-        assert result.message != self._SKIP_MESSAGE
+    def test_measure_no_optimize_skips_phase(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """``--no-optimize`` skips the phase on measured runs too: nothing
+        eliminates, so no anchor exists and attempts encode unmeasured —
+        the skip line says so, and the merged-output measurement remains."""
+        with caplog.at_level(logging.INFO, logger="pyqenc.phases.optimization"):
+            result = self._run_fixed(
+                tmp_path, optimize=False, measure=True,
+                strategy_names=["h265-aq+slow", "h264+slow"],
+            )
+        assert result.message == self._SKIP_MESSAGE
+        assert "no elimination" in caplog.text
+        assert "unmeasured" in caplog.text
+        assert "merged-output measurement remains" in caplog.text
 
 
 # ---------------------------------------------------------------------------
@@ -932,7 +942,6 @@ class TestStrategyFingerprintWipe:
             SearchOptimizationSidecar,
             current_optimization_sidecar,
         )
-        from pyqenc.state import ProbeFacet
 
         # force=True grants the permission the fatal band demands.
         phase, work_dir = _make_phase(
@@ -961,7 +970,7 @@ class TestStrategyFingerprintWipe:
             chunks      = fingerprinter.of_ids(
                 a.payload.safe_name() for a in chunking.result.chunks
             ),
-            probe       = ProbeFacet.from_probe(probe.result),
+            probe       = probe.result.probe_fingerprint(),
             sampling    = phase._config.measurement.sampling,
             test_chunks = [c.safe_name() for c in chunks],
             summary     = [],
@@ -1042,6 +1051,24 @@ class TestFixedQualityBanner:
             )
             phase.run(dry_run=False)
         assert self._banner_count(caplog) == 1
+        assert "final quality check" not in caplog.text
+
+    def test_banner_notes_unmeasured_attempts_when_elimination_still_measures(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Optimize + multiple strategies under the opt-out: the elimination
+        still runs on its own measured test population while attempts encode
+        unmeasured — the banner states that implied behavior in place of the
+        dropped final-check promise."""
+        with caplog.at_level(logging.WARNING, logger="pyqenc.phases.optimization"):
+            phase, _, _ = _make_fixed_phase(
+                tmp_path,
+                strategy_names=["h265-aq+slow", "h264+slow"], measure=False,
+            )
+            phase.run(dry_run=True)
+        assert self._banner_count(caplog) == 1
+        assert "attempts encode unmeasured" in caplog.text
+        assert "test population" in caplog.text
         assert "final quality check" not in caplog.text
 
     def test_no_banner_on_searched_runs(
@@ -1646,9 +1673,10 @@ class TestFixedReuseFromPersisted:
 
 
 class TestFixedAlwaysRuns:
-    """§123: fixed runs always run the test population and elect an anchor —
-    the single-strategy skip and the `--no-optimize` fixed skip are gone;
-    the anchor machinery behaves identically to any compared fixed run."""
+    """§123: measured fixed runs always run the test population and elect an
+    anchor — the single-strategy skip is gone and the anchor machinery
+    behaves identically to any compared fixed run. (`--no-optimize` skips
+    the phase again: nothing eliminates, so no anchor can exist.)"""
 
     def test_single_strategy_fails_loudly_without_chunks(self, tmp_path: Path) -> None:
         """No all-strategies skip: a single fixed strategy proceeds into

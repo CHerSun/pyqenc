@@ -22,6 +22,7 @@ import yaml
 
 from pyqenc.app_config import load_app_config
 from pyqenc.models import (
+    ArtifactState,
     CleanupLevel,
     PhaseOutcome,
     QualityTarget,
@@ -29,7 +30,6 @@ from pyqenc.models import (
 )
 from pyqenc.phases.job import JobPhase, JobSidecar
 from pyqenc.quality_metrics import MetricStatKey
-from pyqenc.state import ArtifactState
 from pyqenc.utils.yaml_utils import write_yaml_atomic
 
 # ---------------------------------------------------------------------------

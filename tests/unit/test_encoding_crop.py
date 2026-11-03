@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 
 from pyqenc.app_config import load_app_config
 from pyqenc.app_metrics import AppMetricKey
-from pyqenc.models import CleanupLevel, CodecConfig, CropParams, Strategy
+from pyqenc.models import CleanupLevel, CodecConfig, CropParams, ResolvedScale, Strategy, fingerprinter
 from pyqenc.phases.encoding import ChunkEncoder
 from pyqenc.stream_model import (
     CropParams as _CP,
@@ -35,7 +35,10 @@ _PLAN = load_app_config(default_only=True).build_encoding_plan(
 )
 
 
-def _make_encoder(crop_params: CropParams | None = None) -> ChunkEncoder:
+_NO_CROP = CropParams()
+
+
+def _make_encoder(crop_params: CropParams = _NO_CROP) -> ChunkEncoder:
     """Build a minimal ChunkEncoder with mocked dependencies."""
     from pyqenc.app_metrics import NoOpAppMetricsCollector
     return ChunkEncoder(
@@ -44,6 +47,8 @@ def _make_encoder(crop_params: CropParams | None = None) -> ChunkEncoder:
         plan=_PLAN,
         collector=NoOpAppMetricsCollector(),
         crop_params=crop_params,
+        scale=ResolvedScale(),
+        probe_fingerprint=fingerprinter.of_text('test-probe'),
         cleanup_level=CleanupLevel.NONE,
         visual_hash=False,
         sampling=1,
@@ -97,7 +102,7 @@ def _make_chunk() -> VideoStreamChunk:
 # Helpers to capture the ffmpeg command
 # ---------------------------------------------------------------------------
 
-def _captured_request(encoder: ChunkEncoder, crop: CropParams | None) -> FFmpegRequest:
+def _captured_request(encoder: ChunkEncoder, crop: CropParams) -> FFmpegRequest:
     """Run _encode_with_ffmpeg with a mocked runner and return the captured request."""
     encoder._crop_params = crop
     chunk = _make_chunk()
@@ -119,7 +124,7 @@ def _captured_request(encoder: ChunkEncoder, crop: CropParams | None) -> FFmpegR
     return captured[0]
 
 
-def _captured_cmd(encoder: ChunkEncoder, crop: CropParams | None) -> list[str]:
+def _captured_cmd(encoder: ChunkEncoder, crop: CropParams) -> list[str]:
     """Composed launch argv of the request captured by ``_captured_request``."""
     return [str(a) for a in compose_command(_captured_request(encoder, crop))[0]]
 
@@ -164,15 +169,9 @@ class TestCropInjection:
         vf_value = cmd[cmd.index("-vf") + 1]
         assert vf_value == crop.to_ffmpeg_filter()
 
-    def test_vf_absent_when_crop_none(self) -> None:
-        """-vf must NOT appear when crop_params is None."""
-        encoder = _make_encoder(None)
-        cmd = _captured_cmd(encoder, None)
-
-        assert "-vf" not in cmd
-
     def test_vf_absent_when_crop_empty(self) -> None:
-        """-vf must NOT appear when crop_params is all-zero (no-op crop)."""
+        """-vf must NOT appear for the no-crop state (all-zero crop — the
+        concrete value the encoder receives past the probe)."""
         crop = CropParams(top=0, bottom=0, left=0, right=0)
         encoder = _make_encoder(crop)
         cmd = _captured_cmd(encoder, crop)

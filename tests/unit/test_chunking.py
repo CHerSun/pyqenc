@@ -17,7 +17,7 @@ import pytest
 
 from pyqenc.app_config import AppConfig, load_app_config
 from pyqenc.app_metrics import NoOpAppMetricsCollector
-from pyqenc.models import CleanupLevel, PhaseOutcome, SceneBoundary, SizedFingerprint
+from pyqenc.models import ArtifactState, CleanupLevel, PhaseOutcome, SceneBoundary, SizedFingerprint
 from pyqenc.phase import Artifact, PhaseRegistry
 from pyqenc.phases.chunking import (
     ChunkingPhase,
@@ -27,7 +27,6 @@ from pyqenc.phases.chunking import (
 from pyqenc.phases.extraction import ExtractionPhase, ExtractionPhaseResult
 from pyqenc.phases.job import JobPhase, JobPhaseResult
 from pyqenc.phases.probe import ProbePhase, ProbePhaseResult
-from pyqenc.state import ArtifactState
 from pyqenc.stream_model import (
     CropParams,
     ExtendedVideoStream,

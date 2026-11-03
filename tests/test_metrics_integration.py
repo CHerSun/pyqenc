@@ -30,6 +30,7 @@ from pyqenc.app_metrics import (
     YamlAppMetricsCollector,
 )
 from pyqenc.models import (
+    ArtifactState,
     CleanupLevel,
     PhaseOutcome,
     SizedFingerprint,
@@ -44,7 +45,6 @@ from pyqenc.phases.extraction import ExtractionPhase
 from pyqenc.phases.job import JobPhaseResult
 from pyqenc.phases.merge import MergePhase
 from pyqenc.phases.optimization import OptimizationPhase, OptimizationPhaseResult
-from pyqenc.state import ArtifactState
 from pyqenc.stream_model import ExtendedVideoStream, ProbedFile, VideoStreamChunk
 from pyqenc.utils.yaml_utils import save_model, write_yaml_atomic
 
@@ -162,7 +162,6 @@ def _make_video_stream_fixture(path: Path):
     )
 
 
-
 def _make_volatile(tmp_path: Path) -> dict:
     """Return a minimal dict of volatile kwargs for phases that require them."""
     source = tmp_path / "source.mkv"
@@ -198,7 +197,6 @@ def _make_extended_stream(path: Path, frame_count: int, duration: float) -> Exte
         frame_count=frame_count,
         crop=CropParams(),
     )
-
 
 
 def _spy_collector() -> MagicMock:
@@ -435,9 +433,9 @@ class TestExtractionPhaseTiming:
 
         Validates: Requirements 6.5, 2.7
         """
+        from pyqenc.models import ArtifactState
         from pyqenc.phase import Artifact
         from pyqenc.phases.extraction import ExtractionPhase
-        from pyqenc.state import ArtifactState
         from pyqenc.stream_model import (
             SubtitleStream,
             SubtitleStreamInfo,
@@ -482,9 +480,9 @@ class TestExtractionPhaseTiming:
 
         Validates: Requirements 6.5, 2.5
         """
+        from pyqenc.models import ArtifactState
         from pyqenc.phase import Artifact
         from pyqenc.phases.extraction import ExtractionPhase
-        from pyqenc.state import ArtifactState
         from pyqenc.stream_model import (
             SubtitleStream,
             SubtitleStreamInfo,
@@ -536,9 +534,9 @@ class TestExtractionPhaseTiming:
 
         Validates: Requirements 6.4, 6.5
         """
+        from pyqenc.models import ArtifactState
         from pyqenc.phase import Artifact
         from pyqenc.phases.extraction import ExtractionPhase
-        from pyqenc.state import ArtifactState
         from pyqenc.stream_model import (
             SubtitleStream,
             SubtitleStreamInfo,
@@ -1034,7 +1032,6 @@ class TestOptimizationPhaseTiming:
             current_optimization_sidecar,
         )
         from pyqenc.phases.probe import ProbePhase
-        from pyqenc.state import ProbeFacet
 
         job      = phase._phases[JobPhase]
         probe    = phase._phases[ProbePhase]
@@ -1048,7 +1045,7 @@ class TestOptimizationPhaseTiming:
             chunks      = fingerprinter.of_ids(
                 a.payload.safe_name() for a in chunking.result.chunks
             ),
-            probe       = ProbeFacet.from_probe(probe.result),
+            probe       = probe.result.probe_fingerprint(),
             sampling    = phase._config.measurement.sampling,
             test_chunks = [a.payload.safe_name() for a in chunking.result.chunks],
             summary     = [
@@ -1574,8 +1571,8 @@ class TestMergePhaseTiming:
         job_mock = MagicMock(spec=JobPhase)
         job_mock.result = self._make_job_result(tmp_path)
 
+        from pyqenc.models import ArtifactState as _ArtifactState
         from pyqenc.phase import Artifact as _Artifact
-        from pyqenc.state import ArtifactState as _ArtifactState
         from pyqenc.stream_model import (
             VideoStream as _VideoStream,
         )
@@ -1646,8 +1643,8 @@ class TestMergePhaseTiming:
 
         Validates: Requirements 6.5, 2.7
         """
+        from pyqenc.models import ArtifactState
         from pyqenc.phases.merge import MergePhase
-        from pyqenc.state import ArtifactState
 
         output_file = tmp_path / "work" / "merged" / "source h265+slow.mkv"
         output_file.parent.mkdir(parents=True, exist_ok=True)
@@ -1680,8 +1677,8 @@ class TestMergePhaseTiming:
 
         Validates: Requirements 6.5
         """
+        from pyqenc.models import ArtifactState
         from pyqenc.phases.merge import MergePhase
-        from pyqenc.state import ArtifactState
 
         output_file = tmp_path / "work" / "merged" / "source h265+slow.mkv"
         output_file.parent.mkdir(parents=True, exist_ok=True)
@@ -1728,8 +1725,8 @@ class TestMergePhaseTiming:
 
         Validates: Requirements 6.5
         """
+        from pyqenc.models import ArtifactState
         from pyqenc.phases.merge import MergePhase
-        from pyqenc.state import ArtifactState
 
         output_file = tmp_path / "work" / "merged" / "source h265+slow.mkv"
         output_file.parent.mkdir(parents=True, exist_ok=True)
@@ -1776,8 +1773,8 @@ class TestMergePhaseTiming:
 
         Validates: Requirements 6.4, 6.5
         """
+        from pyqenc.models import ArtifactState
         from pyqenc.phases.merge import MergePhase
-        from pyqenc.state import ArtifactState
 
         collector = NoOpAppMetricsCollector()
         phase     = self._make_phase(tmp_path, collector)

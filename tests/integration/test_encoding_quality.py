@@ -7,7 +7,7 @@ import pytest
 
 from pyqenc.app_config import load_app_config
 from pyqenc.app_metrics import AppMetricKey, AppMetricsCollector
-from pyqenc.models import CleanupLevel, QualityTarget, Strategy
+from pyqenc.models import CleanupLevel, CropParams, QualityTarget, ResolvedScale, Strategy, fingerprinter
 from pyqenc.quality_metrics import MetricStatKey, MetricType, TargetedMetrics
 from pyqenc.stream_model import VideoStreamChunk
 from pyqenc.utils.visualization import QualityMeasurer
@@ -235,7 +235,9 @@ class TestEncodeChunkQualitySearchV2Integration:
             work_dir          = tmp_path,
             plan              = _PLAN,
             collector         = MagicMock(spec=AppMetricsCollector),
-            crop_params       = None,
+            crop_params       = CropParams(),
+        scale=ResolvedScale(),
+        probe_fingerprint=fingerprinter.of_text('test-probe'),
             cleanup_level     = CleanupLevel.NONE,
             visual_hash       = True,
             sampling           = 10,
@@ -299,7 +301,9 @@ class TestEncodeChunkQualitySearchV2Integration:
             work_dir          = tmp_path,
             plan              = _PLAN,
             collector         = MagicMock(spec=AppMetricsCollector),
-            crop_params       = None,
+            crop_params       = CropParams(),
+        scale=ResolvedScale(),
+        probe_fingerprint=fingerprinter.of_text('test-probe'),
             cleanup_level     = CleanupLevel.NONE,
             visual_hash       = True,
             sampling          = 10,

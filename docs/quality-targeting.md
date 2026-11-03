@@ -227,7 +227,10 @@ codec such as AV1 fails at startup naming the nearest aligned values).
   The smallest survivor becomes the measurement **anchor**: its min-across-
   test-chunks metrics form the anchor target set against which the other
   survivors are shown as size and metric deltas in the optimization table.
-  Single-strategy runs and `--no-optimize` skip this machinery entirely.
+  `--no-optimize` runs skip the phase entirely — attempts encode unmeasured,
+  the merged-output measurement remains. A single-strategy run keeps the
+  test population and elects its only strategy as the anchor (§123) — the
+  substrate the target-profile calibration recipe runs on.
 - **Cleanup is blocked.** A fixed run with `--cleanup` (level INTERMEDIATE or
   above) hard-stops before any work: attempts in `encoding/` are the
   re-derivation substrate for fixed re-runs, and cleanup would delete them —

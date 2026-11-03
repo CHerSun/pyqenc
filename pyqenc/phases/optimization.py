@@ -35,12 +35,15 @@ from pyqenc.constants import (
     WARNING_SYMBOL,
 )
 from pyqenc.models import (
+    ArtifactState,
     CleanupLevel,
     CropParams,
     EncodingPlan,
+    Fingerprint,
     FingerprintYaml,
     PhaseOutcome,
     QualityTarget,
+    ResolvedScale,
     SizedFingerprint,
     SizedFingerprintYaml,
     Strategy,
@@ -59,7 +62,6 @@ from pyqenc.phases.chunking import ChunkingPhase
 from pyqenc.phases.job import JobPhase
 from pyqenc.phases.probe import ProbePhase
 from pyqenc.quality_metrics import FIXED_COMPARISON_PAIRS, MetricMap, TargetedMetrics
-from pyqenc.state import ArtifactState, ProbeFacet
 from pyqenc.stream_model import DecimalYaml, EncodedChunk, VideoStreamChunk
 from pyqenc.stream_model import File as StreamFile
 from pyqenc.summary_tables import (
@@ -93,7 +95,8 @@ class _OptimizationSidecarBase(BaseModel):
     Fields are named for WHAT they identify (Req 61): ``source`` the source
     content identity, ``chunks`` the chunk-set fingerprint (a re-chunk wipes
     winners), ``strategies`` each strategy's resolved-args fingerprint,
-    ``probe`` the structured facet, ``sampling`` the measurement factor.
+    ``probe`` the opaque probe-facts fingerprint (frame count + crop +
+    resolved scale), ``sampling`` the measurement factor.
     The key block is REQUIRED (every write path populates it) — a sidecar
     missing keys fails validation and loads as absent: the phase redoes its
     work (Req 32 amended 2026-10-10; per-key unknown semantics remain for
@@ -106,7 +109,7 @@ class _OptimizationSidecarBase(BaseModel):
     source:      SizedFingerprintYaml
     chunks:      SizedFingerprintYaml
     strategies:  dict[str, FingerprintYaml]  = Field(default_factory=dict)
-    probe:       ProbeFacet
+    probe:       FingerprintYaml
     sampling:    int
     test_chunks: list[str]                     = Field(default_factory=list)
     summary:     list[StrategyRow]      = Field(default_factory=list)
@@ -160,7 +163,7 @@ def current_optimization_sidecar(
     plan:        EncodingPlan,
     source:      SizedFingerprint,
     chunks:      SizedFingerprint,
-    probe:       ProbeFacet,
+    probe:       Fingerprint,
     sampling:    int,
     test_chunks: list[str],
     summary:     list[StrategyRow],
@@ -280,7 +283,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         self._test_chunks:       list[VideoStreamChunk]            = []
         self._selected_names:    list[str]                         = []
         self._strategy_results:  list[StrategyRow]          = []
-        self._current_probe:     ProbeFacet | None                 = None
+        self._current_probe:     Fingerprint | None               = None
         self._chunks_fingerprint: SizedFingerprint | None           = None
         """The current chunk-set fingerprint (the chunks key's live side)."""
         self._anchor_name:       str | None                        = None
@@ -314,22 +317,32 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         strategies = plan.strategies
 
         if plan.fixed_quality:
-            self._log_fixed_quality_banner(strategies, measure=plan.measure)
-            # §123: fixed runs keep the test population — single-strategy
-            # and `--no-optimize` included (the latter with dominance
-            # pruning disabled at selection); the anchor mechanics and its
-            # anchor targets behave identically to any compared fixed run.
-            # The `--no-measure` exception: the phase runs only when a
-            # decision is needed (optimize on, multiple strategies) — an
-            # anchor nothing judges (attempts unmeasured, merge unmeasured)
-            # is not a decision.
-            if plan.measure or (plan.optimize and len(strategies) > 1):
-                return None
-            logger.info(
-                "measurement opted out and no strategy decision is needed — "
-                "optimization phase skipped; run 'pyqenc measure <output>' "
-                "afterwards for quality metrics"
+            self._log_fixed_quality_banner(
+                strategies, optimize=plan.optimize, measure=plan.measure,
             )
+            # §123: fixed runs keep the test population — single-strategy
+            # included (measured runs); the anchor mechanics and its anchor
+            # targets behave identically to any compared fixed run. Two
+            # skip cases, both anchorless: `--no-optimize` (nothing
+            # eliminates — attempts encode unmeasured, the merged-output
+            # measurement remains) and the measurement opt-out with no
+            # elimination needing the population (a single strategy; with
+            # multiple strategies the elimination still runs on its own
+            # measured test population even opted out).
+            if plan.optimize and (plan.measure or len(strategies) > 1):
+                return None
+            if plan.measure:
+                logger.info(
+                    "optimization disabled — no elimination: every selected "
+                    "strategy encodes the full video; attempts encode "
+                    "unmeasured, the merged-output measurement remains"
+                )
+            else:
+                logger.info(
+                    "measurement opted out and no strategy decision is needed — "
+                    "optimization phase skipped; run 'pyqenc measure <output>' "
+                    "afterwards for quality metrics"
+                )
             return self._all_strategies(dry_run)
 
         # All-strategies mode: triggered by the optimize flag being off or a
@@ -346,7 +359,13 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
 
         return self._all_strategies(dry_run)
 
-    def _log_fixed_quality_banner(self, strategies: list[Strategy], *, measure: bool) -> None:
+    def _log_fixed_quality_banner(
+        self,
+        strategies: list[Strategy],
+        *,
+        optimize: bool,
+        measure: bool,
+    ) -> None:
         """The fixed-mode WARNING banner (Req 5).
 
         One prominent block per fixed run on both optimization paths,
@@ -375,6 +394,11 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         if measure:
             logger.warning(
                 "  - merged-output measurement remains the final quality check"
+            )
+        elif optimize and len(strategies) > 1:
+            logger.warning(
+                "  - attempts encode unmeasured (reporting opted out); the "
+                "strategy elimination still measures its own test population"
             )
         logger.warning("")
 
@@ -574,7 +598,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         self._chunks_fingerprint = fingerprinter.of_ids(
             c.safe_name() for c in (a.payload for a in self._deps[ChunkingPhase].chunks)
         )
-        self._current_probe = ProbeFacet.from_probe(self._deps[ProbePhase])
+        self._current_probe = self._deps[ProbePhase].probe_fingerprint()
         current_probe = self._current_probe
         chunks_fps    = self._chunks_fingerprint
         assert current_probe is not None and chunks_fps is not None
@@ -605,17 +629,19 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
             self._wipe_artifacts(work_dir, strategies)
             persisted = None
 
-        # Step 2 — probe facet: catastrophic for the whole shared namespace
-        # (explicit field-wise comparison — Req 23; human fields never leak).
+        # Step 2 — probe facts: catastrophic for the whole shared namespace.
+        # The key is the opaque probe fingerprint (frame count + crop +
+        # resolved scale) — a mismatch means every attempt's pixels changed.
+        # The token carries no field-wise diff; the probe rewrite logged the
+        # change when it happened.
         if (
             persisted is not None
-            and not persisted.probe.matches(current_probe)
+            and persisted.probe != current_probe
         ):
             if not job_result.force:
                 raise RecoveryError(
                     "Probe params changed since the last optimization run "
-                    f"(persisted facet={persisted.probe}, "
-                    f"current={current_probe}) — every attempt's pixels "
+                    "(frame count / crop / scale) — every attempt's pixels "
                     "changed.  Re-run with --force to grant permission to wipe "
                     "the shared namespace and re-test."
                 )
@@ -817,7 +843,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         fixed      = plan.fixed_quality
         assert self._current_probe is not None, "_recover populates the probe state before execution"
         assert self._chunks_fingerprint is not None, "_recover populates the chunk-set key"
-        crop       = self._current_probe.crop
+        crop       = self._deps[ProbePhase].crop
 
         current_sampling = self._config.measurement.sampling
 
@@ -846,6 +872,8 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
                 plan             = plan,
                 collector        = self._collector,
                 crop_params      = crop,
+                scale            = self._deps[ProbePhase].scale,
+                probe_fingerprint = self._deps[ProbePhase].probe_fingerprint(),
                 visual_hash      = self._config.encoding.visual_hash,
                 sampling = self._config.measurement.sampling,
                 cleanup_level    = job_result.cleanup,
@@ -1565,7 +1593,9 @@ def _make_encoder(
     work_dir:         Path,
     plan:             EncodingPlan,
     collector:        AppMetricsCollector,
-    crop_params:      CropParams | None,
+    crop_params:      CropParams,
+    scale:            ResolvedScale,
+    probe_fingerprint: Fingerprint,
     visual_hash:      bool,
     sampling:        int,
     cleanup_level:    CleanupLevel,
@@ -1588,6 +1618,9 @@ def _make_encoder(
                           narrowing front).
         collector:        Metrics collector for per-attempt timing.
         crop_params:      Crop parameters to apply.
+        scale:            The probe-resolved output scale (applied after the
+                          crop like every attempt).
+        probe_fingerprint: The probe-facts key the attempt sidecars record.
         visual_hash:      Whether to prepend emoji hash to chunk log lines.
         sampling:         Frame subsampling factor for quality metric generation.
         cleanup_level:    Run cleanup level for rolling attempt cleanup.
@@ -1605,6 +1638,8 @@ def _make_encoder(
         plan              = plan,
         collector         = collector,
         crop_params       = crop_params,
+        scale             = scale,
+        probe_fingerprint = probe_fingerprint,
         cleanup_level     = cleanup_level,
         visual_hash       = visual_hash,
         sampling         = sampling,
@@ -1612,6 +1647,5 @@ def _make_encoder(
         measure_attempts  = True,
         space_guard       = space_guard,
     )
-
 
 

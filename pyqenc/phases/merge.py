@@ -41,12 +41,14 @@ from pyqenc.constants import (
 from pyqenc.models import (
     CropParams,
     EncodingPlan,
+    Fingerprint,
     FingerprintYaml,
     PhaseOutcome,
     QualityTarget,
     SizedFingerprint,
     SizedFingerprintYaml,
     Strategy,
+    comparison_scale,
     fingerprinter,
     targets_as_strings,
 )
@@ -69,7 +71,6 @@ from pyqenc.quality_metrics import (
     MeasuredMetrics,
     MeasuredMetricsYaml,
 )
-from pyqenc.state import ProbeFacet
 from pyqenc.stream_model import (
     DecimalYaml,
     EncodedChunk,
@@ -126,7 +127,7 @@ class _MergedSidecarBase(BaseModel):
 
     source:      SizedFingerprintYaml
     strategy:    FingerprintYaml
-    probe:       ProbeFacet
+    probe:       FingerprintYaml
     sampling:    int
     winners:     SizedFingerprintYaml
     frame_count: int
@@ -231,7 +232,7 @@ class _SidecarBuilder:
     def __init__(
         self,
         source:   SizedFingerprint,
-        probe:    ProbeFacet,
+        probe:    Fingerprint,
         plan:     EncodingPlan,
         sampling: int,
         winners:  SizedFingerprint,
@@ -305,8 +306,8 @@ class _SidecarBuilder:
                 return "mode"
             if recorded.targets != targets_as_strings(self._plan.targets):
                 return "targets"
-        if not recorded.probe.matches(self._probe):
-            return "probe facet"
+        if recorded.probe != self._probe:
+            return "probe facts"
         # The winner-set fingerprint is compared as a whole (Req 11a):
         # count + hash over the sorted winner ids; unverifiable = mismatch.
         if recorded.winners != self._winners:
@@ -652,7 +653,7 @@ class MergePhase(Phase[MergePhaseResult]):
         """The current run's acceptance inputs for per-file record checks."""
         return _SidecarBuilder(
             source    = self._deps[JobPhase].file.payload.fingerprint,
-            probe     = ProbeFacet.from_probe(self._deps[ProbePhase]),
+            probe     = self._deps[ProbePhase].probe_fingerprint(),
             plan      = self._deps[ProbePhase].plan,
             sampling  = self._config.measurement.sampling,
             winners   = fingerprinter.of_ids(
@@ -1225,10 +1226,15 @@ class MergePhase(Phase[MergePhaseResult]):
         measurer   = QualityMeasurer(output_dir)
         plot_path = output_dir / f"{final_result.stem}.png"
 
+        # The merged output is judged at the output resolution: the reference
+        # is scaled down to it (the measurement alignment policy's single
+        # home); the merged file itself is already there by construction.
+        ref_scale, _dist_scale = comparison_scale(self._deps[ProbePhase].scale)
         measurement = measurer.measure_chunk(
             encoded            = final_result,
             reference          = source_stream.stream.as_input(),
             ref_crop           = ref_crop,
+            ref_scale          = ref_scale,
             output_dir         = output_dir,
             duration_seconds   = source_stream.stream.info.duration_seconds or 0.0,
             fps_value          = source_stream.stream.info.fps_fraction,
