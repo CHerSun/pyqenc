@@ -490,13 +490,15 @@ class Strategy(BaseModel):
           May appear multiple times (e.g. ``-cq:v {quality} -qmin {quality}``).
         - ``'{preset}'``      → replaced with ``self.preset``.
         - ``'{profile_args}'``→ expanded to ``self.profile_args`` in-place.
-        - ``'{vf}'``          → replaced with the vf filter expression string
-          (e.g. ``'crop=1920:800:0:140'``).  When ``{vf}`` is the entire
+        - ``'{vf}'``          → replaced with the vf filter chain string
+          (e.g. ``'crop=iw-2:ih-44:0:22'``).  When ``{vf}`` is the entire
           element and *vf_filter* is empty/``None``, the element is silently
           dropped.  When ``{vf}`` is embedded inside a larger filter chain
-          (e.g. ``'scale_cuda=format=p010le:{vf}'``), it is replaced with the
-          filter string or with an empty string — a trailing ``:`` is left in
-          place, which ffmpeg tolerates.
+          (any position — ``'{vf},format=p010le,hwupload_cuda'``,
+          ``'scale_cuda=format=p010le:{vf}'``), the substituted element is
+          re-joined with empty segments dropped, so an absent filter never
+          leaves a leading/trailing/doubled comma; a trailing option ``:``
+          may remain, which ffmpeg tolerates.
 
         Args:
             quality:   Quality parameter value as a ``Decimal`` already quantized
@@ -527,9 +529,14 @@ class Strategy(BaseModel):
                             result.pop()
                 else:
                     expanded = arg.replace("{quality}", quality_str).replace("{preset}", self.preset)
-                    # {vf} embedded inside a larger filter chain string
+                    # {vf} embedded inside a larger filter chain string — the
+                    # substituted chain runs through the join so an absent
+                    # filter leaves no empty segment behind (head, middle, or
+                    # tail of the template element).
                     if "{vf}" in expanded:
-                        expanded = expanded.replace("{vf}", vf_filter or "")
+                        expanded = join_filter_chain(
+                            expanded.replace("{vf}", vf_filter or "").split(","),
+                        )
                     result.append(expanded)
             return result
 
@@ -831,10 +838,15 @@ class CodecConfig(BaseModel):
                            multiple times (e.g. ``-cq:v {quality} -qmin {quality}``).
                          - ``'{preset}'`` — replaced with the strategy preset name.
                          - ``'{profile_args}'`` — expanded to the profile's extra args.
-                         - ``'{vf}'`` — replaced with the vf filter expression when
-                           active (e.g. crop), or silently dropped when standalone
-                           and no filter is set.  Can be embedded inside a larger
-                           filter chain: ``'scale_cuda=format=p010le:{vf}'``.
+                         - ``'{vf}'`` — replaced with the vf filter chain when
+                           active (e.g. crop, scale), or silently dropped when
+                           standalone and no filter is set.  Can be embedded
+                           inside a larger filter chain in any position:
+                           ``'{vf},format=p010le,hwupload_cuda'`` or
+                           ``'scale_cuda=format=p010le:{vf}'`` — an absent
+                           filter leaves no empty chain segment behind (a
+                           trailing option ``:`` may remain; ffmpeg tolerates
+                           it).
         presets:         List of presets supported by this encoder.
     """
 
@@ -1041,11 +1053,15 @@ class CropParams(BaseModel):
         return not (self.top or self.bottom or self.left or self.right)
 
     def to_ffmpeg_filter(self) -> str:
-        """Convert to ffmpeg crop filter string.
+        """Convert to an ffmpeg crop filter segment.
 
         Returns:
-            FFmpeg crop filter like ``'crop=1920:800:0:140'``.
+            The crop filter like ``'crop=iw-2:ih-44:0:22'``, or an empty
+            string when the crop is empty — a filter segment exists in a
+            chain iff it changes pixels.
         """
+        if self.is_empty():
+            return ""
         return (
             f"crop=iw-{self.left + self.right}:ih-{self.top + self.bottom}"
             f":{self.left}:{self.top}"
@@ -1116,3 +1132,27 @@ CropYaml = Annotated[CropParams, BeforeValidator(_crop_from_yaml), PlainSerializ
 """``CropParams`` as it persists: the compact one-line storage string
 (``crop: 22,22,0,0``), parsed back via ``CropParams.parse`` — the class
 stays explicitly typed; only the yaml boundary changes form."""
+
+
+# ---------------------------------------------------------------------------
+# Filter-chain composition
+# ---------------------------------------------------------------------------
+
+def join_filter_chain(parts: Iterable[str]) -> str:
+    """Join filter segments into one ffmpeg chain, dropping absent segments.
+
+    A filter segment exists in a chain iff it changes pixels — empty
+    segments (``""``, from unset crop/scale) are omitted. ffmpeg's graph
+    parser hard-rejects empty segments in any position (``No such filter:
+    ''`` — leading, trailing, and doubled middle commas alike), so the join
+    is the single composition rule for every ``-vf``/``filter_complex``
+    chain the pipeline builds.
+
+    Args:
+        parts: Filter segments in application order; empty segments are
+            skipped.
+
+    Returns:
+        The comma-joined chain; empty when no segment is present.
+    """
+    return ",".join(part for part in parts if part)

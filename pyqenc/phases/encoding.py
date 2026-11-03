@@ -1051,11 +1051,8 @@ class ChunkEncoder:
         """
         output_file.parent.mkdir(parents=True, exist_ok=True)
 
-        vf_filter = (
-            self._crop_params.to_ffmpeg_filter()
-            if self._crop_params and not self._crop_params.is_empty()
-            else None
-        )
+        # "" when the crop is empty — the filter exists iff it changes pixels
+        vf_chain = self._crop_params.to_ffmpeg_filter() if self._crop_params else ""
 
         request = FFmpegRequest(
             inputs      = [
@@ -1064,7 +1061,7 @@ class ChunkEncoder:
                     pre_input_args = tuple(strategy.codec.pre_input_args),
                 ),
             ],
-            output_args = tuple(strategy.to_output_args(quality, vf_filter=vf_filter)),
+            output_args = tuple(strategy.to_output_args(quality, vf_filter=vf_chain or None)),
             output      = output_file,
         )
 

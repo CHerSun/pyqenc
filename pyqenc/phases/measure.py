@@ -24,7 +24,7 @@ from pyqenc.constants import (
     TIME_SEPARATOR_MS,
     TIME_SEPARATOR_SAFE,
 )
-from pyqenc.models import CropParams, Resolution
+from pyqenc.models import CropParams, Resolution, join_filter_chain
 from pyqenc.phases.extraction import _probe_streams_json
 from pyqenc.phases.job import JobSidecar
 from pyqenc.phases.probe import ProbeSidecar
@@ -654,9 +654,9 @@ async def _capture_single_frame(
     """
     # Single-frame capture goes through the runner's .tmp protocol with the
     # image2 muxer (the .tmp extension hides the image container hint).
-    output_args: tuple[str, ...] = ()
-    if crop_params is not None and not crop_params.is_empty():
-        output_args += (FFMPEG_ARG_VF, crop_params.to_ffmpeg_filter())
+    # "" when the crop is empty — the filter exists iff it changes pixels.
+    crop_seg   = crop_params.to_ffmpeg_filter() if crop_params is not None else ""
+    output_args: tuple[str, ...] = (FFMPEG_ARG_VF, crop_seg) if crop_seg else ()
     output_args += ("-frames:v", "1", "-c:v", "png")
     request = FFmpegRequest(
         inputs        = [FFmpegInput(path=video_path, start_seconds=float(seek_ts))],
@@ -689,17 +689,19 @@ async def _capture_single_pass(
 ) -> list[Path]:
     """Run a single-pass select-filter capture. Returns sorted list of output PNGs."""
     output_pattern = tmp_dir / "%04d.png"
-    vf_parts = [f"select='{select_expr}'"]
-    if crop_params is not None and not crop_params.is_empty():
-        vf_parts.append(crop_params.to_ffmpeg_filter())
-    vf_parts.append("setpts=N/FRAME_RATE/TB")
+    # "" when the crop is empty — the filter exists iff it changes pixels
+    vf_parts = join_filter_chain([
+        f"select='{select_expr}'",
+        crop_params.to_ffmpeg_filter() if crop_params is not None else "",
+        "setpts=N/FRAME_RATE/TB",
+    ])
     # Multi-frame pattern output: writes into this caller-managed temp
     # directory with its own lifecycle — the sanctioned bypass of the .tmp
     # substitution protocol (the trailing null sink shares the input decode).
     request = FFmpegRequest(
         inputs      = [FFmpegInput(path=video_path)],
         output_args = (
-            FFMPEG_ARG_VF, ",".join(vf_parts),
+            FFMPEG_ARG_VF, vf_parts,
             "-vsync", "0",
             str(output_pattern),
         ),
