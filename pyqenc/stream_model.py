@@ -64,7 +64,13 @@ from pyqenc.constants import (
     TIME_SEPARATOR_MS,
     TIME_SEPARATOR_SAFE,
 )
-from pyqenc.models import CropParams, SizedFingerprint, Strategy
+from pyqenc.models import (
+    CropParams,
+    ResolvedScale,
+    ScaleYaml,
+    SizedFingerprint,
+    Strategy,
+)
 from pyqenc.quality_metrics import MeasuredMetrics, MeasuredMetricsYaml
 from pyqenc.utils.ffmpeg_runner import FFmpegInput
 from pyqenc.utils.long_path import coerce_long_path
@@ -273,6 +279,7 @@ class VideoStreamInfo(StreamInfo):
     fps:          float | None       = None
     fps_fraction: FractionYaml | None = None
     resolution:   str | None         = None
+    sample_aspect_ratio: FractionYaml | None = None
     pix_fmt:      str | None         = None
     extracted_path: LongPathYaml | None = None
 
@@ -315,12 +322,25 @@ class VideoStreamInfo(StreamInfo):
             except ValueError:
                 pass
 
+        # SAR 0:1 is ffprobe's "unknown" — stays None, treated as square.
+        sample_aspect_ratio: Fraction | None = None
+        sar_raw = raw.get("sample_aspect_ratio")
+        if isinstance(sar_raw, str) and ":" in sar_raw:
+            num_s, den_s = sar_raw.split(":", 1)
+            try:
+                den = int(den_s)
+                if den > 0 and int(num_s) > 0:
+                    sample_aspect_ratio = Fraction(int(num_s), den)
+            except ValueError:
+                pass
+
         width, height = raw.get("width"), raw.get("height")
         return cls(
             **StreamInfo._base_ffprobe_fields(raw),
             fps          = float(fps_fraction) if fps_fraction is not None else None,
             fps_fraction = fps_fraction,
             resolution   = f"{width}x{height}" if width and height else None,
+            sample_aspect_ratio = sample_aspect_ratio,
             pix_fmt      = raw.get("pix_fmt"),
         )
 
@@ -597,7 +617,7 @@ def _format_display_name(
 # ---------------------------------------------------------------------------
 
 class ExtendedVideoStream(BaseModel):
-    """A video stream carrying the slow facet: frame count and crop.
+    """A video stream carrying the slow facet: frame count, crop, and scale.
 
     The type every downstream video phase accepts — demanding it via the type
     system means audio-only runs never pay for the slow probe. ProbePhase is
@@ -610,6 +630,9 @@ class ExtendedVideoStream(BaseModel):
                      :class:`CropParams` (:meth:`~pyqenc.models.CropParams.is_empty`)
                      means "no crop". ``None`` ("auto") exists only at
                      config/CLI level, never here.
+        scale:       The probe-resolved output scale — non-optional, with
+                     ``OFF`` (the :class:`~pyqenc.models.ResolvedScale`
+                     default) meaning "no scaling".
     """
 
     model_config = ConfigDict(frozen=True)
@@ -617,6 +640,7 @@ class ExtendedVideoStream(BaseModel):
     stream:      VideoStream
     frame_count: int = 0
     crop:        CropParams
+    scale:       ScaleYaml = ResolvedScale()
 
 
 # ---------------------------------------------------------------------------

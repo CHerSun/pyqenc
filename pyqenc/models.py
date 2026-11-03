@@ -12,6 +12,7 @@ import logging
 from collections.abc import Iterable
 from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 from enum import Enum, IntEnum
+from fractions import Fraction
 from pathlib import Path
 from typing import Annotated, ClassVar, Final, Self
 
@@ -653,6 +654,10 @@ class EncodingPlan(BaseModel):
                     opts out: merged-output measurement always; attempt
                     measurement when the fixed run also opted out of
                     optimization).
+        scale:      The requested output scale (``--scale`` +
+                    ``--scale-mode``); ``None`` = no scaling. The pre-probe
+                    form — the probe resolves it against the source
+                    dimensions and crop into a ``ResolvedScale``.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -661,6 +666,7 @@ class EncodingPlan(BaseModel):
     targets:    list[QualityTarget]
     optimize:   bool
     measure:    bool
+    scale:      ScaleSpec | None = None
 
     # Whether the run pins the quality knob — derived once at construction
     # in the after-validator (plain private-attr assignment works there
@@ -825,6 +831,11 @@ class CodecConfig(BaseModel):
                              typically use ``0.5``; QP-based codecs prefer ``1.0`` (integer
                              steps).  The search result is rounded to the nearest multiple
                              of this value.
+        resolution_granularity: The pixel granularity the codec requires of output
+                             dimensions (4:2:0 formats need even — ``2``; older
+                             codecs may need 4 or more). Scaled output dimensions
+                             quantize onto this grid; a run with mixed codecs uses
+                             the minimum across its strategies.
         pre_input_args:      Input-stage tokens emitted before the input's
                              window flags and ``-i`` (e.g. ``-hwaccel`` /
                              ``-init_hw_device`` vulkan setup). The single
@@ -856,6 +867,7 @@ class CodecConfig(BaseModel):
     quality_range:       tuple[Decimal, Decimal]
     default_quality:     Decimal
     default_preset:      str
+    resolution_granularity: int          = 2
     quality_max_step:    Decimal|None   = None
     presets:             list[str]      = Field(default_factory=list)
     pre_input_args:      list[str]      = Field(default_factory=list)
@@ -1132,6 +1144,371 @@ CropYaml = Annotated[CropParams, BeforeValidator(_crop_from_yaml), PlainSerializ
 """``CropParams`` as it persists: the compact one-line storage string
 (``crop: 22,22,0,0``), parsed back via ``CropParams.parse`` — the class
 stays explicitly typed; only the yaml boundary changes form."""
+
+
+# ---------------------------------------------------------------------------
+# Output scale
+# ---------------------------------------------------------------------------
+
+class ScaleMode(str, Enum):
+    """How a scale target maps onto the cropped source dimensions.
+
+    Attributes:
+        OFF:     No scaling — the resolved state of both "no target given"
+                 and any target that resolves to a no-op (pixel-identical
+                 products key identically).
+        CONTAIN: Fit inside the box (display-aspect-aware), aspect
+                 preserved, never upscales.
+        COVER:   Reach the box on both axes (one equal), aspect preserved,
+                 never upscales.
+        EXACT:   The target dimensions verbatim — aspect may change by
+                 design (the fix-distorted-aspect tool); the one mode where
+                 upscaling is permitted (user-owned override).
+    """
+
+    OFF     = "off"
+    CONTAIN = "contain"
+    COVER   = "cover"
+    EXACT   = "exact"
+
+
+class ScaleSpec(BaseModel):
+    """The run's requested output scale — the plan-level, pre-probe form.
+
+    Built exactly once at the run boundary (the CLI target plus the config's
+    algorithm) and threaded on :attr:`EncodingPlan.scale`; ``None`` there is
+    the absent request. The concrete pixel-shaping value exists only after
+    the crop and source dimensions are known — the probe resolves this spec
+    into a :class:`ResolvedScale`.
+
+    Attributes:
+        mode:      The mapping mode; never ``OFF`` — absence of a request is
+                   ``plan.scale is None``, not a spec value.
+        width:     Target width in pixels (the box width, or the exact
+                   output width under ``exact``).
+        height:    Target height in pixels; ``None`` means unbounded (the
+                   ``W``-only box form). Required by ``cover`` and ``exact``.
+        algorithm: The swscale scaler name (e.g. ``"lanczos"``) — a single
+                   token, sourced from config at the plan boundary.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    mode:      ScaleMode
+    width:     int
+    height:    int | None = None
+    algorithm: str
+
+    @model_validator(mode="after")
+    def _validate_spec(self) -> Self:
+        """Construction-time invariants of a scale request.
+
+        Raises:
+            ValueError: On a non-positive dimension, a mode that needs the
+                height, ``OFF`` as a spec mode, or a multi-token algorithm.
+        """
+        if self.mode == ScaleMode.OFF:
+            raise ValueError("ScaleSpec never encodes absence — use plan.scale = None")
+        if self.width <= 0 or (self.height is not None and self.height <= 0):
+            raise ValueError(f"Scale dimensions must be positive (got {self.width}x{self.height})")
+        if self.height is None and self.mode in (ScaleMode.COVER, ScaleMode.EXACT):
+            raise ValueError(f"Scale mode {self.mode.value!r} requires an explicit height")
+        if not self.algorithm or any(c in self.algorithm for c in " \t:,"):
+            raise ValueError(
+                f"Scale algorithm {self.algorithm!r} must be a single token without "
+                f"spaces, ':' or ',' — it lands inside the ffmpeg scale filter"
+            )
+        return self
+
+    @classmethod
+    def parse(cls, target: str, *, mode: ScaleMode, algorithm: str) -> Self:
+        """Parse a CLI ``--scale`` value (``"W"`` or ``"WxH"``) into a spec.
+
+        Args:
+            target:    The raw target string.
+            mode:      The mapping mode from ``--scale-mode``.
+            algorithm: The configured scaler name.
+
+        Returns:
+            The :class:`ScaleSpec`.
+
+        Raises:
+            ValueError: If the target is not ``W`` or ``WxH`` with positive
+                integers.
+        """
+        width_s, sep, height_s = target.partition("x")
+        if not width_s.isdigit() or (sep and not height_s.isdigit()):
+            raise ValueError(
+                f"Invalid --scale target {target!r}: expected W or WxH with "
+                f"positive integers (e.g. 1920 or 1920x1080)"
+            )
+        width = int(width_s)
+        height = int(height_s) if sep else None
+        if width <= 0 or (height is not None and height <= 0):
+            raise ValueError(
+                f"Invalid --scale target {target!r}: dimensions must be positive"
+            )
+        return cls(mode=mode, width=width, height=height, algorithm=algorithm)
+
+
+class ResolvedScale(BaseModel):
+    """The probe-resolved output scale — the concrete pixel-shaping value.
+
+    ``OFF`` is the resolved state of both "no request" and any request that
+    resolves to a no-op (the source already fits / equals the target) —
+    pixel-identical products key identically, so no-op targets never
+    invalidate. Applied modes carry the codec-granularity-quantized output
+    dimensions and the algorithm; ``exact`` additionally snaps the sample
+    aspect ratio to 1:1 (the deliberate geometry redefinition — every other
+    mode preserves DAR exactly by letting ffmpeg recompute SAR).
+
+    Attributes:
+        mode:      The applied mode; ``OFF`` when nothing is applied.
+        width:     Resolved output width (``0`` iff ``OFF``).
+        height:    Resolved output height (``0`` iff ``OFF``).
+        algorithm: The applied scaler name (empty iff ``OFF``).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    mode:      ScaleMode = ScaleMode.OFF
+    width:     int       = 0
+    height:    int       = 0
+    algorithm: str       = ""
+
+    @model_validator(mode="after")
+    def _validate_resolved(self) -> Self:
+        """``OFF`` and applied states are internally consistent.
+
+        Raises:
+            ValueError: On a mixed state (off with dimensions, or applied
+                with non-positive ones / a missing algorithm).
+        """
+        off = self.mode == ScaleMode.OFF
+        if off and (self.width or self.height or self.algorithm):
+            raise ValueError("ResolvedScale OFF carries no dimensions or algorithm")
+        if not off and (self.width <= 0 or self.height <= 0 or not self.algorithm):
+            raise ValueError(
+                f"ResolvedScale {self.mode.value!r} requires positive dimensions "
+                f"and an algorithm"
+            )
+        return self
+
+    def __str__(self) -> str:
+        """The storage/display form: ``"off"`` or ``"<mode> <W>x<H> <algorithm>"``."""
+        if self.mode == ScaleMode.OFF:
+            return ScaleMode.OFF.value
+        return f"{self.mode.value} {self.width}x{self.height} {self.algorithm}"
+
+    @classmethod
+    def parse(cls, value: str) -> Self:
+        """Parse the storage string back (the inverse of ``str``).
+
+        Args:
+            value: ``"off"`` or ``"<mode> <W>x<H> <algorithm>"``.
+
+        Returns:
+            The :class:`ResolvedScale`.
+
+        Raises:
+            ValueError: If the string is not the storage form.
+        """
+        if value.strip() == ScaleMode.OFF.value:
+            return cls()
+        parts = value.split()
+        if len(parts) != 3:
+            raise ValueError(f"Invalid resolved scale {value!r}: expected 'off' or '<mode> <W>x<H> <algorithm>'")
+        try:
+            mode = ScaleMode(parts[0])
+        except ValueError:
+            raise ValueError(f"Invalid resolved scale {value!r}: unknown mode {parts[0]!r}") from None
+        dims = parts[1].split("x")
+        if len(dims) != 2:
+            raise ValueError(f"Invalid resolved scale {value!r}: bad dimensions {parts[1]!r}")
+        return cls(mode=mode, width=int(dims[0]), height=int(dims[1]), algorithm=parts[2])
+
+    def to_ffmpeg_filter(self) -> str:
+        """Convert to the ffmpeg scale filter segments.
+
+        Returns:
+            ``""`` when off; else ``scale=W:H[:flags=<algorithm>]`` with a
+            trailing ``setsar=1`` segment under ``exact`` — a segment exists
+            in a chain iff it changes pixels.
+        """
+        if self.mode == ScaleMode.OFF:
+            return ""
+        scale = f"scale={self.width}:{self.height}"
+        if self.algorithm:
+            scale += f":flags={self.algorithm}"
+        return join_filter_chain([
+            scale,
+            "setsar=1" if self.mode == ScaleMode.EXACT else "",
+        ])
+
+
+def _scale_from_yaml(value: object) -> object:
+    """Accept the model's storage string wherever a ResolvedScale loads from yaml."""
+    if isinstance(value, str):
+        return ResolvedScale.parse(value)
+    return value
+
+
+ScaleYaml = Annotated[ResolvedScale, BeforeValidator(_scale_from_yaml), PlainSerializer(str)]
+"""``ResolvedScale`` as it persists: the compact one-line storage string
+(``scale: contain 1920x800 lanczos``), parsed back via
+``ResolvedScale.parse`` — the class stays explicitly typed; only the yaml
+boundary changes form."""
+
+
+def _floor_to_granularity(value: int, granularity: int) -> int:
+    """Round down to a granularity multiple, never below one multiple."""
+    return max((value // granularity) * granularity, granularity)
+
+
+def _ceil_to_granularity(value: int, granularity: int) -> int:
+    """Round up to a granularity multiple, never below one multiple."""
+    return max(-(-value // granularity) * granularity, granularity)
+
+
+def _round_to_granularity(value: int, granularity: int) -> int:
+    """Round to the nearest granularity multiple, ties up, never below one."""
+    return max((value + granularity // 2) // granularity * granularity, granularity)
+
+
+def resolve_scale(
+    source:       Resolution,
+    sar:          Fraction | None,
+    crop:         CropParams,
+    spec:         ScaleSpec | None,
+    granularity:  int,
+) -> ResolvedScale:
+    """Resolve a scale request against the cropped source dimensions.
+
+    The display aspect ratio drives the fit: the output's displayed rect
+    keeps DAR exactly whatever the quantized storage dimensions (ffmpeg's
+    scale filter recomputes SAR), so contain/cover fit the *displayed*
+    picture, not the storage frame ratio (ffmpeg's
+    ``force_original_aspect_ratio`` fits storage — verified 2026-11-02 — and
+    is not usable here). Never-upscale: contain/cover targets the source
+    already satisfies resolve to ``OFF``.
+
+    Args:
+        source:      The source storage dimensions.
+        sar:         The source sample aspect ratio; ``None`` treats the
+                     source as square-pixel.
+        crop:        The committed crop (applied before the scale).
+        spec:        The plan's scale request; ``None`` resolves to ``OFF``.
+        granularity: The codec resolution granularity (the run's strategies'
+                     minimum); dimensions quantize onto its grid.
+
+    Returns:
+        The :class:`ResolvedScale` (``OFF`` for no-op requests).
+
+    Raises:
+        ValueError: If the request admits no on-grid result — a target
+            dimension below the granularity, a contain box whose derived
+            height falls below it, or a cover target the source cannot
+            reach without upscaling (quantization included).
+    """
+    cropped = source - crop
+    if spec is None:
+        return ResolvedScale()
+    if spec.width < granularity or (spec.height is not None and spec.height < granularity):
+        raise ValueError(
+            f"Scale target {spec.width}x{spec.height or '?'} is below the codec "
+            f"resolution granularity {granularity} — dimensions must admit at "
+            f"least one granularity unit"
+        )
+
+    aspect = Fraction(cropped.width) * (sar if sar is not None else Fraction(1)) / cropped.height
+
+    if spec.mode == ScaleMode.CONTAIN:
+        # Displayed rect of storage height h is (aspect*h, h) — fit it in the box.
+        height_cap = spec.width // aspect                 # floor: tallest displayed height under the width cap
+        target_h = min(spec.height, height_cap) if spec.height is not None else height_cap
+        if aspect * cropped.height <= spec.width and (
+            spec.height is None or cropped.height <= spec.height
+        ):
+            return ResolvedScale()
+        if target_h < granularity:
+            raise ValueError(
+                f"Scale box {spec.width}x{spec.height or '?'} admits no "
+                f"{granularity}-granular height for a {cropped.width}x{cropped.height} "
+                f"source — the aspect/target combination is too extreme"
+            )
+    elif spec.mode == ScaleMode.COVER:
+        assert spec.height is not None  # ScaleSpec requires it under cover
+        # The minimum displayed height that covers the box; cover scales
+        # DOWN to it — a source already at or below it cannot cover without
+        # upscaling, which never happens here.
+        target_h = max(spec.height, -(-spec.width // aspect))
+        if cropped.height <= target_h:
+            return ResolvedScale()
+    else:
+        assert spec.height is not None  # ScaleSpec requires it under exact
+        if (
+            (spec.width, spec.height) == (cropped.width, cropped.height)
+            and (sar is None or sar == 1)
+        ):
+            return ResolvedScale()
+        return ResolvedScale(
+            mode      = ScaleMode.EXACT,
+            width     = _round_to_granularity(spec.width, granularity),
+            height    = _round_to_granularity(spec.height, granularity),
+            algorithm = spec.algorithm,
+        )
+
+    # Contain floors onto the grid (stays inside the box); cover ceils
+    # (keeps reaching beyond it); a mode-quantized dimension never leaves its
+    # side of the box by construction.
+    if spec.mode == ScaleMode.CONTAIN:
+        quantized_h = _floor_to_granularity(target_h, granularity)
+        quantized_w = _floor_to_granularity(round(aspect * quantized_h), granularity)
+    else:
+        quantized_h = _ceil_to_granularity(target_h, granularity)
+        quantized_w = _ceil_to_granularity(round(aspect * quantized_h), granularity)
+    # Never-upscale is a displayed-rect invariant: the displayed height is
+    # the storage height (SAR absorbs width rounding), so the height alone
+    # decides — a granularity jump past the source height is an upscale.
+    if quantized_h > cropped.height:
+        raise ValueError(
+            f"Scale target {spec.width}x{spec.height or '?'} cannot be reached "
+            f"from a {cropped.width}x{cropped.height} source at granularity "
+            f"{granularity} without upscaling the picture — cover never "
+            f"upscales; use exact for a deliberate upscale"
+        )
+    return ResolvedScale(
+        mode      = spec.mode,
+        width     = quantized_w,
+        height    = quantized_h,
+        algorithm = spec.algorithm,
+    )
+
+
+def comparison_scale(
+    resolved: ResolvedScale,
+) -> tuple[tuple[int, int] | None, tuple[int, int] | None]:
+    """The measurement alignment policy — per-side explicit scale dims.
+
+    The reference is scaled down to the output dimensions; the distorted
+    side is untouched (attempts are produced at the output dimensions by
+    construction — the probe key guarantees it). Explicit dimensions, never
+    ``scale=W:-1``: granularity-quantized heights can diverge from the
+    auto-height by a pixel and framesync hard-fails on dimension mismatch.
+    The single home of the policy — the flip to
+    upscale-distorted-to-source rewrites only this function (and must then
+    invalidate measurements: numbers are not comparable across scales).
+
+    Args:
+        resolved: The probe-resolved scale.
+
+    Returns:
+        ``(reference_dims, distorted_dims)`` — each ``None`` when that side
+        needs no scaling.
+    """
+    if resolved.mode == ScaleMode.OFF:
+        return None, None
+    return (resolved.width, resolved.height), None
 
 
 # ---------------------------------------------------------------------------

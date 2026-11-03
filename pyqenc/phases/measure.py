@@ -24,7 +24,15 @@ from pyqenc.constants import (
     TIME_SEPARATOR_MS,
     TIME_SEPARATOR_SAFE,
 )
-from pyqenc.models import CropParams, Resolution, join_filter_chain
+from pyqenc.models import (
+    CropParams,
+    Resolution,
+    ResolvedScale,
+    ScaleMode,
+    ScaleSpec,
+    join_filter_chain,
+    resolve_scale,
+)
 from pyqenc.phases.extraction import _probe_streams_json
 from pyqenc.phases.job import JobSidecar
 from pyqenc.phases.probe import ProbeSidecar
@@ -366,7 +374,7 @@ async def _run_metrics(
     source_video:     Path,
     distorted_video:     Path,
     crop_params:      CropParams,
-    width:            int | None,
+    scale_dims:       tuple[int, int] | None,
     metrics_dir:      Path,
     graph_path:       Path,
     sampling:         int,
@@ -385,8 +393,8 @@ async def _run_metrics(
         source_video:     The reference (original) video path.
         distorted_video:     The distorted (encoded) video path.
         crop_params:      Crop applied to the source during metric computation.
-        width:            Scale both inputs to this width after cropping
-                          (``None`` or ``0`` = no scaling).
+        scale_dims:       Explicit dimensions both inputs are scaled to after
+                          cropping (``None`` = no scaling).
         metrics_dir:      Directory for raw metric log files (PSNR/SSIM/VMAF).
         graph_path:       Destination path for the quality metrics PNG plot.
         sampling:         Frame subsampling factor (≥1).
@@ -409,10 +417,48 @@ async def _run_metrics(
         sampling         = sampling,
         show_progress    = show_progress,
         plot_path        = graph_path,
-        width            = width or 0,
+        ref_scale        = scale_dims,
+        dist_scale       = scale_dims,
     )
     return measurement.metrics
 
+
+MEASURE_SCALE_GRANULARITY = 2
+"""The measuring grid's dimension granularity — even dimensions are the
+finest pixel formats need (the measure intent has no codec to ask)."""
+
+
+def _resolve_scale(
+    source_video: Path,
+    crop:         CropParams,
+    spec:         ScaleSpec | None,
+) -> ResolvedScale:
+    """Resolve the measuring scale against the source's own dimensions.
+
+    The measuring grid has no codec — even dimensions (2) are the finest
+    pixel formats need. An unavailable source resolution leaves the scale
+    unresolved (``OFF``) rather than failing the run: screenshots-only runs
+    never consume it, and the resolution check below rejects metric runs on
+    the same missing fact.
+
+    Args:
+        source_video: The reference video path (probed here, not reused).
+        crop:         The resolved crop (applied before the scale).
+        spec:         The CLI scale request; ``None`` resolves to ``OFF``.
+
+    Returns:
+        The :class:`~pyqenc.models.ResolvedScale`.
+    """
+    stream = _load_video_stream(source_video)
+    if not stream.info.resolution:
+        return ResolvedScale()
+    return resolve_scale(
+        Resolution.parse(stream.info.resolution),
+        stream.info.sample_aspect_ratio,
+        crop,
+        spec,
+        MEASURE_SCALE_GRANULARITY,
+    )
 
 
 def _load_video_stream(path: Path) -> VideoStream:
@@ -447,14 +493,12 @@ def _load_video_stream(path: Path) -> VideoStream:
 def _effective_resolution(
     stream:     VideoStream,
     crop_params: CropParams,
-    width:       int | None,
 ) -> tuple[int, int]:
-    """Compute effective (width, height) after crop and optional scale.
+    """Compute effective (width, height) after crop.
 
     Args:
         stream:      Video stream with a probed ``resolution`` string.
         crop_params: Crop to apply (may be empty/no-op).
-        width:       Scale-to width, or ``None`` for no scaling.
 
     Returns:
         ``(effective_width, effective_height)`` as integers.
@@ -465,43 +509,50 @@ def _effective_resolution(
     if not stream.info.resolution:
         raise ValueError(f"Resolution unavailable for {stream.file.path}")
     cropped = Resolution.parse(stream.info.resolution) - crop_params
-
-    if width is None:
-        return cropped.width, cropped.height
-
-    # Scale preserving aspect ratio: scale=width:-1 (height rounded to even)
-    scale_h = round(cropped.height * width / cropped.width)
-    # ffmpeg scale=-1 rounds to nearest even
-    if scale_h % 2 != 0:
-        scale_h += 1
-    return width, scale_h
+    return cropped.width, cropped.height
 
 
 def _check_resolution_match(
     source_stream: VideoStream,
     distorted_stream: VideoStream,
     crop_params:   CropParams,
-    width:         int | None,
+    scale_dims:    tuple[int, int] | None,
 ) -> None:
-    """Verify source and distorted video have matching effective resolution after crop and scale.
+    """Verify the distorted video aligns with the source after crop and scale.
 
-    Called once per distorted video, upfront before any processing begins.  Effective
-    resolution = raw resolution minus crop pixels (source only), then scaled
-    to *width* if provided.
+    Called once per distorted video, upfront before any processing begins.
+    Without scaling: effective resolutions (source minus crop vs distorted
+    native) must match. With scaling: both sides are forced to *scale_dims*
+    anyway — the guard is the aspect: a distorted video whose native aspect
+    differs from the target's would be geometrically distorted by the
+    alignment scale, which is never the measuring intent.
 
     Args:
         source_stream: The source (reference) video stream.
-        target_meta: Metadata for the distorted (encoded) video.
+        distorted_stream: The distorted (encoded) video stream.
         crop_params: Crop applied to the source.
-        width:       Optional scale width applied to both after cropping.
+        scale_dims:  Explicit dims both sides scale to (``None`` = unscaled).
 
     Raises:
         ValueError: If effective resolutions differ, with an actionable
-                    suggestion for ``--crop`` / ``--width`` arguments.
+                    suggestion for ``--crop`` / ``--scale`` arguments.
     """
-    src_w, src_h = _effective_resolution(source_stream, crop_params, width)
+    if scale_dims is not None:
+        tgt_w, tgt_h = _effective_resolution(distorted_stream, CropParams())
+        if tgt_w * scale_dims[1] == tgt_h * scale_dims[0]:
+            return  # same aspect — a pure rescale onto the common grid
+        raise ValueError(
+            f"Aspect mismatch: distorted video is {tgt_w}x{tgt_h} "
+            f"(aspect {tgt_w / tgt_h:.3f}) but the measuring scale is "
+            f"{scale_dims[0]}x{scale_dims[1]} (aspect "
+            f"{scale_dims[0] / scale_dims[1]:.3f}) — scaling it to the common "
+            f"grid would geometrically distort it. Re-encode it at the source "
+            f"aspect or measure without --scale."
+        )
+
+    src_w, src_h = _effective_resolution(source_stream, crop_params)
     # Target is never cropped — pass empty CropParams
-    tgt_w, tgt_h = _effective_resolution(distorted_stream, CropParams(), width)
+    tgt_w, tgt_h = _effective_resolution(distorted_stream, CropParams())
 
     if src_w == tgt_w and src_h == tgt_h:
         return  # match — nothing to do
@@ -518,7 +569,6 @@ def _check_resolution_match(
     suggestion = _build_resolution_suggestion(
         src_raw_w, src_raw_h,
         tgt_raw_w, tgt_raw_h,
-        width,
     )
 
     raise ValueError(
@@ -532,19 +582,17 @@ def _build_resolution_suggestion(
     src_raw_h: int,
     tgt_raw_w: int,
     tgt_raw_h: int,
-    width:     int | None,
 ) -> str:
-    """Build a human-readable ``--crop`` / ``--width`` suggestion string.
+    """Build a human-readable ``--crop`` / ``--scale`` suggestion string.
 
-    Computes the vertical crop needed to align source height to the distorted video's height,
-    then determines whether ``--width`` is also needed.
+    Computes the vertical crop needed to align source height to the distorted
+    video's height, then determines whether ``--scale`` is also needed.
 
     Args:
         src_raw_w: Raw source width (before any crop/scale).
         src_raw_h: Raw source height (before any crop/scale).
         tgt_raw_w: Raw width of the distorted video.
         tgt_raw_h: Raw height of the distorted video.
-        width:     Currently requested scale width (may be ``None``).
 
     Returns:
         A suggestion string suitable for inclusion in an error message.
@@ -569,14 +617,14 @@ def _build_resolution_suggestion(
             f"This would bring both videos to {final_w}x{final_h} for metric computation."
         )
 
-    # Need --width to align horizontal dimension too
+    # Need --scale to align the horizontal dimension too
     suggested_width = tgt_raw_w
     # After crop+scale: source becomes suggested_width × (tgt_raw_h * suggested_width / src_raw_w)
     scaled_h = round(tgt_raw_h * suggested_width / src_raw_w)
     if scaled_h % 2 != 0:
         scaled_h += 1
     return (
-        f"Did you mean: --crop {top},{bottom} --width {suggested_width}? "
+        f"Did you mean: --crop {top},{bottom} --scale {suggested_width}? "
         f"This would bring both videos to {suggested_width}x{scaled_h} for metric computation."
     )
 
@@ -929,7 +977,7 @@ async def run_measure(
     crop_params:              CropParams | None,
     sampling:                 int,
     concurrency:              int,
-    width:                    int | None,
+    scale:                    ScaleSpec | None,
     screenshot_count:         int | None,
     screenshot_interval:      float | None      = None,
     screenshot_include_edges: bool              = False,
@@ -956,10 +1004,13 @@ async def run_measure(
         sampling:                 Frame subsampling factor (≥1).  Ignored in
                                   screenshots-only mode.
         concurrency:              Maximum videos processed simultaneously (≥1).
-        width:                    Scale both inputs to this width during metric
-                                  computation (after cropping).  ``None`` = no
-                                  scaling.  Does not affect screenshots.  Ignored in
-                                  screenshots-only mode.
+        scale:                    The measuring scale request (``--scale`` +
+                                  ``--scale-mode``); ``None`` = no scaling.
+                                  Both inputs are scaled to the computed
+                                  dimensions after cropping for a common
+                                  measuring scale.  Does not affect
+                                  screenshots.  Ignored in screenshots-only
+                                  mode.
         screenshot_count:         Screenshots per video in count mode (≥1), or cap
                                   in interval mode.  ``None`` uses the default.
         screenshot_interval:      Interval in seconds between screenshots (>0).
@@ -997,6 +1048,11 @@ async def run_measure(
         raise ValueError(f"screenshot_count must be ≥ 1, got {effective_screenshot_count}")
 
     resolved_crop    = _resolve_crop(crop_params, work_dir, source_video)
+    resolved_scale   = _resolve_scale(source_video, resolved_crop, scale)
+    scale_dims       = (
+        (resolved_scale.width, resolved_scale.height)
+        if resolved_scale.mode != ScaleMode.OFF else None
+    )
     screenshots_only = len(distorted_videos) == 0
 
     # ------------------------------------------------------------------
@@ -1010,7 +1066,7 @@ async def run_measure(
 
         for distorted_video, distorted_stream in zip(distorted_videos, distorted_streams):
             try:
-                _check_resolution_match(source_stream, distorted_stream, resolved_crop, width)
+                _check_resolution_match(source_stream, distorted_stream, resolved_crop, scale_dims)
             except ValueError as exc:
                 raise ValueError(
                     f"Resolution check failed for {distorted_video.name}: {exc}"
@@ -1024,7 +1080,7 @@ async def run_measure(
             + [f"#{n} {_display_path(t)}" for n, t in enumerate(distorted_videos, start=1)]
         ) if distorted_videos else [f"#0 {_display_path(source_video)}", "(no distorted — screenshots only)"],
         "crop":        str(resolved_crop) if not resolved_crop.is_empty() else "none",
-        "width":       str(width) if width else "none",
+        "scale":       str(resolved_scale) if resolved_scale.mode != ScaleMode.OFF else "none",
         "sampling":    str(sampling),
         "screenshots": f"every {screenshot_interval}s (cap {effective_screenshot_count})" if screenshot_interval else str(effective_screenshot_count),
     }
@@ -1204,7 +1260,7 @@ async def run_measure(
                     source_video     = source_video,
                     distorted_video  = video,
                     crop_params      = resolved_crop,
-                    width            = width,
+                    scale_dims       = scale_dims,
                     metrics_dir      = measure_dir,
                     graph_path       = graph_paths[video],
                     sampling         = sampling,

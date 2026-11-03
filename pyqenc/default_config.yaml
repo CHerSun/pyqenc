@@ -86,6 +86,7 @@ encoding:
     # - "vulkan*"       # Vulkan: requires GPU with Vulkan support
   concurrency: 1          # max simultaneous (chunk, strategy) encode+measure jobs; clamped to CPU count; no benefit unless CPU is idling.
   visual_hash: true        # emoji prefix on chunk log lines for visual identification
+  scale_algorithm: lanczos # swscale scaler for --scale runs; the target itself is per-run CLI intent
 
 optimization:
   # Runs unless disabled per-run with --no-optimize (the plan carries the mode, not this config).
@@ -217,6 +218,7 @@ codecs:
     quality_granularity: 0.5     # Codec min granularity: 0.1. Balanced: 0.5. Below balanced often bit-identical and convergence takes more steps.
     quality_range: [6.0, 30.0]   # Codec full range: 0.0-51.0. Balanced: 6.0-30.0
     default_quality: 18.0
+    resolution_granularity: 2   # pixel granularity of output dimensions (4:2:0 needs even)
     default_preset: veryslow     # affordable on modern CPUs, boosts quality
     presets:
       - ultrafast
@@ -249,6 +251,7 @@ codecs:
     quality_granularity: 0.5     # Codec min granularity: 0.25. Balanced: 0.5. Below balanced often bit-identical and convergence takes more steps.
     quality_range: [6.0, 30.0]   # Codec full range: 0.0-51.0. Balanced: 6.0-30.0
     default_quality: 18.0
+    resolution_granularity: 2   # pixel granularity of output dimensions (4:2:0 needs even)
     default_preset: slow         # slow is the practical optimum for h265; slower/very slow are only marginally better but much slower
     presets:
       - ultrafast
@@ -279,6 +282,7 @@ codecs:
     quality_granularity: 0.5     # NVidia Video Codec SDK 8.0+ (2017+) supports granularity of 1/256 (~0.004) under the hood. 0.5 is a balanced granularity.
     quality_range: [6.0, 34.0]   # Codec full range: 0.0-51.0. Balanced: 6.0-34.0
     default_quality: 18.0
+    resolution_granularity: 2   # pixel granularity of output dimensions (4:2:0 needs even)
     default_preset: p7           # p7 = highest quality; speed difference between presets is negligible on modern GPUs
     presets: [p1, p2, p3, p4, p5, p6, p7]
     encoder_args:
@@ -391,6 +395,7 @@ codecs:
     quality_granularity: 1.0     # 0.25 is accepted but produces binary-identical steps; integer steps are reliable, until bit-identical sources are properly supported by search
     quality_range: [4.0, 30.0]   # Codec full range: 0.0-63.0 Balanced: 4.0-30.0. AV1 is tuned for clean content — grain preservation needs lower CRF. Below 4 quality measured behaves non-linearly.
     default_quality: 18.0
+    resolution_granularity: 2   # pixel granularity of output dimensions (4:2:0 needs even)
     default_preset: "3"          # preset 3 is a good speed/quality balance; use 2 or lower for grain retention
     presets: ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13"] # 0 - slowest; 2+ recommended for grain; 12 max for normal use; 13 - not recommended.
     encoder_args:

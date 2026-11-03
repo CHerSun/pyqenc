@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING
 
 from pyqenc.app_metrics import NoOpAppMetricsCollector, YamlAppMetricsCollector
 from pyqenc.constants import DEFAULT_SCREENSHOT_COUNT
-from pyqenc.models import CleanupLevel, CropParams
+from pyqenc.models import CleanupLevel, CropParams, ScaleSpec
 from pyqenc.phase import Phase, _build_registry
 from pyqenc.phases.audio import AudioPhase
 from pyqenc.phases.chunking import ChunkingPhase
@@ -493,7 +493,7 @@ def measure_quality(
     crop_params:              CropParams | None = None,
     screenshot_count:         int | None        = DEFAULT_SCREENSHOT_COUNT,
     screenshot_interval:      str | None        = None,
-    width:                    int | None        = None,
+    scale:                    ScaleSpec | None  = None,
     screenshot_include_edges: bool              = False,
 ) -> MeasureResult:
     """Measure quality metrics between a source and one or more encoded videos.
@@ -524,8 +524,8 @@ def measure_quality(
         screenshot_interval:      Interval string between screenshots in interval mode
                                   (e.g. ``"30s"``, ``"5m"``). ``None`` = count mode
                                   (evenly spaced across full duration).
-        width:                    Scale both inputs to this width during metric computation
-                                  (after cropping). ``None`` = no scaling.
+        scale:                    The measuring scale request (``--scale`` +
+                                  ``--scale-mode``); ``None`` = no scaling.
         screenshot_include_edges: When True, include frame 0 and the last frame in
                                   screenshot positions (count mode only).
 
@@ -555,7 +555,7 @@ def measure_quality(
         crop_params              = crop_params,
         sampling                 = sampling,
         concurrency              = concurrency,
-        width                    = width,
+        scale                    = scale,
         screenshot_count         = screenshot_count,
         screenshot_interval      = parsed_interval,
         screenshot_include_edges = screenshot_include_edges,

@@ -41,6 +41,8 @@ from pyqenc.models import (
     CodecConfig,
     EncodingPlan,
     QualityTarget,
+    ScaleMode,
+    ScaleSpec,
     Strategy,
     _coerce_decimal_pair,
     quality_alignment_error,
@@ -230,6 +232,10 @@ class EncodingConfig(BaseModel):
                                 to the CPU count at validation.
         visual_hash:            Whether to display emoji visual hash in chunk
                                 logs.
+        scale_algorithm:        The swscale scaler applied when the run scales
+                                output resolution (``--scale``) — a single
+                                token (e.g. ``"lanczos"``); the target itself
+                                is per-run CLI intent with no config home.
     """
 
     model_config = ConfigDict(validate_assignment=True)
@@ -239,6 +245,21 @@ class EncodingConfig(BaseModel):
     strategies:             list[str]
     concurrency:            _Concurrency
     visual_hash:            bool
+    scale_algorithm:        str
+
+    @model_validator(mode="after")
+    def _validate_scale_algorithm(self) -> Self:
+        """The algorithm lands inside the ffmpeg scale filter — one token.
+
+        Raises:
+            ValueError: On an empty or multi-token algorithm.
+        """
+        if not self.scale_algorithm or any(c in self.scale_algorithm for c in " \t:,"):
+            raise ValueError(
+                f"encoding.scale_algorithm {self.scale_algorithm!r} must be a "
+                f"single token without spaces, ':' or ','"
+            )
+        return self
 
     @model_validator(mode="after")
     def _validate_target_profiles(self) -> Self:
@@ -698,6 +719,8 @@ class AppConfig(BaseModel):
         strategies: Sequence[str] | None = None,
         targets:    Sequence[str] | None = None,
         quality:    tuple[Decimal, Decimal] | None = None,
+        scale_target: str | None = None,
+        scale_mode: ScaleMode = ScaleMode.CONTAIN,
     ) -> EncodingPlan:
         """Build the run's encoding plan from the raw config plus optional CLI overrides.
 
@@ -726,6 +749,10 @@ class AppConfig(BaseModel):
                         a single target profile name; ``None`` →
                         ``default_target_profile``.
             quality:    The ``-q`` bounds in input order; ``None`` → no override.
+            scale_target: The ``--scale`` value (``W`` or ``WxH``); ``None``
+                        → no scaling. Parsed here with the config's algorithm
+                        into the plan's ``ScaleSpec``.
+            scale_mode: The ``--scale-mode`` mapping mode.
 
         Returns:
             The resolved :class:`~pyqenc.models.EncodingPlan`.
@@ -739,10 +766,17 @@ class AppConfig(BaseModel):
                 script-driven fixed runs), the override violates a matched
                 codec's range or granularity, labels mix under an override,
                 the resolved set mixes fixed and searched strategies, the
-                plan resolves to no strategies, or a searched run carries
-                no quality targets.
+                plan resolves to no strategies, a searched run carries
+                no quality targets, or the scale target/mode combination is
+                invalid.
         """
         resolved_targets = self._resolve_targets(targets)
+
+        scale: ScaleSpec | None = None
+        if scale_target is not None:
+            scale = ScaleSpec.parse(
+                scale_target, mode=scale_mode, algorithm=self.encoding.scale_algorithm,
+            )
 
         canonical_quality: tuple[Decimal, Decimal] | None = None
         if quality is not None:
@@ -812,6 +846,7 @@ class AppConfig(BaseModel):
         return EncodingPlan(
             strategies=unique, targets=resolved_targets,
             optimize=optimize, measure=measure,
+            scale=scale,
         )
 
     def _expand_strategy_pattern(

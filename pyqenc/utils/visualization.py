@@ -780,7 +780,8 @@ class QualityMeasurer:
         sampling:          int                            = 3,
         bar_advance:      BarAdvance | None = None,
         duration_seconds: float                          = 0.0,
-        width:            int                            = 0,
+        ref_scale:        tuple[int, int] | None = None,
+        dist_scale:       tuple[int, int] | None = None,
         cwd:              Path | None                    = None,
         fps_value:        Fraction | None                = None,
     ) -> tuple[QualityLogs, int]:
@@ -803,7 +804,10 @@ class QualityMeasurer:
                               ``n_subsample`` and to PSNR/SSIM via ``select``).
             bar_advance:      Optional callable that advances the progress bar.
             duration_seconds: Duration of the comparison window in seconds.
-            width:            Scale both inputs to this width (0 = no scaling).
+            ref_scale:        Explicit dims to scale the reference input to
+                              (``None`` = no scaling).
+            dist_scale:       Explicit dims to scale the distorted input to
+                              (``None`` = no scaling).
             cwd:              Working directory for metric ``.tmp`` files.  When
                               ``None``, derived from ``output_prefix``'s parent.
 
@@ -845,7 +849,8 @@ class QualityMeasurer:
             reference        = reference,
             crop_distorted   = CropParams(),
             crop_reference   = ref_crop,
-            width            = width,
+            scale_distorted  = dist_scale,
+            scale_reference  = ref_scale,
             use_gpu          = False,
             sampling         = sampling,
             output_prefix    = tmp_prefix,
@@ -896,7 +901,8 @@ class QualityMeasurer:
         show_progress:       bool | BarAdvance = False,
         plot_path:           Path | None       = None,
         chunk_start_seconds: float             = 0.0,
-        width:               int               = 0,
+        ref_scale:           tuple[int, int] | None = None,
+        dist_scale:          tuple[int, int] | None = None,
         bar_title:           str | None        = None,
         metrics_output_dir:  Path | None       = None,
     ) -> QualityMeasurement:
@@ -932,7 +938,8 @@ class QualityMeasurer:
                     sampling        = sampling,
                     bar_advance      = advance,
                     duration_seconds = duration_seconds or 0.0,
-                    width            = width,
+                    ref_scale        = ref_scale,
+                    dist_scale       = dist_scale,
                     cwd              = cwd,
                     fps_value        = fps_value,
                 )
@@ -946,7 +953,8 @@ class QualityMeasurer:
                 sampling        = sampling,
                 bar_advance      = show_progress,
                 duration_seconds = duration_seconds or 0.0,
-                width            = width,
+                ref_scale        = ref_scale,
+                dist_scale       = dist_scale,
                 cwd              = cwd,
                 fps_value        = fps_value,
             )
@@ -957,7 +965,8 @@ class QualityMeasurer:
                 sampling        = sampling,
                 bar_advance      = None,
                 duration_seconds = duration_seconds or 0.0,
-                width            = width,
+                ref_scale        = ref_scale,
+                dist_scale       = dist_scale,
                 cwd              = cwd,
                 fps_value        = fps_value,
             )
@@ -985,7 +994,8 @@ class QualityMeasurer:
         show_progress:       bool | BarAdvance = False,
         plot_path:           Path | None       = None,
         chunk_start_seconds: float             = 0.0,
-        width:               int               = 0,
+        ref_scale:           tuple[int, int] | None = None,
+        dist_scale:          tuple[int, int] | None = None,
         metrics_output_dir:  Path | None       = None,
     ) -> QualityMeasurement:
         """Measure encoded chunk against a reference (no verdict - Req 51-53).
@@ -1013,7 +1023,10 @@ class QualityMeasurer:
             plot_path:           Explicit path for the PNG plot.  When ``None``,
                                  written as ``<encoded.stem>.png`` inside ``output_dir``.
             chunk_start_seconds: Start timestamp of the chunk in seconds.
-            width:               Scale both inputs to this width (0 = no scaling).
+            ref_scale:           Explicit dims to scale the reference input to
+                                 (``None`` = no scaling).
+            dist_scale:          Explicit dims to scale the distorted input to
+                                 (``None`` = no scaling).
             metrics_output_dir:  Directory for raw metric ``.tmp`` files.  When
                                  ``None``, uses ``output_dir``.
 
@@ -1033,7 +1046,8 @@ class QualityMeasurer:
                 show_progress       = show_progress,
                 plot_path           = plot_path,
                 chunk_start_seconds = chunk_start_seconds,
-                width               = width,
+                ref_scale           = ref_scale,
+                dist_scale          = dist_scale,
                 metrics_output_dir  = metrics_output_dir,
             )
         )
