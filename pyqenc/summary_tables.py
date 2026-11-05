@@ -55,7 +55,9 @@ ABSOLUTE_MARKER = "◆"
 semantically empty; deltas carry their ``+``/``-`` signs instead."""
 
 NEGLIGIBLE_GLYPH = "≈"
-"""Prefixes deltas inside the metric's negligible band (acceptance_delta)."""
+"""Prefixes a positive delta inside a negligible band (a metric's
+``acceptance_delta``, or the size tolerance) — replaces the ``+`` on a
+gain too small to count; negative deltas never carry it."""
 
 SELECTED_GLYPH = "◀"
 """Selection mark (optimization) / recommendation mark (merge)."""
@@ -181,18 +183,18 @@ def _format_metric(value: float) -> str:
 
 
 def _format_delta(value: float, negligible_band: float) -> str:
-    """One decimal, signed — the negligible band renders ``≈`` instead.
+    """One decimal, signed — a positive delta inside the negligible band
+    renders ``≈`` in place of the ``+``.
 
-    True zero renders bare (``0.0``); a nonzero delta inside
-    *negligible_band* renders ``≈``-prefixed with the sign dropped at
-    zero (``≈0.0``, ``≈0.1``, ``≈-0.1``); everything else keeps the sign
-    (``+0.4``, ``-1.2``, ``+0.0``).
+    A positive delta below *negligible_band* renders ``≈``-prefixed
+    (``≈0.0``, ``≈0.1``); negative deltas keep their sign at every
+    magnitude (``-0.0``, ``-0.1``), and only a true zero — exact, or
+    rounding away at two decimals — renders bare (``0.0``).
     """
-    if value == 0.0:
+    if 0 < value < negligible_band:
+        return f"{NEGLIGIBLE_GLYPH}{value:.1f}"
+    if round(value, 2) == 0.0:
         return "0.0"
-    if abs(value) < negligible_band:
-        text = f"{value:.1f}"
-        return f"{NEGLIGIBLE_GLYPH}{'0.0' if text == '-0.0' else text}"
     return f"{value:+.1f}"
 
 
@@ -200,12 +202,13 @@ def _format_pct_delta(value: float, tolerance_pct: float | None) -> str:
     """The size sub-cell's percent delta — one decimal, signed, ``%``.
 
     A positive delta inside *tolerance_pct* renders ``≈``-prefixed (the
-    one-sided selection band the tolerance keeps); everything else keeps
-    the sign, and zero-rounding outside the band stays bare.
+    one-sided selection band the tolerance keeps); negative deltas keep
+    their sign at every magnitude (``-0.0%``), and only a true zero —
+    exact, or rounding away at two decimals — renders bare.
     """
     if tolerance_pct is not None and 0 < value < tolerance_pct:
         return f"{NEGLIGIBLE_GLYPH}{value:.1f}%"
-    if round(value, 1) == 0.0:
+    if round(value, 2) == 0.0:
         return "0.0%"
     return f"{value:+.1f}%"
 

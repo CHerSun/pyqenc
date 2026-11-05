@@ -414,10 +414,12 @@ row shape, one renderer, identical mechanics (`pyqenc/summary_tables.py`).
   Strategy rows show per-statistic deltas vs the basis in BOTH modes —
   never averaged across statistics. Absolute pairs carry one `◆`
   attention marker (uncompared tables render absolutes unmarked);
-  deltas inside the metric's `acceptance_delta` (the same negligible
-  band the dominance pruning ignores) render `≈` instead of a sign —
-  as do positive size deltas inside the stated size tolerance (the
-  one-sided selection band, optimization tables only).
+  positive deltas inside the metric's `acceptance_delta` (the same
+  negligible band the dominance pruning ignores) render `≈` in place of
+  the `+` — as do positive size deltas inside the stated size tolerance
+  (the one-sided selection band, optimization tables only); negative
+  deltas keep their sign at every magnitude, and only a true zero —
+  exact, or rounding away at two decimals — renders bare `0.0`.
 - **Anchors are elected per population**: the test anchor at optimization
   (smallest survivor of tolerance-epsilon dominance pruning — size within
   `optimization.tolerance`, every compared statistic within the metric's

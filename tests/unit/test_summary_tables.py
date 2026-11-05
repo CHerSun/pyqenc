@@ -197,7 +197,9 @@ class TestFixedMode:
 
 
 class TestNegligibleDeltas:
-    """Deltas inside the metric's negligible band (acceptance_delta) render ≈."""
+    """Positive deltas inside the metric's negligible band (acceptance_delta)
+    render ``≈`` in place of the ``+``; negative deltas keep their sign at
+    every magnitude — the ``≈-`` pair never renders."""
 
     def _delta_line(self, vmaf_med: float) -> str:
         single = (QualityTarget.parse("vmaf-med:96.0"),)
@@ -211,6 +213,11 @@ class TestNegligibleDeltas:
         assert "0.0" in line
         assert "≈" not in line and "+" not in line
 
+    def test_two_decimal_dust_is_a_true_zero(self) -> None:
+        line = self._delta_line(95.999)  # -0.001 — rounds away at two decimals
+        assert "0.0" in line
+        assert "-0.0" not in line and "≈" not in line and "+" not in line
+
     def test_minor_positive_delta_renders_approx(self) -> None:
         assert "≈0.0" in self._delta_line(96.02)  # rounds to 0.0, inside the VMAF band
         assert "≈0.1" in self._delta_line(96.06)  # rounds to 0.1, still inside the band
@@ -218,10 +225,19 @@ class TestNegligibleDeltas:
     def test_non_ignored_positive_delta_keeps_the_sign(self) -> None:
         assert "+0.4" in self._delta_line(96.4)   # beyond the VMAF band (0.15)
 
-    def test_negative_deltas_mirror_the_band(self) -> None:
-        assert "≈0.0" in self._delta_line(95.98)  # negative dust — sign collapsed at zero
-        assert "≈-0.1" in self._delta_line(95.94)
+    def test_negative_deltas_keep_the_sign_at_every_magnitude(self) -> None:
+        line = self._delta_line(95.98)
+        assert "-0.0" in line and "≈" not in line  # dust vanishing at one decimal only
+        assert "-0.1" in self._delta_line(95.94)   # inside the band — still signed
         assert "-0.4" in self._delta_line(95.6)
+
+    @given(vmaf_med=st.floats(min_value=95.8, max_value=96.4))
+    def test_negligible_glyph_never_prefixes_a_negative(
+        self, vmaf_med: float
+    ) -> None:
+        """The glyph marks a skippable gain only — ``≈-`` shipped beside
+        VMAF in a real run (2026-11-05)."""
+        assert "≈-" not in self._delta_line(vmaf_med)
 
     def test_band_boundary_is_per_metric(self) -> None:
         band = MetricType.SSIM.info.acceptance_delta
@@ -256,6 +272,17 @@ class TestNegligibleSizeDeltas:
         line = self._row_line(ComparisonTable(rows=_ROWS), "h265-aq+ultrafast")
         assert "(+0.2%)" in line
         assert "≈" not in line  # no basis, no tolerance — no ≈ anywhere, legend included
+
+    def test_negative_dust_keeps_the_sign_vs_source(self) -> None:
+        source = SourceInfo(stem="Movie", size_bytes=1_000_000_000)
+        dust = self._row_line(ComparisonTable(
+            rows=[_row("enc", 999_700_000)], source=source,
+        ), "enc")
+        assert "(-0.0%)" in dust    # -0.03% — vanishes at one decimal, sign kept
+        true_zero = self._row_line(ComparisonTable(
+            rows=[_row("enc", 999_960_000)], source=source,
+        ), "enc")
+        assert "(0.0%)" in true_zero  # -0.004% — rounds away at two decimals
 
     def test_legend_states_approx_even_ruler_less_with_tolerance(self) -> None:
         lines = _lines_for(ComparisonTable(rows=_ROWS, size_tolerance_pct=5.0))
