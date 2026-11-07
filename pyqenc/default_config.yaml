@@ -255,7 +255,8 @@ codecs:
     quality_range: [6.0, 30.0]   # Codec full range: 0.0-51.0. Balanced: 6.0-30.0
     default_quality: 18.0
     resolution_granularity: 2   # pixel granularity of output dimensions (4:2:0 needs even)
-    default_preset: slow         # slow is the practical optimum for h265; slower/very slow are only marginally better but much slower
+    default_preset: slow         # measured optimum: the quality knee AND the rate-efficiency winner; slower buys
+                                 # nothing at ~4x time, medium costs +18% size at equal quality (docs/preset-comparison.md)
     presets:
       - ultrafast
       - superfast
@@ -402,7 +403,10 @@ codecs:
     quality_range: [4.0, 30.0]   # Codec full range: 0.0-63.0 Balanced: 4.0-30.0. AV1 is tuned for clean content — grain preservation needs lower CRF. Below 4 quality measured behaves non-linearly.
     default_quality: 18.0
     resolution_granularity: 2   # pixel granularity of output dimensions (4:2:0 needs even)
-    default_preset: "3"          # preset 3 is a good speed/quality balance; use 2 or lower for grain retention
+    default_preset: "4"          # measured (§140): 4 matches 3's delivered quality in fixed AND searched runs
+                                 # at ~half the encode time; 2 is the pinned-CRF quality/grain alternative
+                                 # (best at fixed -q, but +16.7% size under searched targets); see
+                                 # docs/preset-comparison.md
     presets: ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13"] # 0 - slowest; 2+ recommended for grain; 12 max for normal use; 13 - not recommended.
     encoder_args:
       - "-c:v"

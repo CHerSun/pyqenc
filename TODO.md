@@ -217,6 +217,8 @@ Investigation needed.
 
 2026-10-19 (later): FIFTH observation, same mechanism, different test: `tests/test_metrics_properties.py::test_convergence_stats_math` DeadlineExceeded mid-suite under load (during the 0.27.3 gate run); passed in isolation in 1.1s. Family now spans two files.
 
+2026-11-06: SIXTH observation — `tests/test_vif_properties.py::test_parse_vif_preserves_frame_order` DeadlineExceeded ~50 min into a full-suite run (no external load; `-x` stopped the suite at 231/1260). Passed isolated in 3.4 s. Family now spans three files.
+
 ---
 
 ## 76. Reevaluate Python 3.15.x (lazy imports) — needs thinking
@@ -269,21 +271,6 @@ Real-data observation (2026-10-03 smoke test, `-q 18` over h264 + three h265 pro
 - Reduction mechanisms with an actual bite: user-supplied size/quality budget (top-K within budget), epsilon-dominance (near-equal stats count as equal), explicit trade-off sliders, or a "dominance with tolerance" per metric.
 - The anchor-relative table already gives the human the trade-off picture — maybe the right v2 is interactive/filtered presentation, not stronger auto-pruning (auto-picking needs the composite opinion the spec refuses).
 - Stat-subset choice interacts here: p10+median compares worst-decile + central tendency; adding min/max-style stats made pruning strictly weaker.
-
----
-
-## 84. Re-home quality ranges: codec = actual codec range, profile = reasonable working band
-
-**Status note (2026-10-05, post-config-resolution):** range VALIDATION is now one direction-free rule on `AppConfig` (`_validate_quality_range` + `_codec_ordered_range`) — the re-homed values land in exactly one check site. The value re-homing itself (default_config.yaml codec/profile bounds) remains open.
-
-Background: profiles originally had no `quality_range` override, so the practical working band had to be defined on the codec itself — default_config.yaml comments say it outright ("full codec range is 0–51; 6–30 is the practical working band"). Now that profiles narrow ranges (and the fixed-quality CLI override layers on top), each value should live in its right layer:
-
-- codec `quality_range` — the codec's ACTUAL domain (x264/x265/NVENC-CQ/QP: [0,51]; AV1: [0,63]; NVENC-VBR: needs thinking — the 99.5 Mbit/s cap is already a practical cap, not a factual bound; vulkan QP: real range is −1–255, but values above ~50 produce visible artefacts — even "actual" needs a sanity discussion there)
-- profile `quality_range` — the reasonable working band (today's [6,30]-style values move here; bundled profiles should all carry one, otherwise profile-less searches roam the full codec range)
-
-Follow-ons to consider while at it: `default_quality` must stay inside the moved bands (the fixed-quality spec's starting-point auto-adjust already covers exclusion); `quality_log_padding` derives from range width (cosmetic); search convergence from wider codec bounds (phase-0 half-range steps get coarser — probably fine, verify); the fixed-quality `-q` override is bounded by the codec range, so it gains the wider freedom too (consistent — CLI replaces the profile band).
-
----
 
 ---
 
@@ -565,27 +552,6 @@ Process (explicit): produce a TABLE first — current name, proposed name (publi
 
 ---
 
-## 126. Per-selector fixed quality — multiple `--strategies`/`-q` pairs
-
-Fixed runs with a single `-q` are an awesome tool, but quality is NOT uniform between codecs — AV1 CRF and H.265 CRF differ wildly in both value and perceptible quality for the same number. Wanting different codecs at different fixed qualities in ONE run is impossible today:
-
-- one `--strategies` value (plain `store` — a second occurrence silently overwrites the first, `cli.py:281-293`) + one `-q` (`cli.py:294-308`), both wired into the single `resolve_encoding` call (`cli.py:406-421`);
-- the shared `-q` is applied to EVERY matched strategy (`_expand_strategy_pattern(pattern, canonical_quality)`, `app_config.py:627-630`). The uniform-labels guard (`app_config.py:641-652`) only catches different label TEXT (CRF vs CQ vs Mbit/s; the label defaults to "CRF", `models.py:828`), so `av1,h265 -q 18` passes but silently shares the NUMBER across differently-scaled codecs. Escape hatches today: one run per codec family, or editing config — both ugly.
-
-Proposal: multiple `--strategies` selectors, each optionally followed by its own `-q`, quality sticking to the last `--strategies` before it — `--strategies av1 -q 14 --strategies h26* -q 18` expands to the av1 profile(s) with quality override (14, 14) and the h26* profiles with (18, 18), each keeping default presets. Argparse side looks feasible via one custom `argparse.Action` shared by both flags, appending `{strategy, quality}` pairs in order (sketched by the user; `-q` before any `--strategies` raises `ArgumentError`); needs a bit of support from our side, including scoping the single-label requirement to WITHIN one pair (labels may differ between pairs).
-
-Blast radius (verified):
-
-- CLI parse layer: the custom Action pairing; `_parse_strategies` / `_parse_quality_override` stay per-value; `resolve_plan_args` re-shapes its wiring. Rules needed: `-q` twice on one selector (error vs last-wins); a selector with NO `-q` among pinned ones (the all-fixed-or-all-searched guard fires — wanted?); comma-separated patterns inside one selector receive the selector's `-q` as a group.
-- `AppConfig.resolve_encoding` (`app_config.py:576-672`): `quality` becomes per-pattern (parallel sequence, or folded into the strategies argument); the uniform-labels guard re-scopes from the whole matched set to one selector's pair (one `-q` value must still mean one thing for everything it pins).
-- Dedup by `(preset, profile)` first-occurrence (`app_config.py:632-639`): the same strategy matched by two selectors with different `-q` is ambiguous — explicit error needed.
-- Mixed fixed/searched guard (`app_config.py:654-670`) unchanged and still binding: either every selector pins a point or none does.
-- Downstream looks mostly untouched: per-strategy effective ranges already exist (`_effective_codec`), `EncodingPlan.fixed_quality` stays a plan-wide "all collapsed" bool (`models.py:685-729`), and merge's fixed provenance quality is already per-output from each strategy's codec (`merge.py:135-144, 264-273, 302-306`). Verify the optimization sidecar/replay re-derivation paths read per-strategy quality, not the CLI value.
-
-**Questions to think about:** is the need real enough to justify the CLI surface (alternate: per-profile fixed quality in config — the profile layer already owns ranges)? Error messages must teach the pairing rule (quality binds to the preceding selector).
-
----
-
 ## 132. Merge swallows measurement failures — dataless summaries stay green
 
 **Status:** needs thinking (reachability census 2026-10-17, surfaced by
@@ -759,18 +725,6 @@ Hypothesis's `HealthCheck.filter_too_much`. Generation-side fix candidate: draw
 `concurrency` from `1..cpu_count` directly (no assume), or suppress the health
 check for this test. Same statistics-based health-check family as §75's
 DeadlineExceeded flakes, but deterministic per-seed rather than load-dependent.
-
----
-
-## 140. Empirical test of h265 medium preset vs slow preset
-
-There are many tests stating:
-- slow vs slower - negligible quality difference (~1%) with significant complexity increase
-- slow vs medium - here we have different reports, many claim that medium gives practically the same result, but much faster. My personal experience - slow matters,
-  especially for grainy content (in particular our h265-crisp and VIF metric).
-
-Suggestion: test medium, slow and maybe slower on a few not too long videos.
-Measure time it takes, resulting sizes, quality. Run in both fixed and search mode. I.e. `3*2=6` tests. For fixed quality use 17 (my nearly visually lossless).
 
 ---
 
@@ -1006,7 +960,52 @@ No examples too. Everything is put at the main level `pyqenc -h` only.
 
 ---
 
-## Last known = 161
+## 162. Scene-threshold exploration — make chunking visible before committing to a run
+
+Born from the §140 campaign (2026-11-07): a single 39.5 s chunk mixing a
+~3 s dark opening with bright content dragged av1's searched output to the
+CRF floor on its worst-frame stat — half the merged size sat in one chunk
+that better boundaries would have split. Nothing about this is visible in
+advance: `chunking.scene_threshold` is a blind magic number today (the
+guidance ends at "~15-50 is the meaningful range").
+
+Key mechanic: the expensive part of detection (decode + per-frame content
+scoring) is threshold-INDEPENDENT. One stats pass over the source yields
+every frame's content score; the cut list at any threshold is pure offline
+post-processing. A two-step CLI intent (`scenes`?) can therefore show the
+whole threshold landscape for the price of one scan:
+
+- `pyqenc scenes <source>` — full scoring pass, persisted to a
+  source-fingerprinted sidecar (yaml; survives reruns), then print the
+  threshold LADDER: only the distinct thresholds where the cut set
+  changes, with scene counts ("≥ 27 → 96, ≥ 24 → 108, ≥ 20.3 → 111 …"),
+  computed at the configured min_scene_length.
+- `pyqenc scenes <source> --at 22` — instant from the cached sidecar
+  (rescan only on source fingerprint mismatch); prints the exact break
+  list (timestamps + per-scene durations) and flags outlier lengths (the
+  §47 concern: movies getting overlong chunks).
+
+**Questions to think about:**
+
+- Ladder presentation: change-points only (fewer rows, complete) vs
+  sampled thresholds; is min_scene_length fixed from config or a second
+  axis?
+- Simulator fidelity is a contract: the offline cut computation must
+  equal `detect_scenes()` at the same threshold — same post-processing
+  code path (not a reimplementation) + a calibration property test
+  (simulated cuts == detect_scenes(source, T)).
+- Sidecar home: a scan is useful BEFORE any run/work-dir exists, but
+  pyqenc sidecar conventions live in work dirs — standalone cache
+  location vs work-dir placement (the `config` intent may be the closer
+  precedent).
+- Relationship to §47 (automatic threshold search): complementary —
+  visibility-first manual exploration vs auto-search; does the ladder
+  make auto-search unnecessary, or should auto-search consume the same
+  stats sidecar?
+
+---
+
+## Last known = 162
 
 Keep this updated, so we can keep continuous numbering even on last todo item deletion.
 Keep this the last entry for easy human updates.
