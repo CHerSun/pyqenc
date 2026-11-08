@@ -444,6 +444,9 @@ class Strategy(BaseModel):
         "codec.quality_granularity",
         "codec.quality_max_step",
         "codec.name",
+        "codec.default_preset",
+        "codec.presets",
+        "codec.quality_label",
     })
     """Model fields excluded from the identity fingerprint (dotted paths).
 
@@ -458,7 +461,11 @@ class Strategy(BaseModel):
     fatal band; the fixed-quality map (fixed mode's key) and the mode tag
     own quality-change invalidation. Found live 2026-10-09: a search→fixed
     ``-q`` toggle fired the per-strategy catastrophic fatal and demanded
-    ``--force`` to wipe attempts that were perfectly valid products. The
+    ``--force`` to wipe attempts that were perfectly valid products.
+    Plus the codec CONFIG-METADATA domain — fields that never reach the
+    encoder command: ``default_preset`` (the command carries the resolved
+    ``preset``), ``presets`` (the legal-value list, validation-only),
+    ``quality_label`` (display-only). The
     set is declared here, next to what it excludes; every other field
     participates by default (fail-safe: future fields over-invalidate
     rather than slip through)."""
