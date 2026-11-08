@@ -81,6 +81,16 @@ handling (cut at run-end vs spike frame, or windowed score smoothing); combinabi
 scenedetect's AdaptiveDetector (it fixes SCORING for gradual transitions; this changes
 SELECTION — orthogonal).
 
+Encoding scenes, not semantic scenes (2026-11-08, user, from the §140 exp6/7 follow-up): for
+chunking we do NOT need scenedetect's true-scene semantics — we need ENCODING scenes:
+segments homogeneous in encoding difficulty (dark/grainy vs smooth/bright — exactly the mix
+that cost ~300 MB unfixed and ~200 MB after the partial fix in §140's search runs). Check
+whether ffmpeg's own scene scoring (scdet / select=gt(scene,X)) segments by difficulty
+better: it is already in the toolchain (no new dependency) and its score responds to
+different signal components than PySceneDetect's content detector — whose peak demonstrably
+landed ~7 s BEFORE the actual dark→bright transition (exp7 follow-up: the split at the score
+peak left ~7 s of dark inside the "bright" chunk, still converging to CRF 4–6).
+
 ---
 
 ## 51. (HIGH) QualitySearchV3 is outright broken

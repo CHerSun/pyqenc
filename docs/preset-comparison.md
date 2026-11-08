@@ -111,3 +111,25 @@ quality is a first-order lever (feeds §162/§47).
   cross-codec worst-frame gap (h265 ~91 vs av1 ~83–85 under the same bars,
   this source) is the number to weigh for content with pathological
   single frames. Single worst frames are what viewers notice first.
+
+### Chunking verdict (campaign by-product, measured twice)
+
+Boundary quality is a FIRST-ORDER size lever for searched runs, and the
+current `scene_threshold` chunking fails it in two measured ways (Exps
+6–7 + the exp7 visual follow-up):
+
+- **Wrong chunking = huge overhead.** One 39.5 s chunk mixing a dark
+  opening with bright content dragged av1's search to the CRF floor and
+  cost more size than the entire preset spread (~300 MB). The targeted
+  threshold fix split it at the content-score peak — which sat ~7 s
+  BEFORE the actual dark→bright transition — leaving a still-mixed
+  36.6 s chunk that still converges to CRF 4–6 with ~200 MB of overhead.
+- **Unstable from the threshold value.** The linear scan is
+  path-dependent: threshold 24 → 21 added 5 cuts but also removed 4 and
+  shifted 2 (94% of boundaries stable) — retuning churns boundaries
+  non-locally and orphans attempt investments.
+
+The rework direction is TODO §47 (recursive splitting with an absolute
+score floor; encoding scenes rather than semantic scenes, including a
+check whether ffmpeg's own scene scoring segments by encoding difficulty
+better) with the visibility tooling in TODO §162.

@@ -58,6 +58,17 @@ vs `+3` (full values in the run artifacts):
   in searched runs — one bad 39.5 s chunk cost more than the entire
   preset spread. Feeds §162 (visibility) and §47 (stable splitting).
 
+### Post-run follow-up (visual check)
+
+The split did not land at the visual transition: the content-score peak
+(t=309.06 s) sits ~7 s BEFORE the actual dark→bright change, so the
+remaining 36.6 s chunk still opens with ~7 s of dark content — it still
+converges to CRF 4–6 and still carries roughly 200 MB of overhead (down
+from ~300 MB, still ugly). Beyond instability, `scene_threshold`
+chunking MISPLACES boundaries: the content detector's peak is not the
+encoding transition. See the campaign's chunking verdict and TODO
+§47/§162.
+
 ### Grain and worst-frame notes
 
 Unchanged from exp6 — the worst-frame ceiling (~83–85) lives in the
