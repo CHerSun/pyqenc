@@ -1124,7 +1124,9 @@ class ChunkEncoder:
         the attempt, the detected crop for the source window). An existing
         attempt at the proposed address is accepted from its sidecar whenever
         it is complete — attempt reuse is never bypassed (``--force`` is
-        wipe permission at JobPhase, not a re-encode command). The search
+        wipe permission at JobPhase, not a re-encode command); a
+        sidecar-less existing file is re-measured in place on measuring
+        runs and accepted as-is when attempts are unmeasured. The search
         starts at the codec's quantized default quality — a predictable
         starting point means a predictable recovery path when parameters
         change. Measurement runs at the chunk's effective sampling
@@ -1187,9 +1189,10 @@ class ChunkEncoder:
             """Conclude one attempt: judge it, log the attempt line, feed the
             search, and snapshot the best.
 
-            Shared by the cache-hit, re-measured, and fresh-encode paths —
-            the judging and presentation are identical, only provenance
-            differs (the ``[reused]`` / ``[re-measured]`` tags).
+            Shared by the cache-hit, re-measured, unmeasured pick-up, and
+            fresh-encode paths — the judging and presentation are identical,
+            only provenance differs (the ``[reused]`` / ``[re-measured]``
+            tags).
 
             Args:
                 attempt:     The concluded attempt (its quality is the address).
@@ -1197,7 +1200,8 @@ class ChunkEncoder:
                 frame_count: Frames of the attempt file (0 = unknown).
                 targets_met: The live comparator verdict.
                 reused:      Whether the attempt was accepted from disk whole
-                             (sidecar cache hit — no work performed).
+                             (sidecar cache hit, or a sidecar-less file on an
+                             unmeasured run — no work performed either way).
                 remeasured:  Whether an existing attempt file was re-measured
                              in place (sampling changed / stale sidecar — the
                              encode itself was never re-run).
@@ -1272,7 +1276,8 @@ class ChunkEncoder:
             # Existing attempt at the exact proposed address (exact-name
             # compose, no scan — Req 9): accepted from its sidecar when the
             # sidecar is complete; a missing/incomplete/stale sidecar
-            # re-measures below.
+            # re-measures below on measuring runs, and is accepted as-is
+            # (no work performed) when attempts are unmeasured.
             existing = self._check_existing_encoding(
                 chunk.safe_name(), strategy, current_q
             )
@@ -1302,25 +1307,35 @@ class ChunkEncoder:
                 continue
 
             if existing is not None:
-                # File exists but sidecar is missing, incomplete, or stale — re-measure.
-                reason = (
-                    f"sampling changed ({sidecar.sampling if sidecar is not None else '?'} → {sampling})"
-                    if sidecar is not None and sidecar.sampling != sampling
-                    else "sidecar missing or incomplete"
-                )
-                logger.info(
-                    fmt_chunk(strategy.display_name(), chunk.safe_name(),
-                        f"existing attempt ({strategy.codec.quality_label.lower()}={str(existing.quality).rjust(strategy.codec.quality_log_padding)}) — re-evaluating metrics ({reason})",
-                        self._visual_hash),
-                )
-                _any_real_work = True
+                # File exists but sidecar is missing, incomplete, or stale.
+                # A measuring run re-derives the metrics in place (real
+                # work); an unmeasured run accepts the video as-is — no
+                # encode, no measure, the attempt stays sidecar-less.
+                if self._measure_attempts:
+                    reason = (
+                        f"sampling changed ({sidecar.sampling if sidecar is not None else '?'} → {sampling})"
+                        if sidecar is not None and sidecar.sampling != sampling
+                        else "sidecar missing or incomplete"
+                    )
+                    logger.info(
+                        fmt_chunk(strategy.display_name(), chunk.safe_name(),
+                            f"existing attempt ({strategy.codec.quality_label.lower()}={str(existing.quality).rjust(strategy.codec.quality_log_padding)}) — re-evaluating metrics ({reason})",
+                            self._visual_hash),
+                    )
+                    _any_real_work = True
+                else:
+                    logger.info(
+                        fmt_chunk(strategy.display_name(), chunk.safe_name(),
+                            f"existing attempt ({strategy.codec.quality_label.lower()}={str(existing.quality).rjust(strategy.codec.quality_log_padding)}) — accepted without measurement (measurement opted out)",
+                            self._visual_hash),
+                    )
                 output_file    = existing.path
                 # The file's frame count survives regardless of sidecar
                 # staleness — re-measure never changes the encoded file
                 # (0 = not on record). A 0 count marks the sidecar
-                # incomplete (Req 9a: frame count present) — the re-measure
-                # below re-derives it from the metric run's whole-file
-                # decode.
+                # incomplete (Req 9a: frame count present) — a measuring
+                # run re-derives it below from the metric run's
+                # whole-file decode.
                 attempt_frames = sidecar.frame_count if sidecar is not None else 0
             else:
                 # Encode — real work. The free-space floor gates every fresh
@@ -1438,8 +1453,8 @@ class ChunkEncoder:
                     file_size_bytes = output_file.stat().st_size,
                 ),
                 all_metrics, attempt_frames, attempt_targets_met,
-                reused      = False,
-                remeasured  = existing is not None,
+                reused      = existing is not None and not self._measure_attempts,
+                remeasured  = existing is not None and self._measure_attempts,
             )
             if next_q is None:
                 break

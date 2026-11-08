@@ -396,6 +396,70 @@ class TestMeasureAttemptsSeam:
             tmp_path / "encoded" / "test_strategy" / "chunk_001.yaml"
         ).exists()
 
+    def test_off_path_pickup_accepts_sidecarless_attempt_without_measuring(
+        self, tmp_path: Path, caplog,
+    ) -> None:
+        """measure_attempts=False: a sidecar-less attempt video left by an
+        earlier unmeasured run is accepted whole — the pick-up line and the
+        provenance tag never claim re-measurement, and the result counts as
+        reused (no encode, no measure, no sidecars; live finding 2026-11-08:
+        both strings said "re-evaluating metrics"/"[re-measured]" while the
+        run skipped measurement entirely).
+        """
+        strategy = _fixed_strategy()
+        chunk    = _chunk_mock(tmp_path)
+
+        evaluator = _MM(spec=_QMeasurer)
+        evaluator.work_dir = tmp_path
+
+        encoder = _ChunkEncoder(
+            quality_measurer = evaluator,
+            work_dir         = tmp_path,
+            plan             = _FIXED_PLAN,
+            collector        = _MM(spec=_AppMetricsCollector),
+            crop_params       = CropParams(),
+        scale=ResolvedScale(),
+        probe_fingerprint=fingerprinter.of_text('test-probe'),
+            cleanup_level     = CleanupLevel.NONE,
+            visual_hash       = True,
+            sampling          = 10,
+            metric_prefix     = AppMetricKey.ENCODING,
+            measure_attempts = False,
+            space_guard     = _SpaceGuard(0),
+        )
+
+        # The earlier unmeasured run's residue: the attempt video, nothing else.
+        attempt = tmp_path / "encoding" / "test_strategy" / "chunk_001.q18.0.mkv"
+        attempt.parent.mkdir(parents=True, exist_ok=True)
+        attempt.write_bytes(b"fake mkv")
+
+        encode_mock = _MM(return_value=_FFR(returncode=0, success=True, stderr_lines=[], frame_count=120))
+        with (
+            caplog.at_level(logging.INFO),
+            _patch.object(encoder, "_encode_with_ffmpeg", encode_mock),
+        ):
+            result = encoder.encode_chunk(
+                chunk           = chunk,
+                strategy        = strategy,
+                quality_targets = [],
+            )
+
+        encode_mock.assert_not_called()
+        evaluator.measure_chunk.assert_not_called()
+        assert result.success is True
+        assert result.reused is True
+
+        assert not attempt.with_suffix(".yaml").exists()
+        assert (tmp_path / "encoded" / "test_strategy" / "chunk_001.mkv").exists()
+        assert not (
+            tmp_path / "encoded" / "test_strategy" / "chunk_001.yaml"
+        ).exists()
+
+        assert any("accepted without measurement" in m for m in caplog.messages)
+        assert any("[reused]" in m for m in caplog.messages)
+        assert not any("re-evaluating metrics" in m for m in caplog.messages)
+        assert not any("[re-measured]" in m for m in caplog.messages)
+
     def test_seam_threaded_explicitly_at_both_call_sites(self) -> None:
         """Optimization always measures; the encoding phase reads the plan."""
         import inspect
