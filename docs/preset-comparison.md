@@ -45,6 +45,7 @@ global verdicts.
 | 4 | av1 | fixed CRF 18 | grainy-10min.mkv | 1–6 | [exp4](preset-comparison/exp4-av1-fixed-crf18-grainy-film.md) |
 | 5 | h265 | search → `high` | test.mkv | fast, medium, slow | [exp5](preset-comparison/exp5-h265-search-high-animation.md) |
 | 6 | av1 | search → `high` | test.mkv | 1, 2, 3, 4 | [exp6](preset-comparison/exp6-av1-search-high-animation.md) |
+| 7 | av1 | search → `high`, re-chunked (threshold 21) | test.mkv | 1, 2, 3, 4 | [exp7](preset-comparison/exp7-av1-search-high-rechunked-animation.md) |
 
 Fixed experiments (1–4) measure the direct tradeoff — time and size vs
 delivered quality at the same knob. Search experiments (5–6) are the
@@ -72,20 +73,23 @@ equal quality the same ordering holds in efficiency: `medium` needs +18.3%
 size (Exp 5), so its fixed-CR18 size advantage was a knob offset. `medium`
 remains the legitimate speed alternative at that now-explicit price.
 
-**av1: the decision the data now supports is `3` or `4` — the earlier
-`2` recommendation came from the retracted experiment and does not
-survive the clean rerun.** Under the common `high` standard (Exp 6):
-`+3` is the smallest (644.1 MiB), `+4` matches it at every delivered
-statistic (+3.1% size, 0.55× time), `+1` pays +5.4% for the best
-worst-frame delivery at 3.78× time, and `+2` is the LEAST efficient
-(+16.7% size) — its much higher per-CRF bitrate is not repaid under
-best-effort search. The fixed ladders still stand (Exps 2/4): at a
-pinned CRF `+2` delivers the best quality and the grain-tail gains
-(film: vmaf-min +0.99, vif-min +0.82) — real, but worth +16.7% only to
-fixed-mode users. `+1` ≈ `+2` at 3× time on both poles; preset 0 closed
-untested. `+4` dominates `+3` on time at equal quality everywhere
-measured — the `3`-vs-`4` choice is pure speed preference, and the
-`2`-vs-`4` choice is fixed-mode quality vs searched-mode efficiency.
+**av1: `default_preset: 4` — confirmed by both search runs.** The earlier
+`2` recommendation came from the retracted derived-bars experiment and
+does not survive: under the common `high` standard `+2` is the LEAST
+efficient preset (largest at equal delivered quality in both chunkings,
+Exps 6–7 — its per-CRF bitrate premium is not repaid under search).
+`+4` matches `+3`'s delivered quality at every measured statistic at
+half the time, in fixed mode (Exps 2/4) and searched mode (Exps 6/7)
+alike — in the cleaner re-chunked run it is also smaller (616.1 vs
+638.8 MiB). `+1` delivers the best worst frame (+1.80 vmaf-min over
+`+3`) and, once the chunking skew is removed, the smallest output
+(600.0 MiB) — at 3.78× time; preset 0 closed untested (`+1` ≈ `+2` at
+pinned CRF, Exps 2/4). The fixed ladders still stand: at a pinned CRF
+`+2` is the best quality with the grain-tail gains (film: vmaf-min
++0.99, vif-min +0.82) — worth considering for fixed-mode runs despite
+its searched-mode cost. Exp 7's wider lesson: one mixed-scene 39.5 s
+chunk cost more searched size than the entire preset spread — boundary
+quality is a first-order lever (feeds §162/§47).
 
 ### Cross-codec notes
 

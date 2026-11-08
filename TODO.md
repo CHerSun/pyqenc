@@ -63,6 +63,24 @@ With all params being configurable in the config, including ability to disable t
 
 Why? Movies regularly get too long chunks. Long chunk encoding kills the quality knob searching.
 
+Direction update (2026-11-07, from the §140 exp7 re-chunk + the §162 scene-ladder work): the
+LINEAR threshold scan is path-dependent. Measured live on test.mkv: threshold 24 → 21 did not
+just add cuts — 5 added, 4 REMOVED, 2 shifted (94% of boundaries stable): a new earlier cut
+shadows a later one within min_scene_length, so a weaker threshold can make existing cuts
+vanish — retuning churns boundaries non-locally (and orphans attempt investments, §159).
+Proposal: RECURSIVE top-down splitting over the same per-frame scores — split each segment at
+its strongest QUALIFYING change (score ≥ floor, both children ≥ min_frames), recurse until
+nothing qualifies; enforce max chunk length by forced splits at the segment's WEAKEST-change
+point (chunks are encode units, not semantic scenes — the least-disturbing cut is fine).
+Gains: stability (top tree levels invariant to the floor — churn localizes to weak splits),
+no path dependence, bidirectional length control (the p90 < 60 s goal becomes a hard bound),
+deterministic O(n log n) over the §162 stats sidecar (one scoring pass serves both). Design
+bits: keep an absolute score floor (pure relative dominance would split uniform segments at
+their noisiest frame — flash/strobe spikes would dominate the tree top); single-frame spike
+handling (cut at run-end vs spike frame, or windowed score smoothing); combinability with
+scenedetect's AdaptiveDetector (it fixes SCORING for gradual transitions; this changes
+SELECTION — orthogonal).
+
 ---
 
 ## 51. (HIGH) QualitySearchV3 is outright broken
@@ -938,6 +956,17 @@ behavior unchanged. The revision this item wants should use it: preserve or demo
 pixel-shaping key changes where the old products remain meaningful, instead of the force-wiped
 whole-namespace outcome (user: wiping encoding investments is the least favorite behavior;
 attempts are the costly layer per the weight list above).
+
+Rider (2026-11-07, found live in the §140 exp7 rerun): `Strategy.fingerprint` hashes the whole
+embedded codec object — including fields that never reach the encoder command (`default_preset`,
+`presets`, `quality_label`). Consequence: shipping the av1 `default_preset` change ("3"→"4")
+invalidated the strategy-args fingerprints of explicitly-pinned strategies (`av1+1..+4`) whose
+resolved commands were byte-identical — the shared-namespace guard demanded a full `--force`
+wipe for a config-context drift. A chunking-threshold change was FIRST suspected and is innocent
+(fingerprints identical at 24 vs 21). Fingerprint composition should cover only the resolved
+command inputs (or exclude non-command codec fields); worked around manually by patching the
+persisted optimization.yaml tokens to the freshly computed values (attempts were provably not
+stale).
 
 ---
 
