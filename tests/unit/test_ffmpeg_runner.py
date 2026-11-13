@@ -8,13 +8,18 @@ Covers:
 - get_frame_count: builds its request internally and raises on missing count
 - _read_stdout: progress blocks parsed, callback invoked, frame_count from progress=end
 - run_ffmpeg: raises RuntimeError when called from a running event loop
+- run_ffmpeg with a changed working directory: path-like arguments arrive
+  anchored to the caller's directory, plain strings verbatim
 """
 
 import asyncio
+import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+from hypothesis import HealthCheck, given, settings
+from hypothesis import strategies as st
 
 from pyqenc.utils.ffmpeg_runner import (
     _PROGRESS_FLAGS,
@@ -290,3 +295,109 @@ class TestRunFfmpegEventLoopGuard:
                 run_ffmpeg(request)
 
         asyncio.run(_inner())
+
+
+# ---------------------------------------------------------------------------
+# run_ffmpeg with a changed working directory
+# ---------------------------------------------------------------------------
+
+class _FakeProcess:
+    """A finished ffmpeg stand-in: empty pipes and a chosen exit code.
+
+    Constructed inside the running loop (the patched launch site) so its
+    StreamReaders bind to that loop.
+    """
+
+    def __init__(self, returncode: int) -> None:
+        self.stdout = asyncio.StreamReader()
+        self.stderr = asyncio.StreamReader()
+        self.stdout.feed_eof()
+        self.stderr.feed_eof()
+        self.returncode = returncode
+
+    async def wait(self) -> int:
+        return self.returncode
+
+
+def _launch_capturing(
+    request: FFmpegRequest,
+    cwd: Path | None,
+    returncode: int = 0,
+) -> tuple[FFmpegRunResult, dict[str, object]]:
+    """Run ``run_ffmpeg`` with the process launch faked at the subprocess seam.
+
+    Returns:
+        ``(result, launched)`` — the runner's result and the argv/cwd the
+        subprocess actually received.
+    """
+    launched: dict[str, object] = {}
+
+    async def _fake_exec(*argv: object, **kwargs: object) -> _FakeProcess:
+        launched["argv"] = list(argv)
+        launched["cwd"] = kwargs.get("cwd")
+        return _FakeProcess(returncode)
+
+    with patch("asyncio.create_subprocess_exec", _fake_exec):
+        result = run_ffmpeg(request, cwd=cwd)
+    return result, launched
+
+
+class TestWorkingDirectoryAnchoring:
+    """A changed working directory never re-bases the caller's paths.
+
+    Bug prevented (TODO 164): ``pyqenc measure`` with video paths relative to
+    the invocation directory failed its metric pass — the metrics ffmpeg runs
+    with ``cwd`` set to the measure dir, and the relative inputs were passed
+    through unresolved, so ffmpeg looked for them under the wrong directory.
+    """
+
+    def test_relative_input_reaches_the_process_absolute(self, tmp_path: Path) -> None:
+        """With ``cwd`` set, a caller-relative input names the same file for ffmpeg."""
+        relative = Path("videos") / "clip.mkv"
+        request = FFmpegRequest(inputs=[FFmpegInput(path=relative)], output_args=())
+        result, launched = _launch_capturing(request, cwd=tmp_path)
+
+        assert result.success
+        assert launched["cwd"] == tmp_path
+        argv = launched["argv"]
+        assert isinstance(argv, list)
+        passed = argv[argv.index("-i") + 1]
+        assert os.path.isabs(str(passed))
+        assert os.path.normcase(str(passed)) == os.path.normcase(os.path.abspath(relative))
+
+    @settings(max_examples=50, deadline=None,
+              suppress_health_check=[HealthCheck.function_scoped_fixture])
+    @given(
+        segments = st.lists(
+            st.text(alphabet="abcdefghijklmnopqrstuvwxyz0123456789", min_size=1, max_size=8),
+            min_size=1, max_size=4,
+        ),
+        stats_name = st.text(alphabet="abcdefghijklmnopqrstuvwxyz0123456789", min_size=1, max_size=12),
+    )
+    def test_properties_paths_anchor_and_plain_strings_stay_verbatim(
+        self, tmp_path: Path, segments: list[str], stats_name: str,
+    ) -> None:
+        """Path-like arguments arrive absolute and naming the same file;
+        plain strings (filter-embedded file names) arrive verbatim."""
+        relative = Path(*[f"p{segment}" for segment in segments]).with_suffix(".mkv")
+        graph = f"[0:v]psnr=stats_file={stats_name}.psnr.tmp"
+        request = FFmpegRequest(
+            inputs=[FFmpegInput(path=relative)], output_args=(), filter_complex=graph,
+        )
+        _result, launched = _launch_capturing(request, cwd=tmp_path)
+        argv = launched["argv"]
+        assert isinstance(argv, list)
+        passed = argv[argv.index("-i") + 1]
+        assert os.path.isabs(str(passed))
+        assert os.path.normcase(str(passed)) == os.path.normcase(os.path.abspath(relative))
+        assert graph in [str(a) for a in argv]
+
+    def test_failed_process_reports_failure_not_exception(self, tmp_path: Path) -> None:
+        """A non-zero exit under a changed directory surfaces as an
+        unsuccessful result, not a raised error."""
+        request = FFmpegRequest(
+            inputs=[FFmpegInput(path=Path("missing.mkv"))], output_args=(),
+        )
+        result, _launched = _launch_capturing(request, cwd=tmp_path, returncode=1)
+        assert not result.success
+        assert result.returncode == 1

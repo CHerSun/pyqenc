@@ -831,7 +831,7 @@ def _create_measure_subcommand(subparsers: argparse._SubParsersAction) -> None:
     )
     p.add_argument(
         "source",
-        type=Path,
+        type=LongPath,
         help=(
             "Reference (original/lossless) video file. "
             "ORDER MATTERS: swapping source and distorted produces incorrect metrics (VMAF is not symmetric)."
@@ -839,7 +839,7 @@ def _create_measure_subcommand(subparsers: argparse._SubParsersAction) -> None:
     )
     p.add_argument(
         "distorted",
-        type=Path,
+        type=LongPath,
         nargs="*",
         default=[],
         help=(

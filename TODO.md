@@ -1077,28 +1077,6 @@ See also 52, 47, 102, 162.
 
 ---
 
-## 164. `pyqenc measure` fails its metric pass on relative video paths
-
-Finding (2026-11-13, live repro): with video paths given relative to the
-invocation directory (the README's own usage shape — `pyqenc measure
-source.mkv encoded.mkv`), the metric ffmpeg pass dies at input open ("Error
-opening input file …: No such file or directory") and the video is reported
-FAILED; screenshots still work (their ffmpeg runs in the process cwd).
-
-Cause: `_generate_metrics` runs the metrics ffmpeg with `cwd` set to the
-measure dir (so the bare-named `.tmp` stats files land there), while the
-source/distorted input paths are passed to ffmpeg exactly as given — relative
-to the invocation cwd, unresolvable from the measure dir. Reproduced on main
-(234ce65) with `--work-dir` elsewhere and with the default `.` alike (measure
-dir is always a subdirectory, so the relative inputs never resolve); absolute
-paths work. Likely fix shape: absolutize the inputs at the `run_measure`
-boundary (they are user CLI arguments, the one place where relative is
-natural) — needs thinking.
-
-See also 147.
-
----
-
 ## Last known = 164
 
 Keep this updated, so we can keep continuous numbering even on last todo item deletion.
