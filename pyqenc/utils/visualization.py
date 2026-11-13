@@ -562,7 +562,7 @@ def create_unified_plot(
     # how wide the run's values make the text, while staying clear of the
     # lower-right legend.
     fig.canvas.draw()
-    renderer  = fig.canvas.get_renderer()  # ty: ignore[unresolved-attribute] — Agg canvas; base stub lacks it
+    renderer  = fig.canvas.get_renderer()  # ty: ignore[missing-attribute] — Agg canvas; base stub lacks it
     axes_to_fig = ax_main.transAxes + fig.transFigure.inverted()
     fx, fy    = axes_to_fig.transform((_SUMMARY_BOX_START_X, _SUMMARY_BOX_Y_POS))
     fig_width = fig.bbox.width
