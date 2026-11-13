@@ -775,10 +775,15 @@ class MergePhase(Phase[MergePhaseResult]):
 
         pending_count  = sum(1 for a in rows if a.state != ArtifactState.COMPLETE)
         source_duration = source_stream.stream.info.duration_seconds or 0.0
-        total_seconds   = pending_count * source_duration
+        # Measurement is the bar's only duration carrier. Opted out, only
+        # strategy completions are observable, and every strategy spans the
+        # same source — so the bar turns count-based (uniform weights).
+        bar_total: int | float = (
+            pending_count * source_duration if plan.measure else pending_count
+        )
 
         pending_idx = 0
-        with ProgressBar(total_seconds, title="Merging", total_count=pending_count) as advance:
+        with ProgressBar(bar_total, title="Merging", total_count=pending_count) as advance:
             for artifact in rows:
                 payload       = artifact.payload
                 strategy      = payload.strategy
@@ -955,7 +960,7 @@ class MergePhase(Phase[MergePhaseResult]):
                         ),
                         state   = ArtifactState.COMPLETE,
                     ))
-                    advance(0, AdvanceState.SUCCESS)
+                    advance(0 if plan.measure else 1, AdvanceState.SUCCESS)
 
                 except InsufficientSpaceError as exc:
                     # The loud stop: the floor is broken for every remaining
