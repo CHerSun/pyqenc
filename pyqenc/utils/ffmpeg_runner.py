@@ -393,12 +393,20 @@ async def run_ffmpeg_async(
         progress_callback: Optional ``(frame, out_time_seconds)`` callable
                            invoked once per completed progress block.
         cwd:               Optional working directory for the subprocess.
+                           Path-like arguments are anchored to the caller's
+                           directory first — a changed directory never
+                           re-bases them; only plain-string arguments (e.g.
+                           filter-embedded file names) resolve against it.
 
     Returns:
         ``FFmpegRunResult`` with ``returncode``, ``success``, ``stderr_lines``,
         and ``frame_count``.
     """
     argv, tmp_to_final = compose_command(request)
+    if cwd is not None:
+        # The subprocess resolves relative paths against ITS directory, while
+        # the caller's paths mean the caller's.
+        argv = [os.path.abspath(arg) if isinstance(arg, os.PathLike) else arg for arg in argv]
     logger.debug("run_ffmpeg_async: %s", " ".join(str(a) for a in argv))
 
     proc = await asyncio.create_subprocess_exec(
@@ -457,7 +465,9 @@ def run_ffmpeg(
     Args:
         request:           The structured ffmpeg invocation.
         progress_callback: Optional ``(frame, out_time_seconds)`` callable.
-        cwd:               Optional working directory for the subprocess.
+        cwd:               Optional working directory for the subprocess
+                           (path-like arguments keep the caller's meaning —
+                           see ``run_ffmpeg_async``).
 
     Returns:
         ``FFmpegRunResult``.

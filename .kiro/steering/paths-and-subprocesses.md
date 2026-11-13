@@ -23,4 +23,5 @@ All ffmpeg subprocess calls MUST go through the unified runner in `pyqenc/utils/
 - The runner automatically injects `-hide_banner -nostats -progress pipe:1`, reads stdout/stderr concurrently, parses structured progress blocks, and returns `FFmpegRunResult`
 - Pass a `ProgressCallback` (`(frame: int, out_time_s: float) -> None`) for live progress updates
 - Pass a `VideoMetadata` instance to have it populated in-place from ffmpeg output
+- A changed working directory never re-bases the caller's paths: when `cwd` is passed, the runner anchors every path-like argument to the caller's directory before launch (relative paths are an end-user convenience — they mean the directory the user runs from). Only plain-string arguments (filter-embedded file names) resolve against `cwd`.
 - See `.kiro/specs/2026-03-17 ffmpeg-unified-runner/` for full requirements and design rationale

@@ -831,7 +831,7 @@ def _create_measure_subcommand(subparsers: argparse._SubParsersAction) -> None:
     )
     p.add_argument(
         "source",
-        type=Path,
+        type=LongPath,
         help=(
             "Reference (original/lossless) video file. "
             "ORDER MATTERS: swapping source and distorted produces incorrect metrics (VMAF is not symmetric)."
@@ -839,7 +839,7 @@ def _create_measure_subcommand(subparsers: argparse._SubParsersAction) -> None:
     )
     p.add_argument(
         "distorted",
-        type=Path,
+        type=LongPath,
         nargs="*",
         default=[],
         help=(
@@ -850,6 +850,16 @@ def _create_measure_subcommand(subparsers: argparse._SubParsersAction) -> None:
     _add_base_arguments(p)
     _add_crop_arguments(p)
     _add_concurrency_argument(p)
+    p.add_argument(
+        "-N", "--no-measure",
+        action="store_false",
+        dest="measure",
+        default=True,
+        help=(
+            "Skip quality measurement: take screenshots only for every listed "
+            "video (no metrics, quality graphs, or sidecars)."
+        ),
+    )
     p.add_argument(
         "--sampling",
         type=int,
@@ -931,6 +941,7 @@ def _cmd_measure(args: argparse.Namespace) -> int:
             screenshot_interval      = args.every,
             screenshot_include_edges = args.screenshot_include_edges,
             scale                    = scale_spec,
+            measure                  = args.measure,
         )
         return 0
     except FileNotFoundError as e:
