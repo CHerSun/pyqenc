@@ -982,6 +982,7 @@ async def run_measure(
     screenshot_count:         int | None,
     screenshot_interval:      float | None      = None,
     screenshot_include_edges: bool              = False,
+    measure:                  bool              = True,
 ) -> MeasureResult:
     """Execute a standalone quality measurement run.
 
@@ -992,11 +993,14 @@ async def run_measure(
     table. A per-video measurement failure is contained (the video gets a
     failed result row; the run continues) and surfaces in the summary.
 
+    Screenshots-only mode — no distorted videos, or *measure* off — takes
+    every listed video's screenshots and nothing else: no metrics, graph,
+    sidecar, or summary table.
+
     Args:
         source_video:             Reference video path.
         distorted_videos:         Encoded videos to measure.  Pass an empty list to
-                                  run in screenshots-only mode (no metrics, graph, or
-                                  sidecar).
+                                  run in screenshots-only mode.
         work_dir:                 Working directory; outputs go under
                                   ``work_dir/measure/``.
         crop_params:              Explicit crop (or empty ``CropParams`` for no-crop).
@@ -1021,16 +1025,18 @@ async def run_measure(
         screenshot_include_edges: When True, include frame 0 and the last frame in
                                   screenshot positions in addition to interior frames.
                                   Only applies in count mode (ignored in interval mode).
+        measure:                  Whether the distorted videos are measured.
+                                  ``False`` runs in screenshots-only mode.
 
     Returns:
         ``MeasureResult`` with source screenshots directory and per-distorted-video
-        results.
+        results (none in screenshots-only mode).
 
     Raises:
         FileNotFoundError: If ``source_video`` or any path in ``distorted_videos``
                            does not exist.
-        ValueError:        If ``screenshot_count`` < 1 or any resolution mismatch
-                           is detected.
+        ValueError:        If ``screenshot_count`` < 1 or, when measuring, any
+                           resolution mismatch is detected.
     """
 
     # ------------------------------------------------------------------
@@ -1054,7 +1060,7 @@ async def run_measure(
         (resolved_scale.width, resolved_scale.height)
         if resolved_scale.mode != ScaleMode.OFF else None
     )
-    screenshots_only = len(distorted_videos) == 0
+    measuring        = measure and len(distorted_videos) > 0
 
     # ------------------------------------------------------------------
     # Resolution validation and parameter summary logging
@@ -1062,7 +1068,7 @@ async def run_measure(
 
     source_stream = _load_video_stream(source_video)
 
-    if not screenshots_only:
+    if measuring:
         distorted_streams: list[VideoStream] = [_load_video_stream(t) for t in distorted_videos]
 
         for distorted_video, distorted_stream in zip(distorted_videos, distorted_streams):
@@ -1127,8 +1133,7 @@ async def run_measure(
         distorted_durations[distorted_video] = dur
 
     effective_durations: dict[Path, float | None] = {}
-    for distorted_video in distorted_videos:
-        t_dur = distorted_durations[distorted_video]
+    for distorted_video, t_dur in distorted_durations.items():
         if source_duration is not None and t_dur is not None:
             eff = min(source_duration, t_dur)
             if abs(source_duration - t_dur) > 1.0:
@@ -1146,8 +1151,12 @@ async def run_measure(
     #     screenshots, then measures and writes the sidecar.
     # ------------------------------------------------------------------
 
-    if screenshots_only:
+    if not distorted_videos:
         logger.info("Running in screenshots-only mode (no distorted videos provided)")
+    elif not measure:
+        logger.info(
+            "Measurement opted out — screenshots only (no metrics, graphs, or sidecars)"
+        )
 
     positions: ScreenshotPositions | None = None
 
@@ -1207,18 +1216,24 @@ async def run_measure(
     distorted_screenshots_map: dict[Path, list[Path]] = {}
     results_by_video: dict[Path, DistortedMeasureResult] = {}
 
-    # Duration-based shared bar over the distorted videos' effective
-    # durations (screenshots-only mode: zero total → indeterminate spinner).
     # Job numbering: the source is #0, distorted videos follow from #1.
-    bar_total = sum(d for d in effective_durations.values() if d is not None)
     jobs: list[tuple[int, Path, bool]] = [(0, source_video, False)] + [
         (number, video, True) for number, video in enumerate(distorted_videos, start=1)
     ]
+    # Measurement ticks are the shared bar's only duration carrier. Measuring:
+    # duration-based over the distorted videos' effective durations, every
+    # job completion count-only. Screenshots-only: no ticks exist, so the
+    # bar turns count-based — one unit per job.
+    bar_total: int | float = (
+        sum(d for d in effective_durations.values() if d is not None) if measuring
+        else len(jobs)
+    )
+    job_unit = 0 if measuring else 1
 
     with ProgressBar(bar_total, title="Measure", total_count=len(jobs)) as advance:
 
         async def process(job: tuple[int, Path, bool]) -> None:
-            """One video's task: screenshots, then (distorted) metrics + sidecar."""
+            """One video's task: screenshots, then (when measuring a distorted video) metrics + sidecar."""
             number, video, is_distorted = job
             label = f"#{number} {video.stem}"
 
@@ -1245,10 +1260,13 @@ async def run_measure(
             if not is_distorted:
                 nonlocal source_screenshots
                 source_screenshots = shots
-                advance(0, AdvanceState.SUCCESS)
+                advance(job_unit, AdvanceState.SUCCESS)
                 return
 
             distorted_screenshots_map[video] = shots
+            if not measuring:
+                advance(job_unit, AdvanceState.SUCCESS)
+                return
 
             # Measurement + sidecar — contained per video (Req 10): a failure
             # yields a failed result row, never an aborted run.
@@ -1292,7 +1310,7 @@ async def run_measure(
                 metrics         = metrics,
                 failed          = failed,
             )
-            advance(0, AdvanceState.FAILED if failed else AdvanceState.SUCCESS)
+            advance(job_unit, AdvanceState.FAILED if failed else AdvanceState.SUCCESS)
 
         await run_bounded(jobs, concurrency, process)
         advance(0, AdvanceState.COMPLETE)
@@ -1313,7 +1331,7 @@ async def run_measure(
     # (3) Summary table
     # ------------------------------------------------------------------
 
-    distorted_results = [results_by_video[v] for v in distorted_videos]
+    distorted_results = [results_by_video[v] for v in distorted_videos] if measuring else []
 
     if distorted_results:
         _log_measure_summary(distorted_results)

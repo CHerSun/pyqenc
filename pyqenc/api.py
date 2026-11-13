@@ -495,6 +495,7 @@ def measure_quality(
     screenshot_interval:      str | None        = None,
     scale:                    ScaleSpec | None  = None,
     screenshot_include_edges: bool              = False,
+    measure:                  bool              = True,
 ) -> MeasureResult:
     """Measure quality metrics between a source and one or more encoded videos.
 
@@ -502,6 +503,9 @@ def measure_quality(
     measurement sidecar YAML per distorted video, generates a quality graph
     per distorted video, and captures screenshots from the source (once,
     shared positions) and each distorted video.
+
+    Screenshots-only mode — no distorted videos, or ``measure=False`` —
+    captures every listed video's screenshots and nothing else.
 
     Screenshot positions are computed from the source video's frame count and
     exact rational FPS using integer frame arithmetic — no float drift.
@@ -528,10 +532,12 @@ def measure_quality(
                                   ``--scale-mode``); ``None`` = no scaling.
         screenshot_include_edges: When True, include frame 0 and the last frame in
                                   screenshot positions (count mode only).
+        measure:                  Whether the distorted videos are measured.
+                                  ``False`` runs in screenshots-only mode.
 
     Returns:
         ``MeasureResult`` containing source screenshots directory and per-distorted-video
-        results.
+        results (none in screenshots-only mode).
 
     Raises:
         FileNotFoundError: If ``source_video`` or any path in ``distorted_videos`` does not exist.
@@ -559,6 +565,7 @@ def measure_quality(
         screenshot_count         = screenshot_count,
         screenshot_interval      = parsed_interval,
         screenshot_include_edges = screenshot_include_edges,
+        measure                  = measure,
     ))
 
 

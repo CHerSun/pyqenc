@@ -333,7 +333,7 @@ pyqenc measure <source_video> [<distorted_video> ...] [options]
 
 > NOTE: ORDER MATTERS — swapping source and distorted produces incorrect metrics (VMAF is not symmetric).
 
-With no distorted videos the command runs in screenshots-only mode (no metric computation).
+With no distorted videos — or with `--no-measure` — the command runs in screenshots-only mode: every listed video gets its screenshots, nothing is measured (no metrics, plots, or sidecars); useful when a pipeline run already measured the outputs.
 
 Outputs go under `<work-dir>/measure/`:
 
@@ -343,6 +343,7 @@ Outputs go under `<work-dir>/measure/`:
 
 | Option             | Description                                                                  | Default              |
 | ------------------ | ---------------------------------------------------------------------------- | -------------------- |
+| `--no-measure`     | Skip quality measurement — screenshots only for every listed video (no metrics, plots, or sidecars) | measurements on     |
 | `--sampling N`     | For metrics measure every N-th frame (tradeoff: speed vs accuracy)           | from config          |
 | `--screenshots N`  | Number of screenshots per video (caps the total in interval mode)            | `20`                 |
 | `--every INTERVAL` | Screenshot interval (e.g. `"30s"`, `"5m"`) instead of count mode             | —                    |
