@@ -1044,7 +1044,40 @@ whole threshold landscape for the price of one scan:
 
 ---
 
-## Last known = 162
+## 163. (unlikely) Full-search mode — per-chunk strategy selection instead of the global optimization pass
+
+Idea (user, 2026-11-13): today optimization selects the winning strategies once on its
+test-chunk basis; a "full search" mode would move that selection into each chunk's
+winner search — every chunk searched under all configured strategies, the per-chunk
+winner differing by preset/profile, not only by CRF. Dark/blurry scenes are the
+expected beneficiary (content the global winner mistreats gets locally-better tuning).
+
+- Gain estimate at recording time: ~5% total size.
+- Against: encoding work multiplies by the strategy count (each chunk × each strategy ×
+  its CRF search), and the rework spans optimization/encoding/merge/limiter. Verdict at
+  recording time: not appealing — unlikely.
+- Merge feasibility gate: mixing chunks encoded with different settings merges fine for
+  h265/av1 (parameter sets travel in-band per block) but breaks h264 (§52 — single
+  codec-private-data instance; private-codec-data exceptions, unplayable merge, observed
+  live). Cross-codec winner mixing is not mergeable at all (mkvmerge append requires the
+  same codec) — per-chunk selection has to stay within one codec family: either the
+  codec stays a global decision with only preset/profile varying per chunk, or the mode
+  is h265/av1-only outright.
+- Substrate partially exists: search + `--no-optimize` already runs per-chunk searches
+  for every configured strategy (that is where §52 surfaced) — but it selects and merges
+  per strategy, not a per-chunk cross-strategy winner; the missing pieces are the
+  cross-strategy per-chunk election and one mixed merge.
+- Cheaper competitor for the same symptom: the §47/§162 encoding-scene chunking
+  direction — once heterogeneous chunks are split, the existing per-chunk CRF search
+  already adapts per chunk within the winning strategy (the §140 dark-chunk-dragged-to-
+  CRF-floor archetype). Per-chunk strategy choice only adds value where a different
+  preset/profile — not just the knob — wins locally on homogeneous content.
+
+See also 52, 47, 102, 162.
+
+---
+
+## Last known = 163
 
 Keep this updated, so we can keep continuous numbering even on last todo item deletion.
 Keep this the last entry for easy human updates.
