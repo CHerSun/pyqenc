@@ -1292,7 +1292,7 @@ async def run_measure(
                 metrics         = metrics,
                 failed          = failed,
             )
-            advance(eff_dur or 0, AdvanceState.FAILED if failed else AdvanceState.SUCCESS)
+            advance(0, AdvanceState.FAILED if failed else AdvanceState.SUCCESS)
 
         await run_bounded(jobs, concurrency, process)
         advance(0, AdvanceState.COMPLETE)

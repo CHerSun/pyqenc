@@ -955,7 +955,7 @@ class MergePhase(Phase[MergePhaseResult]):
                         ),
                         state   = ArtifactState.COMPLETE,
                     ))
-                    advance(source_duration, AdvanceState.SUCCESS)
+                    advance(0, AdvanceState.SUCCESS)
 
                 except InsufficientSpaceError as exc:
                     # The loud stop: the floor is broken for every remaining
