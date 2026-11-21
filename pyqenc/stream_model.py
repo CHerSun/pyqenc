@@ -219,9 +219,14 @@ class StreamInfo(BaseModel):
         """Parse a Matroska ``DURATION`` tag (``HH:MM:SS.nnnnnnnnn``) to seconds.
 
         MKV streams carry no ffprobe-level ``duration`` float — the stream
-        duration lives only in the per-track ``DURATION`` tag.
+        duration lives only in the per-track ``DURATION`` tag. Statistics
+        tags carry language suffixes (``DURATION-eng``); both forms count.
         """
-        raw = tags.get("DURATION")
+        raw = next(
+            (v for k, v in tags.items()
+             if k == "DURATION" or k.startswith("DURATION-")),
+            None,
+        )
         if not isinstance(raw, str):
             return None
         parts = raw.split(":")
