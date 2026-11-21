@@ -25,7 +25,7 @@ Code:
 
 Verification & tooling:
 
-- `agent-tooling.md` — MCP-first code analysis, rope for refactors
+- `agent-tooling.md` — code-analysis tool division (semble: semantic lookup, treesitter-mcp: symbols and call graphs, rg: token census), rope for refactors
 - `commands-and-gates.md` — run/test commands, the three green gates (ruff + ty + pytest)
 - `dependencies.md` — approved packages/external programs; additions need explicit approval
 

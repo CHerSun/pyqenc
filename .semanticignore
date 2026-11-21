@@ -1,0 +1,10 @@
+.venv/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.hypothesis/
+.ropeproject/
+__pycache__/
+build/
+pyqenc.egg-info/
+samples/
