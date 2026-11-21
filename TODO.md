@@ -146,6 +146,8 @@ Extra thoughts:
 - 3 points or more, all fail, back-step check done - try to pick 3 points (best score + neighbors with differing scores) - if possible - search for sweet spot by binary splitting largest range (without duplication of already tested points)
 - 2 points or more, both sides (pass and fail) - we try to narrow down - interpolate (ideally from both sides) - try next - narrow down range with new point, keep going until fast exit or new point impossible (range narrowed to granularity).
 - best score = positive, closer to 0 (smaller) or equal score but with lower quality knob (smaller size)
+- if all passing or all fail - round to increase step (outwards) - we need to find boundary fast.
+- step from passing and step from failure - they make different steps (pass often jumping back too far; like 18 - miss, 12 - pass, 17.5 jump). We need to review algorithm skew OR use both (this is for 2-points mode, where we have both boundaries and can calculate from both ends).
 
 ---
 
@@ -1077,7 +1079,63 @@ See also 52, 47, 102, 162.
 
 ---
 
-## Last known = 164
+## 165. h265* profile comparison — split by content class (anime / grainy / typical)
+
+The tune-carrying profiles h265-crisp-grain and h265-crisp-animation (block prepared
+2026-11-19, pending paste into default_config.yaml) join the h265* set. Which profile wins
+is expected to depend on the content class — run the comparison three times, once per
+class: hand-drawn animation (line art), grainy/noisy live-action, typical clean
+live-action. The base h265 profile rides along as the baseline arm.
+
+Origin (2026-11-19, bitstream forensics on a reference 4K AI-upscaled anime encode): its
+crisp edges come from x265 slower + tune animation + SAO ON at 0.099 bpp — sharpness from
+light quantization and precise partitions, not from filter toggles. Our h265-crisp keeps
+SAO off; whether that helps or hurts per class is exactly what this comparison should
+show. A "reference replica" arm (animation tune WITHOUT no-sao, preset slower) is a
+candidate extra for the anime leg.
+
+Experiment shape: optimization-phase strategy comparison over the full h265* set per
+class; experiment docs per the established format (cost + per-metric tables, one file per
+run). Target outcome: a per-content-class verdict, possibly ending as per-content-class
+default strategy guidance.
+
+See also 82, 140.
+
+---
+
+## 166. nvenc hevc - try tune uhq + spatial_aq 1 + main10 profile + bf 4 + lookahead 20-32
+
+Need to give nvenc another chance, especially for animation. Test it against software h265.
+Add guidance to docs.
+
+---
+
+## 167. try to make a crisp av1 for anime
+
+something like:
+
+ffmpeg -i input.mkv -c:v libsvtav1 -crf 22 -preset 5 -g 240 \
+-svtav1-params tune=0:enable-restoration=0:film-grain=8:film-grain-denoise=0:enable-overlays=1 \
+-pix_fmt yuv420p10le -c:a copy output.mkv
+
+might work. We need to create a better av1 for anime-style content.
+
+---
+
+## 168. another thought on full optimization (attempt-level) - semi-full on exhaust
+
+A config-gated option to do a semi-full optimization. If chunk attempt exhaust without achieving user-set targets - allow searching via alternate profiles of the same codec.
+Also gated by codec capability to intermix segments (h265 and av1 looks capable; h264 - no).
+
+Example: we have a dark chunk. Standard h265 won optimization phase (better size on test population). But on this dark chunk it never reaches needed targets.
+Solution: (gated) search other h265 profile - say, we have h265-aq and h265-crisp - try them at highest possible quality - if pass - start the search for optimal. From optimals - compare sizes and pick best.
+If no alt passing profile - still exhausted (but could maybe pick a one closer to passing from all the attempts).
+
+Idea from 2026-11-21 research, where h265-aq was definitely superior on dark scenes.
+
+---
+
+## Last known = 168
 
 Keep this updated, so we can keep continuous numbering even on last todo item deletion.
 Keep this the last entry for easy human updates.
