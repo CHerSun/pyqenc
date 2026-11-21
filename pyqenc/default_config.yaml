@@ -446,6 +446,16 @@ profiles:
     description: "H.265 10-bit with adaptive quantization — better quality in dark areas and even finer detail preservation. Expensive."
     extra_args: ["-x265-params", "aq-mode=3:aq-strength=1.2"]
 
+  h265-grain:
+    codec: h265-10bit
+    description: "H.265 10-bit - native grain tune. For live-action film grain."
+    extra_args: ["-tune", "grain"]
+
+  h265-animation:
+    codec: h265-10bit
+    description: "H.265 10-bit - native animation tune. For hand-drawn line art (flat colors, less texture, crisp edges). Competes with h265-crisp."
+    extra_args: ["-tune", "animation"]
+
   nvenc-h265-10bit-cq:
     codec: nvenc-h265-10bit-cq
     description: "HEVC NVENC 10-bit CQ mode — requires NVIDIA GPU"
