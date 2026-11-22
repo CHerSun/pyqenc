@@ -90,10 +90,13 @@ are algorithm constants, not config — they are not invalidation keys.
 ## Companion fixes (land independently, regardless)
 
 1. `DURATION*` language-suffixed tag parsing in the stream inventory
-   (already local, gates green).
-2. Merged-output measurement applies the per-chunk first-reading skip at
-   every chunk boundary (merge knows the boundary set) — removes the
-   chunk-count bias in merged minima.
+   (already local, gates green; COMMITTED 382dcf4).
+2. ~~Merged-output measurement applies the per-chunk first-reading skip at
+   every chunk boundary~~ RETRACTED (user ruling 2026-11-22): the ONLY
+   allowed skip is VMAF's first reading of a measurement session — one per
+   session, merged or chunk. Measurements are never skipped to make
+   numbers agree; boundary frames measuring badly is an encoding-side
+   problem to investigate, not hide.
 
 ## Validation plan (implementation gate)
 
@@ -104,7 +107,18 @@ are algorithm constants, not config — they are not invalidation keys.
 2. Slow mode replay on the same source must reproduce the validated
    boundary set (−4.5% ladder set).
 3. Slow mode A/B already validated at movie scale (−2.21%); no rerun needed.
-4. Full static + suite gates.
+4. **Merged-vs-winner consistency invariant** (user directive 2026-11-22,
+   born from the merged-min investigation): in every e2e run, per min stat,
+   the merged-output measurement must sit at or above the winner
+   population's floor — no discrepancies. psnr/ssim/vif have no skips, so
+   equality is expected there (same frames, same encodes; large gaps =
+   investigate the specific frames, as the t2 psnr-min 37.2 glitch and the
+   t2-stat vmaf-min 84.6 dip both demanded). vmaf carries the known
+   session-first-frame allowance (per-chunk stats never judge chunk-first
+   frames; the merged session does) — a dip there flags a chunk-start
+   frame worth looking at, not a measurement error. The e2e harness checks
+   all four and FAILS the validation on any unexplained discrepancy.
+5. Full static + suite gates.
 
 ## Open questions
 
