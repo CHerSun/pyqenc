@@ -83,6 +83,7 @@ Some tests require sample video files to be present in the `samples/` directory:
 
 - `samples/sample-e2e.mkv` — built by `uv run python -m tests.fixtures.build_e2e_sample <real_video.mkv>` (see `samples/SAMPLES.md`)
 - `samples/sample-sunrise-4k.mkv`
+- `PYQENC_REAL_SAMPLE` — an environment variable naming a real, uncut video (any MKV you own) for the provider smoke tests in `tests/integration/test_chunking_scoring.py`; they need cleanly produced real content, so they do not run on a built sample
 
 Tests that require sample videos are automatically skipped if the files are not available.
 

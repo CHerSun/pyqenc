@@ -246,17 +246,25 @@ def _add_crop_arguments(parser: argparse.ArgumentParser) -> None:
 def _add_chunking_arguments(parser: argparse.ArgumentParser) -> None:
     """Add chunking arguments (used by subcommands that depend on ChunkingPhase)."""
     parser.add_argument(
-        "--scene-threshold",
-        type=float,
+        "--chunking-mode",
+        type=str,
+        choices=("fast", "slow"),
         default=None,
-        help="Scene detection sensitivity 0.0-255.0 (default: from config). "
-             "Lower = more sensitive (more scene cuts); ~15-50 is the meaningful range.",
+        dest="chunking_mode",
+        help="Chunking scoring regime (default: from config). "
+             "fast = one decode, the content-score trace feeds the statistical "
+             "splitter; slow = adds a probe encode with per-frame PSNR/SSIM/bitrate "
+             "traces.",
     )
     parser.add_argument(
-        "--scene-min-length",
+        "--min-scene-length",
         type=int,
         default=None,
-        help="Minimum frames per chunk (default: from config)",
+        dest="min_scene_length",
+        metavar="FRAMES",
+        help="Hard minimum scene length in frames (default: from config). "
+             "The only length ruler. The splitter stops at statistical "
+             "uniformity.",
     )
 
 
@@ -454,8 +462,8 @@ def _build_config(args: argparse.Namespace) -> AppConfig:
         config.extraction.exclude = args.exclude
 
     # --- chunking ---
-    if getattr(args, "scene_threshold", None) is not None:
-        config.chunking.scene_threshold = args.scene_threshold
+    if getattr(args, "chunking_mode", None) is not None:
+        config.chunking.mode = args.chunking_mode
     if getattr(args, "min_scene_length", None) is not None:
         config.chunking.min_scene_length = args.min_scene_length
 

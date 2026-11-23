@@ -107,6 +107,10 @@ past-participle family (``extracted/``, ``encoded/``, ``merged/``): the merged
 output is the merge phase's product, not a fully finalized container."""
 MEASURE_DIR            = "measure"
 """Output subdirectory name for standalone measure artifacts."""
+CHUNKING_WORKSPACE_DIR = "chunking"
+"""Working directory for chunking scoring intermediates (the slow mode's
+probe encode and its measurement traces) — consumables the boundary sidecar
+summarizes; swept by cleanup once the boundaries are computed."""
 
 # Measure defaults
 DEFAULT_SCREENSHOT_COUNT  = 20

@@ -62,13 +62,39 @@ def parse_timestamps(path: Path) -> list[float]:
     return values
 
 
+def parse_frame_timestamps(path: Path) -> list[float]:
+    """Parse a ``timestamps.txt`` into its per-frame PTS values in milliseconds.
+
+    The frame lines only: mkvextract's trailing end-of-stream entry (see
+    :func:`parse_timestamps`) is not a frame and is left out. This is the
+    one place that tells the marker from a frame line, so the frame count
+    (:func:`count_frames`) and any per-frame axis read from the index
+    agree by construction.
+
+    Args:
+        path: Path to the timestamp file.
+
+    Returns:
+        The per-frame PTS values in milliseconds, ascending, as written.
+
+    Raises:
+        ValueError: When the file is empty, lacks the header, or contains an
+                    unparseable data line.
+        OSError: When the file cannot be read.
+    """
+    values = parse_timestamps(path)
+    if values and values[-1] != int(values[-1]):
+        return values[:-1]  # trailing end-of-stream marker, not a frame
+    return values
+
+
 def count_frames(path: Path) -> int | None:
     """Return the total frame count recorded in a ``timestamps.txt``.
 
-    The count is the number of frame lines — a trailing entry with a
-    fractional-millisecond value is mkvextract's end-of-stream marker, not a
-    frame. This is the exact, free source frame count; ``None`` means the
-    file is absent or unreadable — callers fall back to a null-count pass.
+    The count is the number of frame lines
+    (:func:`parse_frame_timestamps`): the exact, free source frame count;
+    ``None`` means the file is absent or unreadable — callers fall back to
+    a null-count pass.
 
     Args:
         path: Path to the timestamp file.
@@ -77,10 +103,7 @@ def count_frames(path: Path) -> int | None:
         The total frame count, or ``None`` when unavailable.
     """
     try:
-        values = parse_timestamps(path)
+        return len(parse_frame_timestamps(path))
     except (OSError, ValueError) as exc:
         logger.debug("Could not count frames from %s: %s", path, exc)
         return None
-    if values and values[-1] != int(values[-1]):
-        return len(values) - 1  # trailing end-of-stream marker, not a frame
-    return len(values)

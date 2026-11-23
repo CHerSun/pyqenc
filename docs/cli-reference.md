@@ -123,12 +123,12 @@ pipeline subcommands (`auto`, `video`, `audio`, `extract`).
 
 ### Chunking
 
-Chunks are timestamp windows computed directly from the source — no intermediate copy or lossless re-encode is produced.
+Chunks are timestamp windows computed directly from the source — no intermediate copy or lossless re-encode is produced. Boundaries come from a statistical splitter (the causal-Hampel descent) over per-frame scoring traces; the minimum scene length is the only tuning surface.
 
-| Option                    | Description                                                                 | Default              |
-| ------------------------- | --------------------------------------------------------------------------- | -------------------- |
-| `--scene-threshold VALUE` | Scene detection sensitivity, 0.0–255.0. Lower = more sensitive (more cuts). | from config (`27.0`) |
-| `--min-scene-length N`    | Minimum frames per chunk — merges short scenes into one chunk.              | from config (`24`)   |
+| Option                      | Description                                                                                                                            | Default              |
+| --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- | -------------------- |
+| `--chunking-mode MODE`      | Scoring regime: `fast` (one decode — the content-score trace) or `slow` (adds a probe encode with per-frame PSNR/SSIM/bitrate traces). | from config (`fast`) |
+| `--min-scene-length FRAMES` | Hard minimum scene length in frames — the only length ruler; the splitter stops at statistical uniformity.                             | from config (`15`)   |
 
 ---
 

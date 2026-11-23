@@ -54,45 +54,6 @@ Need to check footprints and adjust accordingly for explicitly required values (
 
 ---
 
-## 47. Scene detection threshold search
-
-Default doesn't always produce wanted results.
-Add a searching mechanic, similar to quality search? With something like 15 - 50 range and a starting point of default_config default?
-Target is to get small chunks - not over a minute probably (it is a rare thing for movies to have such a long scene). Something like p90 < 60 seconds, p10 > 2 seconds. But not to split on every min frames (too low value).
-With all params being configurable in the config, including ability to disable the search.
-
-Why? Movies regularly get too long chunks. Long chunk encoding kills the quality knob searching.
-
-Direction update (2026-11-07, from the §140 exp7 re-chunk + the §162 scene-ladder work): the
-LINEAR threshold scan is path-dependent. Measured live on test.mkv: threshold 24 → 21 did not
-just add cuts — 5 added, 4 REMOVED, 2 shifted (94% of boundaries stable): a new earlier cut
-shadows a later one within min_scene_length, so a weaker threshold can make existing cuts
-vanish — retuning churns boundaries non-locally (and orphans attempt investments, §159).
-Proposal: RECURSIVE top-down splitting over the same per-frame scores — split each segment at
-its strongest QUALIFYING change (score ≥ floor, both children ≥ min_frames), recurse until
-nothing qualifies; enforce max chunk length by forced splits at the segment's WEAKEST-change
-point (chunks are encode units, not semantic scenes — the least-disturbing cut is fine).
-Gains: stability (top tree levels invariant to the floor — churn localizes to weak splits),
-no path dependence, bidirectional length control (the p90 < 60 s goal becomes a hard bound),
-deterministic O(n log n) over the §162 stats sidecar (one scoring pass serves both). Design
-bits: keep an absolute score floor (pure relative dominance would split uniform segments at
-their noisiest frame — flash/strobe spikes would dominate the tree top); single-frame spike
-handling (cut at run-end vs spike frame, or windowed score smoothing); combinability with
-scenedetect's AdaptiveDetector (it fixes SCORING for gradual transitions; this changes
-SELECTION — orthogonal).
-
-Encoding scenes, not semantic scenes (2026-11-08, user, from the §140 exp6/7 follow-up): for
-chunking we do NOT need scenedetect's true-scene semantics — we need ENCODING scenes:
-segments homogeneous in encoding difficulty (dark/grainy vs smooth/bright — exactly the mix
-that cost ~300 MB unfixed and ~200 MB after the partial fix in §140's search runs). Check
-whether ffmpeg's own scene scoring (scdet / select=gt(scene,X)) segments by difficulty
-better: it is already in the toolchain (no new dependency) and its score responds to
-different signal components than PySceneDetect's content detector — whose peak demonstrably
-landed ~7 s BEFORE the actual dark→bright transition (exp7 follow-up: the split at the score
-peak left ~7 s of dark inside the "bright" chunk, still converging to CRF 4–6).
-
----
-
 ## 51. (HIGH) QualitySearchV3 is outright broken
 
 One of examples - it gets the same values on CRF 12.0 and 11.5 and starts treading back upwards, even though the direction wasn't exhausted and no passing (opposite result) was achieved.
@@ -1001,51 +962,6 @@ No examples too. Everything is put at the main level `pyqenc -h` only.
 
 ---
 
-## 162. Scene-threshold exploration — make chunking visible before committing to a run
-
-Born from the §140 campaign (2026-11-07): a single 39.5 s chunk mixing a
-~3 s dark opening with bright content dragged av1's searched output to the
-CRF floor on its worst-frame stat — half the merged size sat in one chunk
-that better boundaries would have split. Nothing about this is visible in
-advance: `chunking.scene_threshold` is a blind magic number today (the
-guidance ends at "~15-50 is the meaningful range").
-
-Key mechanic: the expensive part of detection (decode + per-frame content
-scoring) is threshold-INDEPENDENT. One stats pass over the source yields
-every frame's content score; the cut list at any threshold is pure offline
-post-processing. A two-step CLI intent (`scenes`?) can therefore show the
-whole threshold landscape for the price of one scan:
-
-- `pyqenc scenes <source>` — full scoring pass, persisted to a
-  source-fingerprinted sidecar (yaml; survives reruns), then print the
-  threshold LADDER: only the distinct thresholds where the cut set
-  changes, with scene counts ("≥ 27 → 96, ≥ 24 → 108, ≥ 20.3 → 111 …"),
-  computed at the configured min_scene_length.
-- `pyqenc scenes <source> --at 22` — instant from the cached sidecar
-  (rescan only on source fingerprint mismatch); prints the exact break
-  list (timestamps + per-scene durations) and flags outlier lengths (the
-  §47 concern: movies getting overlong chunks).
-
-**Questions to think about:**
-
-- Ladder presentation: change-points only (fewer rows, complete) vs
-  sampled thresholds; is min_scene_length fixed from config or a second
-  axis?
-- Simulator fidelity is a contract: the offline cut computation must
-  equal `detect_scenes()` at the same threshold — same post-processing
-  code path (not a reimplementation) + a calibration property test
-  (simulated cuts == detect_scenes(source, T)).
-- Sidecar home: a scan is useful BEFORE any run/work-dir exists, but
-  pyqenc sidecar conventions live in work dirs — standalone cache
-  location vs work-dir placement (the `config` intent may be the closer
-  precedent).
-- Relationship to §47 (automatic threshold search): complementary —
-  visibility-first manual exploration vs auto-search; does the ladder
-  make auto-search unnecessary, or should auto-search consume the same
-  stats sidecar?
-
----
-
 ## 163. (unlikely) Full-search mode — per-chunk strategy selection instead of the global optimization pass
 
 Idea (user, 2026-11-13): today optimization selects the winning strategies once on its
@@ -1135,7 +1051,30 @@ Idea from 2026-11-21 research, where h265-aq was definitely superior on dark sce
 
 ---
 
-## Last known = 168
+## 169. `chunking.min_scene_length` — accept frames, seconds, or a duration string
+
+SceneDetect's `min_scene_len` takes three forms: int = frames, float = seconds, str = a duration. Ours is an int in frames only (2026-11-23 ruling: keep it that way for now — the splitter's legality check is a frame count, and the validated operating point, 15, is a frame count).
+
+Needs thinking before widening: one canonical internal unit (frames, derived from the source's own frame period) with the other forms converted at config load; whether seconds mean anything to the end-user when the same value also bounds per-chunk statistics; how a seconds value rounds to frames.
+
+---
+
+## 170. Statistical splitter — cleanliness review. EXPERIMENTAL; a few sanity touches, no complex optimization
+
+Status: the tree-like splitting on scenedetect content values (`pyqenc/chunking_split.py`) is EXPERIMENTAL — review it as a whole before it is trusted. The points below are the known ones; there are probably more. Scope (ruled 2026-11-23): a cleanliness review, not a performance project — a few sanity touches; no complex optimization for the sake of a few seconds.
+
+Known points:
+
+- **The descent repeats work at every split.** Each chunk copies its slice of the content trace and of the significance and sorts ALL its frames by content score — although only frames clearing the significance bar can ever win — so each level re-sorts most of its parent's range. Sanity touch: one candidate order for the whole trace (the qualifying frames by content score); each chunk takes the first candidate inside its legal zone. Same decision, no per-chunk sorting or slicing. The lab version (`tree_descent_cher`) additionally recomputes the whole significance per chunk.
+- **The sliding scorers take a sub-list per frame** (the causal Hampel z slices and sorts its window twice; the centered-average jump slices and sums its window). Left as is by the scope above: each frame is visited once, and a maintained ordered window would buy seconds at the price of real complexity.
+
+Design point to state: per-chunk (local) significance was chosen to avoid side effects — windows crossing chunk edges. But `min_scene_length` guards both chunk ends, so a one-time whole-trace calculation gives the SAME values for every legal candidate — as long as the lookback and the jump half-width do not exceed `min_scene_length` (12 and 3 against the default 15; a smaller configured minimum breaks it). Prod already computes the significance once per trace; state the definition as a whole-trace function and drop the per-chunk notion.
+
+For scale — measured on the 92-min source (under machine load): 8.9 s total, the descent ~4.5 s of it (1,677 chunks; 2.0M frame slots sliced + sorted = 15.4x the trace, while 866 frames = 0.65% could ever win) against an hour of decode.
+
+---
+
+## Last known = 170
 
 Keep this updated, so we can keep continuous numbering even on last todo item deletion.
 Keep this the last entry for easy human updates.

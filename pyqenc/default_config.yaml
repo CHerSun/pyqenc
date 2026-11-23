@@ -13,8 +13,11 @@ extraction:
   exclude: null   # regex — drop matching streams; overrides include
 
 chunking:
-  scene_threshold: 27.0 # ~15-50 is meaningful range (0.0-255.0 max range). 27.0 is the default. Lower = more sensitive, but there is coalescense inbuilt - too low values can give unexpected results.
-  min_scene_length: 24  # minimum frames per chunk. 20+ recommended (p10 is 2 frames then).
+  mode: fast            # scoring regime: fast = one decode, the content-score trace feeds the
+                        # statistical splitter; slow = adds a probe encode (h265 ultrafast,
+                        # fixed quality, full res) with per-frame PSNR/SSIM/bitrate traces
+  min_scene_length: 15  # hard minimum segment length, FRAMES — the only length ruler (the
+                        # splitter stops at statistical uniformity)
 
 encoding:
   # Quality targets come as named bundles — target profiles. --targets accepts

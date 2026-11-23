@@ -95,6 +95,28 @@ gate as new packages/dependencies. Established 2026-10-17 (TODO §129).
   (`<phase>.yaml`); key-bearing (optimization, probe, chunking) or replay-only
   (encoding, merge) per phase.
 
+## Chunking
+
+- **chunking mode** — the scoring regime selecting boundaries: `fast` /
+  `slow` (config `chunking.mode`, persisted on `chunking.yaml` as an
+  invalidation key). Not the run mode (fixed/search).
+- **scoring provider** — the mode-dependent producer of per-frame
+  **feature traces** for the splitter: fast = the content-score trace
+  (one decode, PySceneDetect as a scorer via its stats manager); slow =
+  the content trace plus a probe encode (h265 ultrafast, fixed CRF, full
+  res) with per-frame PSNR/SSIM + per-packet byte sizes (the
+  difficulty/fragility axes) — chunking's own work, the probe phase
+  stays metadata-only.
+- **splitter** — the mode-independent boundary selector
+  (`pyqenc.chunking_split`): the causal-Hampel descent. Each chunk is
+  offered its frames in descending content score; the first candidate
+  far enough from both edges whose local significance (Hampel z against
+  the frames strictly before it, guarded by a raw floor and a
+  centered-average jump) clears the bar splits it; both children repeat;
+  a chunk with no qualifying candidate is statistically uniform and
+  stays whole. Slow mode's codec traces fire via the same descent as
+  ungated scale-free features. Boundaries are PTS-anchored exactly.
+
 ## Optimization
 
 - **test basis** — the chunks the strategies are tested on before full-length

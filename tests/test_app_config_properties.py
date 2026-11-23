@@ -5,13 +5,14 @@
 """
 
 import os
+from typing import cast
 
 import pytest
 from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 from pydantic import ValidationError
 
-from pyqenc.app_config import _deep_merge, load_app_config
+from pyqenc.app_config import ChunkingMode, _deep_merge, load_app_config
 from pyqenc.audio.filters import PeakNormInstance
 
 # ---------------------------------------------------------------------------
@@ -735,10 +736,8 @@ class TestAppConfigRoundTrip:
         ),
         extraction_include=st.one_of(st.none(), st.text(min_size=1, max_size=30)),
         extraction_exclude=st.one_of(st.none(), st.text(min_size=1, max_size=30)),
-        chunking_scene_threshold=st.floats(
-            min_value=0.0, max_value=1.0, allow_nan=False, allow_infinity=False
-        ),
-        chunking_min_scene_length=st.integers(min_value=1, max_value=300),
+        chunking_mode=st.sampled_from(["fast", "slow"]),
+        chunking_min_scene_length=st.integers(min_value=1, max_value=600),
     )
     @settings(max_examples=50)
     def test_scalar_fields_survive_round_trip(
@@ -752,7 +751,7 @@ class TestAppConfigRoundTrip:
         basis_skip: float,
         extraction_include: str | None,
         extraction_exclude: str | None,
-        chunking_scene_threshold: float,
+        chunking_mode: str,
         chunking_min_scene_length: int,
     ) -> None:
         """Mutated scalar fields round-trip through model_dump/model_validate unchanged.
@@ -787,8 +786,9 @@ class TestAppConfigRoundTrip:
         config.optimization.basis.skip_end        = basis_skip
         config.extraction.include         = extraction_include
         config.extraction.exclude         = extraction_exclude
-        config.chunking.scene_threshold   = chunking_scene_threshold
-        config.chunking.min_scene_length  = chunking_min_scene_length
+        # sampled_from's static type is str; the drawn domain is the Literal's.
+        config.chunking.mode             = cast(ChunkingMode, chunking_mode)
+        config.chunking.min_scene_length = chunking_min_scene_length
 
         # Perform the round-trip.
         dumped        = config.model_dump()
@@ -855,10 +855,10 @@ class TestAppConfigRoundTrip:
             f"  expected : {extraction_exclude!r}\n"
             f"  got      : {round_tripped.extraction.exclude!r}"
         )
-        assert round_tripped.chunking.scene_threshold == chunking_scene_threshold, (
-            f"chunking.scene_threshold changed during round-trip.\n"
-            f"  expected : {chunking_scene_threshold!r}\n"
-            f"  got      : {round_tripped.chunking.scene_threshold!r}"
+        assert round_tripped.chunking.mode == chunking_mode, (
+            f"chunking.mode changed during round-trip.\n"
+            f"  expected : {chunking_mode!r}\n"
+            f"  got      : {round_tripped.chunking.mode!r}"
         )
         assert round_tripped.chunking.min_scene_length == chunking_min_scene_length, (
             f"chunking.min_scene_length changed during round-trip.\n"
@@ -955,8 +955,8 @@ class TestAppConfigRoundTrip:
         assert round_tripped.optimization.basis         == config.optimization.basis
         assert round_tripped.extraction.include         == config.extraction.include
         assert round_tripped.extraction.exclude         == config.extraction.exclude
-        assert round_tripped.chunking.scene_threshold   == config.chunking.scene_threshold
-        assert round_tripped.chunking.min_scene_length  == config.chunking.min_scene_length
+        assert round_tripped.chunking.mode             == config.chunking.mode
+        assert round_tripped.chunking.min_scene_length == config.chunking.min_scene_length
         assert set(round_tripped.audio.filters.keys())  == set(config.audio.filters.keys())
         assert [c.name for c in round_tripped.audio.chains] == [c.name for c in config.audio.chains]
         assert round_tripped.audio.select               == config.audio.select

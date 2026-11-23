@@ -612,12 +612,24 @@ class TestChunkingPhaseTiming:
         source = tmp_path / "source.mkv"
         stream = _make_extended_stream(source, frame_count=640, duration=26.67)
 
+        # The chunking phase anchors boundaries against the extraction PTS
+        # index — provide the real file on the real path.
+        index_dir = work_dir / "extracted"
+        index_dir.mkdir(parents=True, exist_ok=True)
+        frame_ms = round(1000 * 26.67 / 639)
+        (index_dir / "timestamps.txt").write_text(
+            "# timestamp format v2\n"
+            + "\n".join(str(i * frame_ms) for i in range(640)) + "\n",
+            encoding="utf-8",
+        )
+
         job_mock = MagicMock(spec=JobPhase)
         job_mock.result = self._make_job_result(tmp_path)
 
         extraction_mock = MagicMock(spec=ExtractionPhase)
         extraction_mock.result = ExtractionPhaseResult(
             outcome=PhaseOutcome.COMPLETED, message="ok",
+            work_dir=work_dir,
             video_stream=Artifact(payload=stream.stream, state=ArtifactState.COMPLETE),
         )
 
@@ -655,7 +667,7 @@ class TestChunkingPhaseTiming:
             _CS(
                 source=_STUB_SOURCE_FP,
                 scenes=[SceneRecord(timestamp_seconds=0.0, frame=0)],
-                scene_threshold=27.0, min_scene_length=24,
+                mode="fast", min_scene_length=15,
             ).model_dump(),
         )
 
@@ -674,24 +686,27 @@ class TestChunkingPhaseTiming:
         )
         assert outcome["value"] == "reused"
 
-    def test_scene_detect_recorded_when_no_cached_boundaries(self, tmp_path: Path) -> None:
-        """A fresh chunking run reports chunking time including the scene-detect
-        sub-action as a dotted key.
+    def test_score_and_split_recorded_when_no_cached_boundaries(self, tmp_path: Path) -> None:
+        """A fresh chunking run reports chunking time including the
+        score-and-split sub-action as a dotted key.
 
-        Bug guarded: scene detection running without its cost being attributable
-        in the report — the ``chunking.scene_detect`` dotted row is the only
-        place the detection sub-action's share of chunking time is visible.
+        Bug guarded: scoring and splitting running without their cost being
+        attributable in the report — the ``chunking.score_and_split`` dotted
+        row is the only place the sub-action's share of chunking time is
+        visible.
 
         Validates: Requirements 6.5
         """
-        from pyqenc.models import SceneBoundary
+        from pyqenc.phases.chunking import ScoringResult
 
         outcome: dict[str, str] = {}
 
         def run(collector: AppMetricsCollector) -> None:
             phase = self._make_phase(tmp_path, collector)
-            with patch("pyqenc.phases.chunking.detect_scenes",
-                       return_value=[SceneBoundary(frame=0, timestamp_seconds=0.0)]):
+            with patch("pyqenc.phases.chunking.fast_scoring",
+                       return_value=ScoringResult(
+                           traces=[[2.0] * 640 for _ in range(1)],
+                       )):
                 outcome["value"] = phase.run().outcome.value
 
         metrics   = _recorded_metrics(tmp_path, run)
@@ -699,18 +714,18 @@ class TestChunkingPhaseTiming:
         assert "chunking" in top_level, (
             f"chunking timing missing from metrics.yaml, got: {sorted(top_level)}"
         )
-        assert "chunking.scene_detect" in _dotted_keys(metrics), (
-            f"scene_detect sub-action missing from metrics.yaml, "
+        assert "chunking.score_and_split" in _dotted_keys(metrics), (
+            f"score_and_split sub-action missing from metrics.yaml, "
             f"got: {sorted(_dotted_keys(metrics))}"
         )
         assert outcome["value"] == "completed"
 
-    def test_scene_detect_not_recorded_when_boundaries_cached(self, tmp_path: Path) -> None:
-        """Cached boundaries skip detection entirely — no scene-detect cost
-        and no detection subprocess in the report.
+    def test_score_and_split_not_recorded_when_boundaries_cached(self, tmp_path: Path) -> None:
+        """Cached boundaries skip scoring entirely — no scoring cost
+        and no scoring subprocess in the report.
 
-        Bug guarded: a resumed run re-running (and re-timing) scene detection
-        over boundaries it already has — the expensive ffmpeg scan must not
+        Bug guarded: a resumed run re-running (and re-timing) the scoring
+        pass over boundaries it already has — the expensive decode must not
         run, and the report must not claim it did.
 
         Validates: Requirements 6.5, 2.7
@@ -725,15 +740,15 @@ class TestChunkingPhaseTiming:
             _CS(
                 source=_STUB_SOURCE_FP,
                 scenes=[SceneRecord(timestamp_seconds=0.0, frame=0)],
-                scene_threshold=27.0, min_scene_length=24,
+                mode="fast", min_scene_length=15,
             ).model_dump(),
         )
 
         def run(collector: AppMetricsCollector) -> None:
             phase = self._make_phase(tmp_path, collector)
-            with patch("pyqenc.phases.chunking.detect_scenes") as detect_mock:
+            with patch("pyqenc.phases.chunking.fast_scoring") as scoring_mock:
                 phase.run()
-                detect_mock.assert_not_called()
+                scoring_mock.assert_not_called()
 
         metrics = _recorded_metrics(tmp_path, run)
         assert "chunking" not in _top_level_keys(metrics)
@@ -747,13 +762,15 @@ class TestChunkingPhaseTiming:
 
         Validates: Requirements 6.4, 6.5
         """
-        from pyqenc.models import SceneBoundary
+        from pyqenc.phases.chunking import ScoringResult
 
         collector = NoOpAppMetricsCollector()
         phase     = self._make_phase(tmp_path, collector)
 
-        with patch("pyqenc.phases.chunking.detect_scenes",
-                   return_value=[SceneBoundary(frame=0, timestamp_seconds=0.0)]):
+        with patch("pyqenc.phases.chunking.fast_scoring",
+                   return_value=ScoringResult(
+                       traces=[[2.0] * 640],
+                   )):
             result = phase.run()
 
         assert result is not None

@@ -347,7 +347,7 @@ def _build_args(**overrides: object) -> argparse.Namespace:
     """A minimal namespace carrying only the probed override attributes."""
     defaults: dict[str, object] = {
         "include": None, "exclude": None,
-        "scene_threshold": None, "min_scene_length": None,
+        "chunking_mode": None, "min_scene_length": None,
         "targets": None, "strategies": None, "quality": None,
         "optimize": True, "measure": True, "concurrency": None,
         "sampling": None, "no_visual_hash": False,

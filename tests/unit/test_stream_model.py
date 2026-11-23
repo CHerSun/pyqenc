@@ -365,7 +365,7 @@ class TestSidecarByteIdentity:
                 SceneRecord(timestamp_seconds=584.917, frame=14012),
             ],
             source           = _STUB_FINGERPRINT,
-            scene_threshold  = 0.27,
+            mode             = "fast",
             min_scene_length = 15,
         )
         assert _yaml(_reload(sidecar)) == _yaml(sidecar)

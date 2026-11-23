@@ -53,11 +53,11 @@ class TestCommandSet:
         )
         assert args.targets == "vmaf-med:97"
         assert args.crop == "0,0"
-        assert hasattr(args, "scene_threshold")  # chunking group present
+        assert hasattr(args, "chunking_mode")  # chunking group present
 
     def test_audio_has_no_video_groups(self, tmp_path) -> None:
         args = _pipeline_parser().parse_args(["audio", str(tmp_path / "src.mkv")])
-        for absent in ("crop", "targets", "strategies", "scene_threshold"):
+        for absent in ("crop", "targets", "strategies", "chunking_mode"):
             assert not hasattr(args, absent), absent
 
 
@@ -134,7 +134,7 @@ class TestExtractParserShape:
         """Req 9.5: materialized files are the product — no `--cleanup`;
         no probe is reached — no crop; no plan — no quality args."""
         args = _extract_parser().parse_args(["extract", str(tmp_path / "src.mkv")])
-        for absent in ("cleanup", "crop", "targets", "strategies", "quality", "scene_threshold"):
+        for absent in ("cleanup", "crop", "targets", "strategies", "quality", "chunking_mode"):
             assert not hasattr(args, absent), absent
 
     def test_cleanup_flag_rejected(self, tmp_path) -> None:

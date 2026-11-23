@@ -16,7 +16,7 @@ import os
 from collections.abc import Sequence
 from decimal import Decimal
 from pathlib import Path
-from typing import Annotated, Self
+from typing import Annotated, Literal, Self
 
 import yaml
 from pydantic import (
@@ -199,19 +199,30 @@ class ExtractionConfig(BaseModel):
     exclude: str | None = None
 
 
+ChunkingMode = Literal["fast", "slow"]
+"""The chunking scoring regime: ``fast`` (one decode; the per-frame
+content-score trace feeds the splitter) or ``slow`` (a probe encode plus
+per-frame PSNR/SSIM/bitrate traces, with the content cuts as the base
+layer). The single authority — config and the ``chunking.yaml`` sidecar
+reuse it verbatim."""
+
+
 class ChunkingConfig(BaseModel):
-    """Chunking phase configuration controlling scene detection.
+    """Chunking phase configuration: the scoring regime + the length ruler.
+
+    Everything else the splitter needs is derived from the source itself
+    (local noise scales, outlier significance); the minimum scene length is
+    encoding mechanics, the only user-facing tuning surface.
 
     Attributes:
-        scene_threshold:   Minimum content-change score (0.0–1.0) for the scene
-                           detector to declare a scene boundary. Lower values make
-                           the detector more sensitive.
-        min_scene_length:  Minimum number of frames a scene must contain before it
-                           is eligible to be split off as a separate chunk.
+        mode:             The scoring regime (see :data:`ChunkingMode`).
+        min_scene_length: Hard minimum segment length in FRAMES — the only
+                          length ruler. The splitter stops at statistical
+                          uniformity.
     """
 
-    scene_threshold:  float
-    min_scene_length: int
+    mode:             ChunkingMode = "fast"
+    min_scene_length: int = Field(ge=10)
 
 
 class EncodingConfig(BaseModel):
@@ -482,7 +493,8 @@ class AppConfig(BaseModel):
 
     Attributes:
         extraction:   Stream filter settings for the extraction phase.
-        chunking:     Chunking strategy and scene-detection tuning.
+        chunking:     The chunking scoring regime and the minimum scene
+                      length (frames).
         encoding:     Quality targets, strategies, and encoding tuning.
         optimization: Strategy-selection tuning (tolerance, test basis).
         audio:        Audio processing settings (filter palette, chains, select).

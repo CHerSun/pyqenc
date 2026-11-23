@@ -44,7 +44,7 @@ flowchart LR
 | FFmpeg     | `ffmpeg`, `ffprobe`                     | Encoding, metrics, audio processing, crop detection, stream materialization (`ffmpeg`); video metadata probing, timestamps fallback (`ffprobe`)                                    |
 | MKVToolNix | `mkvmerge`, `mkvextract`, `mkvpropedit` | Chunk concatenation and final MKV assembly (`mkvmerge`); per-frame timestamps (timecodes_v2), chapters and attachments extraction (`mkvextract`); post-merge frame-rate header patch (`mkvpropedit`) |
 
-Python-side dependencies are managed by `pyproject.toml` — notably `scenedetect-headless` for scene detection (which invokes `ffmpeg` internally to decode).
+Python-side dependencies are managed by `pyproject.toml` — notably `scenedetect-headless` for content scoring (which invokes `ffmpeg` internally to decode).
 
 ---
 
@@ -86,7 +86,7 @@ context".
 | **Job** | — | — |
 | **Extraction** | Job | `file.payload` (source), `work_dir`, `config.extraction` (include/exclude) |
 | **Probe** | Job, Extraction | Job: run context (`work_dir`, source); Extraction: stream inventory rows, `timestamps_path` |
-| **Chunking** | Job, Probe | Job: run context (`work_dir`); Probe: `stream` |
+| **Chunking** | Job, Extraction, Probe | Job: run context (`work_dir`, `cleanup`); Extraction: `timestamps_path` (the frame axis: PTS anchoring and the frame count); Probe: `stream` |
 | **Optimization** | Job, Probe, Chunking | Job: run context (`work_dir`, `config`); Probe: `plan`; Chunking: `chunks` |
 | **Encoding** | Job, Probe, Chunking, Optimization | Job: run context (`work_dir`, `force`, `cleanup`); Probe: `plan`, `stream`; Chunking: `chunks`; Optimization: `selected_strategies`, `anchor_targets`, `anchor` |
 | **Audio** | Job, Extraction | Job: run context (`config.audio`, `work_dir`, source); Extraction: audio stream rows |
@@ -221,10 +221,18 @@ run-once).
 ### Chunking
 
 Chunks are timestamp windows over the source's extended video stream
-(`VideoStreamChunk`) — no files are produced. `chunking.yaml` persists the
-detector's scene boundaries; windows derive from them at load time, and each
-chunk's frame count derives from consecutive boundary frames (the counts
-telescope to the source total by construction).
+(`VideoStreamChunk`) — no files are produced. Boundaries come from one
+statistical splitter (`pyqenc.chunking_split` — the causal-Hampel
+descent) fed by a mode-dependent scoring provider (`fast`: the per-frame
+content-score trace from one decode; `slow`: the content trace plus a
+probe encode's per-frame PSNR/SSIM/bitrate traces as extra features) —
+PTS-anchored against the extraction timestamps index. `chunking.yaml`
+persists mode, the minimum scene length (frames), and the boundaries;
+windows derive from them at load time, and each chunk's frame count
+derives from consecutive boundary frames (the counts telescope to the
+source total by construction). The slow mode's probe encode and traces
+are workspace intermediates under `chunking/` (cleanup-swept; never
+persisted in sidecars).
 
 ---
 
@@ -296,7 +304,7 @@ sidecar); per-attempt and per-output sidecars mark pair/output completeness.
 | `job.yaml`            | Source locator + content identity: `{path, source {size, token}}`                             |
 | `extraction.yaml`     | Stream inventory (info slices), chapters presence, source identity key                       |
 | `probe.yaml`          | Frame count, crop, crop provenance, resulting resolution (human-facing, derived `source − crop`), source identity key |
-| `chunking.yaml`       | Scene boundaries + detection-param keys (`scene_threshold`, `min_scene_length`) + identity   |
+| `chunking.yaml`       | Scene boundaries + detection-param keys (`mode`, `min_scene_length`) + identity |
 | `optimization.yaml`   | Per-mode union (tag `mode: fixed\|search`): mode key (fixed quality map / targets) + common keys    |
 |                       | (source, chunk-set, per-strategy args fingerprints, probe facet, sampling) + `summary` rows |
 | `encoding.yaml`       | Replay aggregate: winning-limiter table (empty = no targets) + winners frame totals — no keys  |

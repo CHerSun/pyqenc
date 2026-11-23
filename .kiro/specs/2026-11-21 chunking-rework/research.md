@@ -5,6 +5,21 @@ Research period: 2026-11-13 → 2026-11-21. Sources: a 6.6-min animation short
 ("test2"), plus offline census traces for three more movies (91–128 min).
 Full working record: the research workspace `PLAN.md` (not in the repo).
 
+Status (2026-11-23): this is the record of the research phase, kept as
+written. Three things in it no longer describe the product:
+
+- "The final algorithm" below is the window-mean splitter, which is not
+  implemented. Its fast-mode variant failed its gate run on 2026-11-22
+  and was replaced by the causal-Hampel descent (`algorithm.md`); the
+  window-mean reference is kept in `algorithm-window-mean.md`.
+- The results below (−4.5%, −2.21%) were measured for that splitter with
+  the content detector's cut list as its base layer; they do not transfer
+  to the implemented one.
+- The companion fix this record points to — skipping boundary-frame
+  readings at merge — was retracted on 2026-11-22 (measurement sanctity
+  ruling). The merged-vs-winner consistency invariant in `design.md`
+  replaced it.
+
 ## Motivation
 
 The stock chunking (PySceneDetect `ContentDetector` + linear first-crossing
@@ -109,8 +124,9 @@ everything else derives from the data.
 - Every extra window pays acceptance margins — statistical justification
   must precede every split (wholesale splitting lost +4.4–4.7%).
 - Per-chunk first-frame readings are skipped in per-chunk stats but counted
-  in merged stats → merged minima are chunk-count-biased (see companion
-  fix in the change spec).
+  in merged stats → merged minima are chunk-count-biased. (The companion
+  fix this pointed to was retracted on 2026-11-22; the merged-vs-winner
+  consistency invariant in `design.md` replaced it.)
 
 ## Production bycatches (independent of chunking)
 
@@ -118,4 +134,7 @@ everything else derives from the data.
    the stream inventory → probe reports unknown duration → chunking fatal.
 2. Merged-output min stats count chunk-boundary frames that per-chunk stats
    skip — cross-chunking comparisons of merged minima are invalid until the
-   boundary skip is applied at merge.
+   boundary skip is applied at merge. Corrected 2026-11-22: that skip was
+   retracted — readings are never skipped to make numbers agree; merged
+   minima are held to the merged-vs-winner consistency invariant in
+   `design.md` instead.

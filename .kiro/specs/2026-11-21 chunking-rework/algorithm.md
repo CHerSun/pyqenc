@@ -1,153 +1,163 @@
 # The splitter — algorithm reference
 
-Implementable specification of the validated boundary-selection algorithm.
-Everything here is exactly what ran in the research runs (workspace
-`stat_split.py`), stated without reference to that code. Inputs, outputs,
-constants, formulas, edge cases.
+<!-- markdownlint-disable MD024 -->
+
+- Created: 2026-11-21
+- Completed:
+
+Implementable specification of the boundary-selection algorithm that is
+implemented in `pyqenc/chunking_split.py`: the causal-Hampel descent. One
+splitter for both modes; fast mode feeds it the content score alone,
+slow mode adds the probe encode's traces.
+
+It replaces the two-window splitter this spec started from, which is not
+implemented and is kept in `algorithm-window-mean.md`. Nothing in this
+file reuses that design's values.
 
 ## Inputs
 
-- **Feature traces** (per frame, aligned by frame index over the whole
-  source; from the scoring provider):
-  - fast mode: one trace — the content score per frame;
-  - slow mode: three traces — per-frame PSNR, per-frame SSIM, and
-    `log1p(packet size in bytes)` from the probe encode.
-- **Frame period** `frame_period` = last frame time / (frame count − 1),
-  derived from the traces' own timestamps (NOT a hardcoded fps — sources
-  differ: 23.976, 24.000, ...).
-- **Params**: `min_scene_duration` (hard min, seconds; default 1.0),
-  `target_scene_duration` (seconds; default 15.0).
-- **Seeds** (slow mode only): the base detector's boundary list. Fast mode
-  has no seeds — the tree alone produces every boundary.
-- **PTS index** (`timestamps.txt`, per-frame PTS in ms) for anchoring.
+- **Content trace**: the per-frame content score, from one decode with
+  the detector used purely as a scorer (its cut logic never runs). Frame
+  0 has no predecessor and scores 0.
+- **Extra traces** (slow mode only): per-frame PSNR, SSIM and
+  `log1p(packet size in bytes)` from the probe encode, aligned by frame
+  index with the content trace.
+- **PTS axis**: the per-frame presentation timestamps in seconds, read
+  from the extraction timestamps index. This is the pipeline's frame
+  axis: its length is the frame count, the scorer must deliver one score
+  per indexed frame, and a disagreement with the decoder fails the phase.
+- **`min_scene_length`** (config, frames): the only length ruler.
 
-Derived: `W = max(2, round(min_scene_duration / frame_period))` frames per
-window side. Constant `k = 6.0` (global significance bar; see Rationale).
+Constants (`chunking_split.py`, not config):
 
-## Step 1 — noise scaling (per feature)
+| Constant | Value | Role |
+|---|---|---|
+| `SENSITIVITY` | 4.0 | The significance bar, in Hampel z |
+| `HAMPEL_LOOKBACK` | 12 | Frames before each frame that form its neighborhood |
+| `HAMPEL_SCALE` | 1.4826 | MAD to standard deviation for Gaussian noise |
+| `SCALE_FLOOR` | 1e-9 | Lower clamp on the neighborhood scale |
+| `MIN_CONTENT_SCORE` | 15.0 | Raw content-score floor |
+| `JUMP_HALF_WIDTH` | 3 | Half-width of the centered average |
+| `MIN_JUMP` | 10.0 | Minimum departure from that average |
 
-Sigma of a W-frame MEAN, per feature, from the source itself:
+## Step 1 — significance, computed once for the whole trace
 
-1. Split the trace into consecutive disjoint W-frame windows; take each
-   window's mean.
-2. `sigma = MAD(window_mean_diffs) / 0.6745 / sqrt(2)`, where the diffs are
-   between ADJACENT disjoint windows and MAD is the median absolute
-   deviation (median of |diff| — used directly as the robust scale).
-3. Clamp below at a tiny epsilon (1e-9).
+**Causal Hampel z**, for each frame `i` of a trace:
 
-CRITICAL: sigma must be estimated at the window-mean scale, NOT from
-frame-to-frame diffs. Frame traces are temporally correlated (slow drift);
-frame-diff MAD understates window-mean noise by orders of magnitude and the
-tree then carves noise everywhere (measured: 254 cuts on a 6.6-min source
-vs the correct ~117). This estimator is the entire "self-scaling" property:
-grainy/noisy sources inflate sigma (auto-desensitize), clean sources deflate
-it (auto-sensitize). No per-source tuning exists.
+1. `window` = the 12 frames strictly before `i` (fewer at the start).
+   Frames with fewer than two predecessors score 0.
+2. `median` = `sorted(window)[len(window) // 2]`.
+3. `mad` = the same statistic of `|v − median|` over the window.
+4. `scale` = `max(1.4826 · mad, 1e-9)`; `z_i = |x_i − median| / scale`.
 
-Standard error for a left-vs-right mean comparison:
-`se_f = sigma_f * sqrt(2)`.
+**Content guards** (raw score units, a guard and not a ruler). The
+content feature's z counts only where both hold:
 
-## Step 2 — measure once (sliding, every frame)
+- `x_i ≥ 15`;
+- `jump_i ≥ 10`, with `jump_i = |x_i − mean(x[i−3 .. i+3])|`, the window
+  clipped at the ends.
 
-For every frame index `i` in `[0, n)` (compute via per-feature prefix sums,
-O(n)):
+**Combined significance** = the content feature's guarded z, then the
+element-wise maximum with each extra trace's ungated z.
 
-```
-ml = mean(feature[i-W : i])     # W frames ending just before i
-mr = mean(feature[i : i+W])     # W frames starting at i
-t_f(i) = |ml - mr| / se_f       # per feature f
-```
+Why it is built this way:
 
-Frames nearer than W to either end get t = 0. Combined score
-`score(i) = max_f t_f(i)`; `feat_at(i)` = the argmax feature. Edge cases:
-W wider than the trace → no candidates; a trace shorter than 2W produces no
-boundaries from that feature.
+- The content score is an event signal: one spike per cut, noise
+  elsewhere. The score measures change against the previous frame, so
+  the neighborhood is causal too. A cut is a huge outlier of its own
+  neighborhood; a pan or ramp with history is not, because the median
+  tracks the climb.
+- z is scale-free, so a gradual drift that starts from a flat stretch
+  collapses the MAD and reads as a huge outlier. The jump guard supplies
+  the absolute scale a real cut has and a drift lacks. The centered
+  average may look ahead because it rejects continuity: on a ramp the
+  next frames are already climbing and absorb the peak.
+- A constant neighborhood gives a zero MAD; the floor keeps z finite, and
+  the raw guards are what bound it.
 
-## Step 3 — sorted application (the tree)
+## Step 2 — the descent
 
-1. Order all frames by descending `score`.
-2. Walk the order; stop at the first `score < k`.
-3. For each candidate frame `i`: position `t = placed(i)` (Step 4); accept
-   iff every existing boundary is ≥ `min_scene_duration` away from `t`
-   (checked against current accepted set + seeds); append.
+1. **Candidates**: every frame with significance ≥ 4, ordered by content
+   score descending; equal scores keep the lower frame first.
+2. Start with one chunk, the whole trace. Take a chunk `[start, end)`:
+   the first candidate `c` in that order with
+   `start + L ≤ c < end − L` (`L = min_scene_length`) splits it into
+   `[start, c)` and `[c, end)`; both are processed the same way. A chunk
+   with no such candidate is terminal and stays whole at any length.
 
-This is the entire tree: the sort order IS the tree (strongest split first,
-min-scene legality). Properties (both verified live):
-- **Nested in k**: the per-candidate score is k-independent; lowering k
-  only admits more cuts inside existing segments — boundaries never move
-  or vanish (the stability requirement).
-- **Readings never go stale**: windows span only ±W = ±min_scene, and
-  legality forbids cuts closer than min_scene, so any surviving candidate's
-  windows never contain a neighbor's boundary. No re-measurement is ever
-  needed when the tree deepens.
+There is no target-length pass and no forced split: a segment is split
+only where a frame clears the significance bar.
 
-## Step 4 — placement (firing feature)
+Properties:
 
-`placed(i)`: within `[i-W, i+W]`, take the frame maximizing
-`t_{feat_at(i)}` (the feature that FIRED at i), return its timestamp.
-Positioning follows the deciding feature, not whichever feature spikes
-highest at the chosen frame.
+- Every segment holds at least `L` frames, and each split leaves at least
+  `L` in both children, so the descent terminates.
+- The significance is computed once for the whole trace. That is exact
+  for every legal candidate only while the lookback (12) and the jump
+  half-width (3) do not exceed `min_scene_length`: a candidate at least
+  `L` frames from its chunk's start never looks past that start. The
+  default 15 satisfies it; a smaller configured minimum would make
+  whole-trace and per-chunk values differ, and whole-trace is the
+  definition.
+- Not nested by construction: candidates are offered by content score, so
+  a looser bar can let a stronger-raw candidate take the place of the
+  frame that split a chunk before. Measured on the reference source it
+  does not happen — tightening either setting only removes boundaries
+  and loosening adds none (bar 2 → 8: 115 → 113; minimum 12 → 24 frames:
+  115 → 110).
 
-## Step 5 — target-duration pass (floor-gated descent)
+## Step 3 — boundaries and anchoring
 
-Repeat until no segment exceeds `target_scene_duration`:
+- A boundary is the exact frame that fired. Its timestamp is that
+  frame's entry in the PTS axis, taken exactly — never `frame × period`.
+  On a millisecond-quantized source a grid timestamp can sit above the
+  real PTS and let the boundary frame slip into the predecessor's window,
+  or one millisecond below it and pull the previous frame into the
+  successor. Both break frame preservation. This rule is inherited from
+  the research and unchanged.
+- The splitter returns interior boundaries only; the phase prepends the
+  stream start. No interior boundary means the whole video is one chunk.
+- A trace shorter than `2 · min_scene_length`, or one whose length
+  differs from the PTS axis, yields no boundaries.
 
-1. For each over-long segment `[a, b)` (bounded by current boundaries):
-   candidates = frames with `score > 0` inside
-   `[a + min_scene, b - min_scene]`.
-2. `best` = the candidate with max score; `m` = candidate count.
-3. **Floor**: `sqrt(2 * ln(m))` for m > 1 else 0. If `score(best) < floor`,
-   the segment is STATISTICALLY UNIFORM — leave it whole (memoize the
-   rejection by its `(a, b)` pair; a rejected segment's candidate set never
-   changes).
-4. Else cut at `t = min(max(placed(best), a + min_scene), b - min_scene)`
-   — CLAMP into the segment's min-scene margins. Without the clamp,
-   placement can refine up to W toward an edge, the "split" produces a
-   zero-length child, the over-long key survives, and the loop never
-   terminates (this exact infinite loop happened).
+## Known behavior on the reference source
 
-The floor is an order-statistics bar: the expected maximum of m pure-noise
-t-values is ~√(2 ln m). Beating it means the best point is structure, not
-noise; not beating it means uniform (credits, long takes) — and uniform
-segments gain nothing from splitting (verified: a 92 s visually-confirmed
-single scene had best internal t = 3.34 vs floor 3.92 and was correctly
-left whole; the hard-cap alternative would have diced it into ~7 pieces).
+Validated for fast mode against a full visual inspection (111
+must-break, 5 optional, 8 must-not-break groups): 115 boundaries — all
+111 must-break groups plus 4 optional, none in a must-not-break group,
+none unaccounted for.
 
-## Step 6 — PTS anchoring (mandatory)
+- **Blends**: the boundary is the peak frame. For two three-frame blends
+  that is one frame later than the stock detector, which cuts at the
+  first frame over its threshold (1506 against 1505, 8288 against 8287).
+  Whether to cut at the first frame of the event instead is an open
+  decision.
+- **Blind to encoding-only transitions**: a movement-to-grain transition
+  near 11.7 s, and the 39.5 s mixed segment 05:06–05:45 with its
+  difficulty cliff near 05:15, show no event in the content score and are
+  not cut. The content score is the ceiling for fast mode; these are slow
+  mode's task.
+- **The bar matters at movie scale**: on the 92-min source the bar
+  changes the boundary count (2 → 8: 849 → 804, against 804 for stock
+  chunking), unlike on the short source. At the shipped setting 767 of
+  the stock run's 804 boundaries are reproduced on the exact frame.
 
-Map every boundary frame to its PTS from the source's timestamps index and
-store `timestamp_seconds = pts_ms[frame] / 1000` EXACTLY. Never the
-idealized grid time `frame * frame_period`:
+## Alternative recorded, not adopted
 
-- Grid time > real PTS (ms rounding down): the boundary frame slips into
-  the PREDECESSOR's `-t` window (encode count +1 → frame-preservation
-  invariant fails).
-- PTS − 1 ms: the seek floors into the PREVIOUS frame's slot → successor
-  starts one early (same invariant failure, opposite direction).
-- Exact PTS: the seek's skip test (`pts < ss`) keeps the boundary frame and
-  the predecessor's limit (`pts < limit`) excludes it. Both sides correct.
+A neighbor-gap guard — `x_i − max(x[i−1], x[i+1]) > 10` — with the raw
+floor subsumed gives an identical boundary set on the reference source.
+Not adopted: a two-neighbor gate can swallow a fast blend of about three
+frames that the centered seven-frame average still sees. It is noted at
+`centered_jump` in the module.
 
-Window names render at 3-decimal ms, so differently-anchored timestamps can
-share a name — attempt stores must never be reused across re-anchored
-chunkings (delete by name when re-anchoring).
+## Slow mode — coded, not validated
 
-## Rationale corners
+The same descent with PSNR, SSIM and log-bits as extra traces, entered
+as ungated z. Open points:
 
-- **k = 6**: a multiple-comparisons bar. Per movie we test ~n_frames
-  candidates; at k=4 expect ~10 noise cuts per 150k tests, at k=3 hundreds.
-  k=6 ≈ zero expected false cuts at movie scale. It may later be DERIVED
-  from the effective candidate count (√(2 ln n_eff) ≈ 4.3–5.5) — treat 6 as
-  the conservative validated point; the test2 [6,8) band is where a
-  validation run arbitrates.
-- **Weak-but-real shifts**: never lower k; widen W instead (t grows ~√W for
-  persistent shifts, stays flat for noise).
-- **Known validated results**: short source −4.5% (ultrafast ladder),
-  movie −2.21% at equal per-chunk delivery, floor judgment confirmed by
-  eye on the 92 s case, quality-vs-time curve 2.5× flatter (SSIM deep-dip
-  seconds 50 → 19).
-
-## Fast-mode differences
-
-The identical machinery over ONE trace (content score) with no seeds. The
-content-trace variant was NOT itself a validated scenario (validated trees
-ran on codec traces / hybrid bases) — the implementation gate includes a
-fast-mode validation run on the short source vs stock output.
+- Nothing has been validated: the window-mean splitter's codec-trace
+  results do not transfer to this shape.
+- The extra features carry no raw guard. A nearly flat stretch of a
+  codec trace gives a tiny deviation a large z.
+- The probe's frame rate is derived from the PTS axis where the rest of
+  the pipeline uses the stream's declared fraction.
