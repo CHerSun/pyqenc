@@ -71,7 +71,7 @@ Three seams inside ChunkingPhase:
    - **Descent**: top-down. Each chunk is offered its frames in
      descending content score; the first candidate at least
      `min_scene_length` frames from both chunk edges whose significance
-     (max over features) clears the bar (k = 4) splits it; both children
+     (max over features) clears the bar (k = 3) splits it; both children
      repeat. A chunk with no qualifying candidate is statistically
      uniform and stays whole at any length — there is no target-length
      pass and no forced split.
@@ -94,7 +94,8 @@ Three seams inside ChunkingPhase:
      (`utils/timestamps.py`). Probe packet sizes are ordered by
      presentation timestamp for the same reason.
    - The significance bar and the guards are algorithm constants
-     (`pyqenc/chunking_split.py`), not config.
+     (`pyqenc/chunking_split.py`), not config. The lookback lives in
+     `constants.py` because it is also the config minimum's bound.
 3. **Phase wiring**: ChunkingPhase runs provider → splitter, prepends
    the stream-start boundary, and persists mode + minimum length +
    scenes to `chunking.yaml`. No interior boundaries → the whole video
@@ -112,14 +113,17 @@ average still sees. It is documented at `centered_jump` in the module.
 | key | status | default | meaning |
 |---|---|---|---|
 | `mode` | new | `fast` | `fast` \| `slow` (extensible for future modes) |
-| `min_scene_length` | kept — the pre-rework key and unit (frames); default 24 → 15 | `15` | hard minimum segment length in FRAMES — the only length ruler |
+| `min_scene_length` | kept — the pre-rework key and unit (frames); default 24 → 15; lower bound: the splitter's lookback (`HAMPEL_LOOKBACK`, 12) | `15` | hard minimum segment length in FRAMES — the only length ruler |
 | `scene_threshold` | REMOVED | — | replaced by the statistical significance bar (an algorithm constant) |
 
 The draft's duration-based keys (`min_scene_duration`, 1.0 s, and
 `target_scene_duration`, 15.0 s) were never shipped. Frames were kept
 because the splitter's legality check is a frame count and the value is
 consumed downstream by per-chunk measurement. The target was dropped
-because the descent has no target-length pass in either mode.
+because the descent has no target-length pass in either mode. The
+minimum's lower bound is the splitter's lookback, read from the same
+constant (`HAMPEL_LOOKBACK`): a shorter minimum would let a chunk's
+significance reach into the previous chunk.
 
 The default 15 is the value the fast mode was validated with (boundary
 detection against the full visual inspection). Whether 15-frame chunks
@@ -208,11 +212,78 @@ constants, not config — they are not invalidation keys.
    non-slow suite. The e2e pytest suite still hangs in ffmpeg
    (TODO §114) and was not run; the pipeline run above is the e2e
    evidence.
-5. **Slow mode — not validated.** The draft's replay gate (reproduce the
+5. **Fast mode on the movie source** — one search run with the shipped
+   chunking against the stock-chunking reference at equal settings,
+   sharing its attempts store. RESULT 2026-11-24, at the bar of 4: merged
+   6738.2 against 6795.1 MiB (−0.84%), 132,336 frames preserved; target
+   statistics within 0.03 of stock on the merged output; psnr/ssim/vif
+   minima equal their winner floors exactly. 702 of 839 windows identical
+   to stock's with the same CRF. Two findings: the merged VMAF minimum
+   sits on a chunk's first frame (TODO §171), and the bar of 4 refused
+   stock's cut at 806.875 s (content 31.35, z 3.37), leaving a 20 s
+   window below bar. The user confirmed that cut by eye; the bar was
+   lowered to 3.
+6. **Slow mode — not validated.** The draft's replay gate (reproduce the
    −4.5% ladder set) and the movie-scale A/B (−2.21%) measured the
    retired Welch splitter with the detector cut list as its base; they
    do not transfer to the descent with ungated codec-trace features.
    Slow mode needs its own ground truth and gate.
+7. **Rerun with the bar of 3** on the movie source, same settings and
+   the same shared attempts store. RESULT 2026-11-24: merged 6735.0 MiB
+   (−0.88% against stock, −0.05% against the bar of 4), 132,336 frames
+   preserved; 10 regions changed, 98 s of video, 3.1 MiB less. The
+   window that missed vmaf-min and vif-min at the bar of 4 (13:25–13:45)
+   is split where stock splits it, and both parts pass. The one that
+   missed vmaf-p10 (13:08–13:25) shrinks to a 3.3 s part that still
+   misses it. Merged vif-min is back at stock's value; the other merged
+   statistics are within 0.02 of the bar-4 run. psnr, ssim and vif
+   minima equal their winner floors; the merged VMAF minimum is the
+   same chunk-first frame as above (TODO §171).
+
+## Slow mode — state of the work (2026-11-24)
+
+Coded, not validated, and its method not yet settled.
+
+**As coded** (`slow_scoring` in `phases/chunking.py`): a probe encode
+(h265 ultrafast, fixed CRF, full res, no crop) is measured against the
+source for per-frame PSNR and SSIM; per-packet byte sizes, ordered by
+PTS, give the third trace. All four traces — content first — go through
+the same descent as fast mode: PSNR, SSIM and log-bits enter as ungated
+causal Hampel z, OR-maxed with the guarded content z. The probe encode
+and its traces are workspace intermediates under `chunking/`. It runs
+end to end on the reference sample; nothing more is known about it.
+
+**What the research established for codec traces** (`research.md`,
+`algorithm-window-mean.md`): the probe trio sees what the content score
+cannot — on the short source the movement-to-grain transition near
+11.7 s and the difficulty cliff near 05:15 produce no content event.
+Difficulty (bits) and fragility (PSNR/SSIM) are independent, so all
+three features are needed. The two-window splitter on these traces, on
+the content detector's cut list as its base, measured −4.5% on the
+short source and −2.21% on the movie.
+
+**To settle first — which method:**
+
+- The coded shape: the fast descent with the codec traces as extra
+  features.
+- The two-window splitter on the codec traces, the research-validated
+  reference, on top of the fast-mode boundary set.
+
+The research's slow design used the content detector's cut list as its
+base. That list is used nowhere now; the base is the fast-mode result.
+
+**Known hazards of the coded shape:**
+
+- The extra features have no raw guard: a nearly flat stretch of a codec
+  trace gives a tiny deviation a large z.
+- The probe's frame rate is derived from the PTS axis; the rest of the
+  pipeline passes the stream's declared fraction.
+- The probe costs about real time on the source.
+
+**Ground truth:** the short source's visual marks cover content-visible
+breaks; its codec-only transitions are not yet marked. The validated
+prototype (`stat_split.py`) and the research traces are in the research
+workspace, not in the repo.
 
 ## Design history
 
@@ -242,3 +313,8 @@ constants, not config — they are not invalidation keys.
 - **2026-11-23 — implemented** as specified above. A working-tree
   interim variant (global-z Hampel sorted tree, event-start placement)
   was replaced by it.
+- **2026-11-24 — bar lowered from 4 to 3** after the movie-scale run. In
+  a busy neighborhood the Hampel z of a real cut drops below 4 (stock's
+  cut at 806.875 s: content 31.35, jump 20.4, z 3.37). At 3 the movie
+  source gains 10 boundaries — all content 20–44 and jumps 13–28, four
+  of them stock's own — and the short source is unchanged.

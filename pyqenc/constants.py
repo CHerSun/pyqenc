@@ -49,6 +49,19 @@ the per-chunk sampling override (``effective_sampling``). Tail percentiles
 below this count collapse toward min; the override trades sampling down on
 short chunks rather than let the floor fail."""
 
+HAMPEL_LOOKBACK = 12
+"""Frames before each frame that form its causal Hampel neighborhood in the
+chunking splitter — and the lower bound of the config's
+``chunking.min_scene_length``. The two are tied: a candidate at least
+``min_scene_length`` frames from its chunk's start looks back no further
+than that start only while the lookback does not exceed the minimum. That
+is what lets the splitter compute the significance once for the whole
+trace and still get, for every legal candidate, the value a per-chunk
+calculation would give. The splitter's other window, the centered
+average, is narrower and never binds. About half a second of history at
+cinema frame rates: enough for a stable local scale, short enough to stay
+local."""
+
 # Symbols for log messages
 SUCCESS_SYMBOL_MINOR = "✔"
 """Symbol to indicate successful completion of a minor step, such as an individual chunk attempt."""

@@ -25,16 +25,15 @@ scoring providers, the PTS index, and persistence.
 from collections import deque
 from collections.abc import Sequence
 
+from pyqenc.constants import HAMPEL_LOOKBACK
 from pyqenc.models import SceneBoundary
 
-SENSITIVITY: float = 4.0
+SENSITIVITY: float = 3.0
 """The significance bar (dimensionless z units, algorithm constant — not
-config). A candidate fires when its Hampel z clears this on any feature."""
-
-HAMPEL_LOOKBACK: int = 12
-"""Frames strictly before each frame forming its causal Hampel
-neighborhood (≈0.5 s at cinema frame rates — enough history for a stable
-local scale, short enough to stay local)."""
+config). A candidate fires when its Hampel z clears this on any feature.
+The z is measured against a frame's own neighborhood, so a real cut in
+a busy one (motion keeping every content score high) scores low; the
+bar must stay within their reach."""
 
 HAMPEL_SCALE: float = 1.4826
 """MAD-to-sigma conversion for Gaussian-like noise (1/Φ⁻¹(¾))."""

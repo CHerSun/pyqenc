@@ -128,7 +128,7 @@ Chunks are timestamp windows computed directly from the source — no intermedia
 | Option                      | Description                                                                                                                            | Default              |
 | --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- | -------------------- |
 | `--chunking-mode MODE`      | Scoring regime: `fast` (one decode — the content-score trace) or `slow` (adds a probe encode with per-frame PSNR/SSIM/bitrate traces). | from config (`fast`) |
-| `--min-scene-length FRAMES` | Hard minimum scene length in frames — the only length ruler; the splitter stops at statistical uniformity.                             | from config (`15`)   |
+| `--min-scene-length FRAMES` | Hard minimum scene length in frames, at least 12 — the only length ruler; the splitter stops at statistical uniformity. | from config (`15`)   |
 
 ---
 

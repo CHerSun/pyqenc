@@ -17,7 +17,8 @@ chunking:
                         # statistical splitter; slow = adds a probe encode (h265 ultrafast,
                         # fixed quality, full res) with per-frame PSNR/SSIM/bitrate traces
   min_scene_length: 15  # hard minimum segment length, FRAMES — the only length ruler (the
-                        # splitter stops at statistical uniformity)
+                        # splitter stops at statistical uniformity); at least 12, the
+                        # splitter's lookback, so a chunk is never scored against its neighbor
 
 encoding:
   # Quality targets come as named bundles — target profiles. --targets accepts

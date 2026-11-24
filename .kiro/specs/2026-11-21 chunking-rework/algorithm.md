@@ -26,14 +26,17 @@ file reuses that design's values.
   from the extraction timestamps index. This is the pipeline's frame
   axis: its length is the frame count, the scorer must deliver one score
   per indexed frame, and a disagreement with the decoder fails the phase.
-- **`min_scene_length`** (config, frames): the only length ruler.
+- **`min_scene_length`** (config, frames): the only length ruler. At
+  least the splitter's lookback.
 
-Constants (`chunking_split.py`, not config):
+Constants — algorithm constants, not config. The lookback lives in
+`constants.py` because the config's minimum is bounded by it; the rest
+in `chunking_split.py`:
 
 | Constant | Value | Role |
 |---|---|---|
-| `SENSITIVITY` | 4.0 | The significance bar, in Hampel z |
-| `HAMPEL_LOOKBACK` | 12 | Frames before each frame that form its neighborhood |
+| `SENSITIVITY` | 3.0 | The significance bar, in Hampel z |
+| `HAMPEL_LOOKBACK` | 12 | Frames before each frame that form its neighborhood; also the lower bound of `min_scene_length` |
 | `HAMPEL_SCALE` | 1.4826 | MAD to standard deviation for Gaussian noise |
 | `SCALE_FLOOR` | 1e-9 | Lower clamp on the neighborhood scale |
 | `MIN_CONTENT_SCORE` | 15.0 | Raw content-score floor |
@@ -77,7 +80,7 @@ Why it is built this way:
 
 ## Step 2 — the descent
 
-1. **Candidates**: every frame with significance ≥ 4, ordered by content
+1. **Candidates**: every frame with significance ≥ 3, ordered by content
    score descending; equal scores keep the lower frame first.
 2. Start with one chunk, the whole trace. Take a chunk `[start, end)`:
    the first candidate `c` in that order with
@@ -93,18 +96,17 @@ Properties:
 - Every segment holds at least `L` frames, and each split leaves at least
   `L` in both children, so the descent terminates.
 - The significance is computed once for the whole trace. That is exact
-  for every legal candidate only while the lookback (12) and the jump
-  half-width (3) do not exceed `min_scene_length`: a candidate at least
-  `L` frames from its chunk's start never looks past that start. The
-  default 15 satisfies it; a smaller configured minimum would make
-  whole-trace and per-chunk values differ, and whole-trace is the
-  definition.
+  for every legal candidate because the config's minimum is bounded
+  below by the lookback: a candidate at least `L` frames from its
+  chunk's start never looks past that start. The centered average is
+  narrower and never binds.
 - Not nested by construction: candidates are offered by content score, so
   a looser bar can let a stronger-raw candidate take the place of the
-  frame that split a chunk before. Measured on the reference source it
-  does not happen — tightening either setting only removes boundaries
-  and loosening adds none (bar 2 → 8: 115 → 113; minimum 12 → 24 frames:
-  115 → 110).
+  frame that split a chunk before. On the short source it does not
+  happen — tightening either setting only removes boundaries and
+  loosening adds none (bar 2 → 8: 115 → 113; minimum 12 → 24 frames:
+  115 → 110). On the movie source it does: lowering the bar from 4 to 3
+  added 10 boundaries and relocated 2.
 
 ## Step 3 — boundaries and anchoring
 
@@ -139,8 +141,22 @@ none unaccounted for.
   mode's task.
 - **The bar matters at movie scale**: on the 92-min source the bar
   changes the boundary count (2 → 8: 849 → 804, against 804 for stock
-  chunking), unlike on the short source. At the shipped setting 767 of
-  the stock run's 804 boundaries are reproduced on the exact frame.
+  chunking), unlike on the short source. At the bar of 3 the source
+  gets 846 boundaries and 770 of the stock run's 804 are reproduced on
+  the exact frame. The bar was 4 when the short source was validated;
+  that gives the same 115 there, and 838 on the movie source.
+- **Two qualifying cuts within the minimum length**: the higher raw score
+  wins, even where the other is far more significant. On the movie
+  source at the bar of 3 that moved two cuts onto a second spike 12–15
+  frames later (0:32:25.250 → 0:32:25.750 and 1:21:51.333 →
+  1:21:51.958; the displaced spikes scored z 73 and 29, the winners 3.07
+  and 3.05). Both spots were checked by eye: neither moved cut is a
+  scene change that matters there — people running in front of the
+  camera, and an action scene switching faster than the minimum length.
+  Every window in both regions meets its targets. Ranking the candidates
+  by significance instead was tried offline and not adopted: the short
+  source is unchanged, the movie source gets 11 boundaries at other
+  frames.
 
 ## Alternative recorded, not adopted
 
@@ -153,8 +169,13 @@ frames that the centered seven-frame average still sees. It is noted at
 ## Slow mode — coded, not validated
 
 The same descent with PSNR, SSIM and log-bits as extra traces, entered
-as ungated z. Open points:
+as ungated z. This is the shape the code has; it is not yet the shape
+slow mode will ship with. Open points:
 
+- **Which method** is not settled: this shape, or the two-window
+  splitter on the codec traces that the research validated
+  (`algorithm-window-mean.md`), on top of the fast-mode boundary set.
+  State of the work: `design.md`, "Slow mode — state of the work".
 - Nothing has been validated: the window-mean splitter's codec-trace
   results do not transfer to this shape.
 - The extra features carry no raw guard. A nearly flat stretch of a

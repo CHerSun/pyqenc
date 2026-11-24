@@ -14,6 +14,7 @@ from pydantic import ValidationError
 
 from pyqenc.app_config import ChunkingMode, _deep_merge, load_app_config
 from pyqenc.audio.filters import PeakNormInstance
+from pyqenc.constants import HAMPEL_LOOKBACK
 
 # ---------------------------------------------------------------------------
 # Shared strategies
@@ -737,7 +738,7 @@ class TestAppConfigRoundTrip:
         extraction_include=st.one_of(st.none(), st.text(min_size=1, max_size=30)),
         extraction_exclude=st.one_of(st.none(), st.text(min_size=1, max_size=30)),
         chunking_mode=st.sampled_from(["fast", "slow"]),
-        chunking_min_scene_length=st.integers(min_value=1, max_value=600),
+        chunking_min_scene_length=st.integers(min_value=HAMPEL_LOOKBACK, max_value=600),
     )
     @settings(max_examples=50)
     def test_scalar_fields_survive_round_trip(
@@ -1041,6 +1042,34 @@ class TestOptimizationBasisValidation:
 
         with pytest.raises(ValidationError):
             config.optimization.basis.skip_start = skip_start  # …but sums to ≥ 100
+
+
+class TestChunkingMinSceneLengthBound:
+    """The minimum scene length is bounded below by the splitter's lookback
+    (``HAMPEL_LOOKBACK``) — one constant for both, so they cannot drift apart.
+    """
+
+    def test_happy_path_bundled_default_clears_the_bound(self) -> None:
+        """The bundled default sits at or above the lookback and loads."""
+        assert _BASE_CONFIG.chunking.min_scene_length >= HAMPEL_LOOKBACK
+
+    @given(length=st.integers(min_value=HAMPEL_LOOKBACK, max_value=600))
+    def test_property_length_at_or_above_the_lookback_is_accepted(self, length: int) -> None:
+        config_dict = _BASE_CONFIG.model_dump()
+        config_dict["chunking"]["min_scene_length"] = length
+        assert AppConfig.model_validate(config_dict).chunking.min_scene_length == length
+
+    @given(length=st.integers(min_value=1, max_value=HAMPEL_LOOKBACK - 1))
+    def test_property_length_below_the_lookback_is_rejected(self, length: int) -> None:
+        """Bug prevented: a minimum below the splitter's lookback. The splitter
+        scores each frame against the ``HAMPEL_LOOKBACK`` frames before it,
+        once for the whole trace; with a smaller minimum a legal candidate's
+        neighborhood would reach into the previous chunk, and the whole-trace
+        score would no longer equal the per-chunk one."""
+        config_dict = _BASE_CONFIG.model_dump()
+        config_dict["chunking"]["min_scene_length"] = length
+        with pytest.raises(ValidationError, match="min_scene_length"):
+            AppConfig.model_validate(config_dict)
 
 
 class TestConcurrencyValidation:

@@ -6,7 +6,7 @@ Research period: 2026-11-13 → 2026-11-21. Sources: a 6.6-min animation short
 Full working record: the research workspace `PLAN.md` (not in the repo).
 
 Status (2026-11-23): this is the record of the research phase, kept as
-written. Three things in it no longer describe the product:
+written. Four things in it no longer describe the product:
 
 - "The final algorithm" below is the window-mean splitter, which is not
   implemented. Its fast-mode variant failed its gate run on 2026-11-22
@@ -19,6 +19,9 @@ written. Three things in it no longer describe the product:
   readings at merge — was retracted on 2026-11-22 (measurement sanctity
   ruling). The merged-vs-winner consistency invariant in `design.md`
   replaced it.
+- The content detector's cut list, the "base layer" below, is no longer
+  used anywhere. For slow mode the fast-mode boundary set now plays that
+  role (`design.md`, "Slow mode — state of the work").
 
 ## Motivation
 

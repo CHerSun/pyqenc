@@ -1074,7 +1074,50 @@ For scale — measured on the 92-min source (under machine load): 8.9 s total, t
 
 ---
 
-## Last known = 170
+## 171. A chunk's first frame is never judged by its own search — the merged `vmaf-min` reads low
+
+Per-chunk VMAF statistics skip the session's first reading (the one allowed skip), and a chunk's first frame IS that reading — the search that picks a chunk's quality never sees it. The merged-output session does judge it. Found on test2 (2026-11-24, new chunking against stock chunking).
+
+Where and why:
+
+- Frame 608 (25.333 s) is the first frame of the window 00:00:25.333-00:00:27.000 (40 frames, CRF 19.5). A scene-change frame: content score 1.4 → 21.3, then a decaying blend.
+- Its per-chunk stats pass comfortably — vmaf-min 94.99, vmaf-p10 95.47 against the targets 92.7 and 95.3 — but they are computed on frames 609-647 only.
+- In the merged output frame 608 itself reads VMAF 85.77, a single-frame dip (96.39 before, 95.93 after). libvmaf's features for it: detail loss 0.94 against 0.99 for its neighbors, VIF 1.0 on all scales.
+- It is the merged output's VMAF minimum and the only chunk-first frame of 839 below the vmaf-min target. Everything else is consistent: the psnr/ssim/vif minima equal their winner floors exactly, and the lowest inside-chunk VMAF reading equals the winner floor.
+- Stock chunking shows no dip on the same source only because its window there (22.542-36.667) exhausted at the CRF floor, so this frame was encoded at CRF 6.
+
+Merged VMAF on test2, with and without the chunks' first frames (839 of 132,336 frames = 0.63%):
+
+| Merged reading | all frames | without chunk-first frames | stock run |
+| --- | --- | --- | --- |
+| vmaf-min | 85.77 | 87.72 | 87.72 either way |
+| vmaf-p10 | 95.847 | 95.844 | 95.852 |
+
+The chunks' first frames move the merged `vmaf-min` by 1.96 and the merged `vmaf-p10` by 0.003.
+
+vmaf-p10 on short chunks (minimum scene length 15):
+
+- Chunks of 24 frames or fewer are rare: test1 5 of 116 (4.3%), test2 35 of 839 (4.2%); the median chunk is 65 and 89 frames.
+- There p10 rests on the 2nd-3rd lowest reading (25-47 frames: 3rd-4th; 48-95: 6th-7th).
+- Removing a chunk's worst reading moved its p10 by a point or more in 0 of those 35 chunks (min: 2 of 35); over all lengths 0.3-0.7% for p10 against 2-6% for min.
+- But on short chunks p10 sits close to min — the gap's median is 0.28 points (p90 1.06): one reading of protection, not a broad guard.
+
+What binds the searches today:
+
+- test2: vmaf-min is the tightest statistic in 33 of 839 searches — 16 of them exhaust at the CRF floor because they cannot reach it, 17 pass. vmaf-p10 binds 260 searches.
+- test1: vmaf-min binds 1 of 116 searches, vmaf-p10 binds 46.
+
+Options (user, 2026-11-24) — needs thinking:
+
+1. Report two merged VMAF minimum readings: over all frames, and without the chunks' first frames — both shown, with a short explanation. Nothing is skipped; the second reading is an additional view.
+2. Stop targeting vmaf-min and target vmaf-p10 instead. p10 already binds most searches and is insensitive to the chunks' first frames (0.003). Dropping the vmaf-min target would change only the 33 searches where it binds, the 16 exhausting ones most: today they go to the CRF floor for a target they cannot reach.
+3. Stop skipping a chunk's first reading — NOT AN OPTION: it skews quality too much (already tested). Possible only with a way to tune that one frame and not the whole chunk.
+
+Harness note: the merged-vs-winner consistency check exists only as scratch scripts in the research tmp folder (`check_invariant.py`, `merged_vmaf_min.py`, `first_frame_data.py`); the spec's "the e2e harness checks all four" is not implemented in the repo's tests. A VMAF dip counts as explained only once the low frame is located and shown to be a chunk's first frame.
+
+---
+
+## Last known = 171
 
 Keep this updated, so we can keep continuous numbering even on last todo item deletion.
 Keep this the last entry for easy human updates.

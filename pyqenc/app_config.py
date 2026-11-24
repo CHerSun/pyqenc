@@ -36,6 +36,7 @@ from pyqenc.constants import (
     CONFIG_FILENAME_HOME,
     FILENAME_CONTROL_CHARS,
     FILENAME_FORBIDDEN_CHARS,
+    HAMPEL_LOOKBACK,
 )
 from pyqenc.models import (
     CodecConfig,
@@ -218,11 +219,14 @@ class ChunkingConfig(BaseModel):
         mode:             The scoring regime (see :data:`ChunkingMode`).
         min_scene_length: Hard minimum segment length in FRAMES — the only
                           length ruler. The splitter stops at statistical
-                          uniformity.
+                          uniformity. Never below the splitter's lookback
+                          (:data:`pyqenc.constants.HAMPEL_LOOKBACK`): a
+                          shorter minimum would let a chunk's frames be
+                          scored against its neighbor's.
     """
 
     mode:             ChunkingMode = "fast"
-    min_scene_length: int = Field(ge=10)
+    min_scene_length: int = Field(ge=HAMPEL_LOOKBACK)
 
 
 class EncodingConfig(BaseModel):

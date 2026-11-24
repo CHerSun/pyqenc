@@ -33,6 +33,7 @@ from pyqenc.constants import (
     CONFIG_FILENAME_HOME,
     DEFAULT_SCREENSHOT_COUNT,
     FAILURE_SYMBOL_MAJOR,
+    HAMPEL_LOOKBACK,
     SUCCESS_SYMBOL_MAJOR,
 )
 from pyqenc.models import (
@@ -262,7 +263,8 @@ def _add_chunking_arguments(parser: argparse.ArgumentParser) -> None:
         default=None,
         dest="min_scene_length",
         metavar="FRAMES",
-        help="Hard minimum scene length in frames (default: from config). "
+        help="Hard minimum scene length in frames, at least "
+             f"{HAMPEL_LOOKBACK} (default: from config). "
              "The only length ruler. The splitter stops at statistical "
              "uniformity.",
     )
